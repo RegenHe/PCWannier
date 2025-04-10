@@ -49,18 +49,9 @@ class OneStateData:
         return f"OneStateData(point_matrix={self.mesh}, value_matrix={self.value})"
 
 
-
-def jacobian_triangle(vertices: np.ndarray) -> np.ndarray:
-    x1, y1 = vertices[0]
-    x2, y2 = vertices[1]
-    x3, y3 = vertices[2]
-    jacobian = np.array([[x2 - x1, x3 - x1], [y2 - y1, y3 - y1]])
-    return jacobian
-
 def integrate_over_triangle(vertices: np.ndarray, data_on_triangle: np.ndarray) -> complex:
-    jacobian = jacobian_triangle(vertices)
-    det_jacobian = np.abs(np.linalg.det(jacobian))
-    return np.sum(data_on_triangle) * det_jacobian / 6.0
+    jacobian = np.array([[vertices[1, 0] - vertices[0, 0], vertices[2, 0] - vertices[0, 0]], [vertices[1, 1] - vertices[0, 1], vertices[2, 1] - vertices[0, 1]]])
+    return np.sum(data_on_triangle) * np.abs(np.linalg.det(jacobian)) / 6.0
 
 def integrate_over_mesh(data: OneStateData) -> complex:
     total_integral = 0.0 + 0.0j

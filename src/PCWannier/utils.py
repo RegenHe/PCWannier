@@ -3,8 +3,8 @@ import numpy as np
 
 class Mesh:
     def __init__(self, vertices: np.ndarray, elements: np.ndarray) -> None:
-        self.vertices = vertices
-        self.elements = elements
+        self.vertices: np.ndarray = vertices
+        self.elements: np.ndarray = elements
 
     def __repr__(self) -> str:
         return f"Mesh(vertices={self.vertices}, elements={self.elements})"
@@ -17,3 +17,35 @@ class RawData:
 
     def __repr__(self) -> str:
         return f"RawData(point_matrix={self.point_matrix}, value_matrix={self.value_matrix})"
+    
+class OneStateData:
+    def __init__(self, name: str, mesh: Mesh, value: np.ndarray) -> None:
+        self.name: str = name
+        self.mesh: Mesh = mesh
+        self.value: np.ndarray = value
+
+    def __repr__(self) -> str:
+        return f"OneStateData(point_matrix={self.mesh}, value_matrix={self.value})"
+
+
+
+def jacobian_triangle(vertices: np.ndarray) -> np.ndarray:
+    x1, y1 = vertices[:, 0]
+    x2, y2 = vertices[:, 1]
+    x3, y3 = vertices[:, 2]
+    jacobian = np.array([[x2 - x1, x3 - x1], [y2 - y1, y3 - y1]])
+    return jacobian
+
+def integrate_over_triangle(vertices: np.ndarray, data_on_triangle: np.ndarray) -> complex:
+    jacobian = jacobian_triangle(vertices)
+    det_jacobian = np.abs(np.linalg.det(jacobian))
+    return np.sum(data_on_triangle) * det_jacobian / 6.0
+
+def integrate_over_mesh(data: OneStateData) -> complex:
+    total_integral = 0.0 + 0.0j
+    for idx in range(len(data.mesh.elements)):
+        element = data.mesh.elements[idx]
+        vertices = data.mesh.vertices[:, element]
+        data_on_triangle = data.value[element]
+        total_integral += integrate_over_triangle(vertices, data_on_triangle)
+    return total_integral

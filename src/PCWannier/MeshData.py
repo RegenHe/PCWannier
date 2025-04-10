@@ -1,6 +1,7 @@
 import numpy as np
+from scipy.spatial import cKDTree
 
-from .utils import Mesh, RawData
+from .Utils import Mesh, RawData
 from typing import List, Tuple
 
 
@@ -116,3 +117,11 @@ def load_comsol_data(filename: str) -> RawData:
     value_matrix = np.array(values, dtype=complex)
     
     return RawData(point_matrix, value_matrix)
+
+def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
+    if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
+        raise RuntimeError("Mesh and data dimensions do not match.")
+
+    tree = cKDTree(mesh.vertices)
+    dists, idxs = tree.query(data.point_matrix, k=1)
+    return idxs, dists

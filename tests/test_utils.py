@@ -1,7 +1,6 @@
-from PCWannier import Utils
-
 import numpy as np
 
+from PCWannier import Utils
 
 class TestUtils:
     def test_integrate_over_mesh(self):
@@ -10,8 +9,8 @@ class TestUtils:
         v3 = np.array([1.0, 1.0])
         v4 = np.array([2.0, 1.0])
 
-        vertices = np.vstack([v1, v2, v3, v4]).T  # 4x2 matrix of vertices
-        elements = np.array([[0, 1, 2], [1, 3, 2]])  # 2x3 matrix of element indices
+        vertices = np.vstack([v1, v2, v3, v4]) + np.random.rand(1, 2)
+        elements = np.array([[0, 1, 2], [1, 3, 2]])
 
         mesh = Utils.Mesh(vertices, elements)
 
@@ -24,3 +23,7 @@ class TestUtils:
         result = Utils.integrate_over_mesh(data)
         assert np.isclose(result.real, 5/3), f"Expected real part 5/3, got {result.real}"
         assert np.isclose(result.imag, 1.5), f"Expected imaginary part 1.5, got {result.imag}"
+
+if __name__ == "__main__":
+    test = TestUtils()
+    test.test_integrate_over_mesh()

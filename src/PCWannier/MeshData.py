@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.spatial import cKDTree
 
+import warnings
+
 from .Utils import Mesh, RawData
 from typing import List, Tuple
 
@@ -94,7 +96,7 @@ def load_comsol_data(filename: str) -> RawData:
     points = []
     values = []
 
-    with open(filename, "r") as f:
+    with open(filename, "r", errors="replace") as f:
         for line in f:
             line_str: str = line.strip()
             if line_str.startswith("%"):
@@ -120,8 +122,11 @@ def load_comsol_data(filename: str) -> RawData:
 
 def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
     if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
-        raise RuntimeError("Mesh and data dimensions do not match.")
+        warnings.warn("Mesh and data dimensions do not match.", RuntimeWarning)
 
     tree = cKDTree(mesh.vertices)
     dists, idxs = tree.query(data.point_matrix, k=1)
+
+    idxs, unique_idx = np.unique(idxs, return_index=True)
+    dists = dists[unique_idx]
     return idxs, dists

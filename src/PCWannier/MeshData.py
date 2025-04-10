@@ -1,9 +1,10 @@
 import numpy as np
 
-from .utils import RawMesh
+from .utils import Mesh, RawData
+from typing import List, Tuple
 
 
-def load_comsol_mesh(filename: str) -> RawMesh:
+def load_comsol_mesh(filename: str) -> Mesh:
     ncoords = 0
     coords = None
     in_vertex_block = False
@@ -86,4 +87,32 @@ def load_comsol_mesh(filename: str) -> RawMesh:
     if coords is None or elements is None:
         raise RuntimeError("Failed to load mesh: coords or elements data is missing.")
 
-    return RawMesh(coords, elements)
+    return Mesh(coords, elements)
+
+def load_comsol_data(filename: str) -> RawData:
+    points = []
+    values = []
+
+    with open(filename, "r") as f:
+        for line in f:
+            line_str: str = line.strip()
+            if line_str.startswith("%"):
+                continue
+
+            if line_str:
+                tokens = line_str.split()
+                if len(tokens) >= 3:
+                    try:
+                        point = [float(token) for token in tokens[0:2]]
+                        value = [complex(token.replace('i', 'j')) for token in tokens[2:]]
+                        points.append(point)
+                        values.append(value)
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to parse data: {line_str}") from e
+                else:
+                    raise RuntimeError(f"Not enough data in the line: {line_str}")
+
+    point_matrix = np.array(points, dtype=float)
+    value_matrix = np.array(values, dtype=complex)
+    
+    return RawData(point_matrix, value_matrix)

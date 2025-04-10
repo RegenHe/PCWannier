@@ -1,38 +1,5 @@
 import numpy as np
-
-class IncarData:
-    def __init__(self):
-        self.name = None
-        self.lattice_params = None
-        self.real_lattice_vectors = None
-        self.reciprocal_lattice_vectors = None
-        self.k_points = None
-        self.dataset_type = None
-        self.dataset_file = None
-        self.dataset_order = None
-        self.dielectric_file = None
-        self.U_file = None
-        self.hopping_file = None
-        self.wannier_file = None
-        self.wannier_figure = None
-
-    def __repr__(self):
-        return (
-            f"IncarData(\n"
-            f"  name={self.name},\n"
-            f"  lattice_params={self.lattice_params},\n"
-            f"  real_lattice_vectors={self.real_lattice_vectors},\n"
-            f"  reciprocal_lattice_vectors={self.reciprocal_lattice_vectors},\n"
-            f"  k_points={self.k_points},\n"
-            f"  dataset_type={self.dataset_type},\n"
-            f"  dataset_file={self.dataset_file},\n"
-            f"  dataset_order={self.dataset_order},\n"
-            f"  dielectric_file={self.dielectric_file},\n"
-            f"  U_file={self.U_file},\n"
-            f"  hopping_file={self.hopping_file},\n"
-            f"  wannier_file={self.wannier_file},\n"
-            f"  wannier_figure={self.wannier_figure}\n)"
-        )
+from .Utils import IncarData
 
 
 class IncarParser:
@@ -43,9 +10,9 @@ class IncarParser:
         value = value.strip()
         if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "hopping_file", "wannier_file", "wannier_figure"]:
             return value
-        elif key == "lattice_params":
+        elif key == "lattice_const":
             return [float(x) for x in value.split()]
-        elif key in ["real_lattice_vectors", "reciprocal_lattice_vectors"]:
+        elif key in ["real_lattice_vectors", "reciprocal_lattice_vectors", "composition_of_b"]:
             parts = value.split(',')
             vectors = []
             for part in parts:
@@ -64,6 +31,13 @@ class IncarParser:
                 else:
                     raise ValueError(f"Invalid k_points range format: '{part}'")
             return ranges
+        elif key in ["band_window", "band_calc"]:
+            tokens = value.split(':')
+            if len(tokens) == 2:
+                start, stop = map(int, tokens)
+                return np.arange(start, stop + 1)
+            else:
+                raise ValueError(f"Invalid band_window format: '{value}'")
         elif key == "dataset_order":
             return [x.strip() for x in value.split(',')]
         else:

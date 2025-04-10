@@ -23,7 +23,17 @@ class TestUtils:
         result = Utils.integrate_over_mesh(data)
         assert np.isclose(result.real, 5/3), f"Expected real part 5/3, got {result.real}"
         assert np.isclose(result.imag, 1.5), f"Expected imaginary part 1.5, got {result.imag}"
+    
+    def test_wannier_tools(self):
+        from PCWannier import IncarParser
+        parser_data = IncarParser.IncarParser("examples/incar")
+        wtools = Utils.wannier_tools()
+        wtools.set_incar(parser_data.parse_file())
+        wtools.preprocess()
+        print(wtools.incar)
+        assert np.array_equal(wtools.incar.reciprocal_lattice_vectors, np.array([[1, 0], [0, 1]])), "Reciprocal lattice vectors are not set correctly."
 
 if __name__ == "__main__":
     test = TestUtils()
     test.test_integrate_over_mesh()
+    test.test_wannier_tools()

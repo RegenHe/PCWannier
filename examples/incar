@@ -1,8 +1,8 @@
 # Model name, any strings is fine.
 name = model
 
-# Your model lattice params on two axes, a1 and a2.
-lattice_params = 1 1
+# Your model lattice constants on two axes, a1 and a2.
+lattice_const = 1 1
 
 # Lattice vectors in the real space, vec(a1) and vec(a2), defined in the Cartesian coordinate system.
 real_lattice_vectors = 1 0, 0 1
@@ -15,12 +15,19 @@ real_lattice_vectors = 1 0, 0 1
 # For example, if the real lattice vectors are set as "1 0, 0 1", then the reciprocal lattice vectors should be 
 # arranged as "0 1, 1 0", meaning that in the dataset the first k-vector is "0 1" and the second is "1 0".
 # To ensure the correct ordering of the reciprocal lattice vectors, you can explicitly specify them as either '0 1, 1 0' or '1 0, 0 1'
-reciprocal_lattice_vectors = 1 0, 0 1
+reciprocal_lattice_vectors = 0 0, 0 0
 
 # k-point lists in the reciprocal space:
 # The first range corresponds to the divisions along the reciprocal lattice vector b1,
 # and the second range corresponds to the divisions along b2.
 k_points = -0.5:0.125:0.5, -0.5:0.125:0.5
+
+
+composition_of_b = 1 0, 0 1
+
+band_window = 1:6
+
+band_calc = 1:6
 
 # The type of the dataset, you shuold generate the dataset file following the tutorial.
 # It can be set to "comsol" until now.
@@ -53,18 +60,24 @@ dataset_order = k2, k1, E
 # the data file name, which contains the dielectric function data.
 dielectric_file = examples/epsilon.txt
 
+# If you want to set M Matrix by yourself, you can set this value to you M Matrix file.
+M_in = false
+
+# The M matrix file name, which contains the M matrix data.
+# If you don't set this value, the M matrix will be saved with the name "M.txt".
+M_file = examples/M.txt
 
 # Output file name, which contains the calculated U matrix.
-# If you dont set this value, U matrix will be saved with the name "U.txt".
+# If you don't set this value, U matrix will be saved with the name "U.txt".
 U_file = examples/U.txt
 
 # The hopping file name, which contains the calculated hopping matrix.
-# If you dont set this value, the hopping matrix will be saved with the name "hopping.txt".
+# If you don't set this value, the hopping matrix will be saved with the name "hopping.txt".
 hopping_file = examples/hopping.txt
 
 # The output file name, which contains the calculated Wannier functions.
 # If you don't set this value, the Wannier functions will be saved with the name "wannier.txt".
 wannier_file = examples/wannier.txt
 
-# If you dont want to save the wannier functions, you can set this value to "false", e.g. "wannier_figure = false".
+# If you don't want to save the wannier functions, you can set this value to "false", e.g. "wannier_figure = false".
 wannier_figure = examples/wannier.png

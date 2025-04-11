@@ -32,11 +32,13 @@ def main():
     epsilon = MeshData.load_comsol_data(global_data.incar.dielectric_file)
 
     idxs, dists = MeshData.match_data_to_mesh(mesh, epsilon)
-    eps = epsilon.value_matrix[idxs]
 
     MeshData.distribute_data(mesh, raw_data)
-    global_data.state_collection.mesh.plot_mesh()
-    global_data.state_collection.plot_field(0, 0, 1)
+    global_data.state_collection.epsilon = epsilon.value_matrix[idxs].flatten()
+    # global_data.state_collection.plot_field(0, 0, 0)
+    # global_data.state_collection.plot_epsilon()
+
+    global_data.state_collection.normalize()
 
 
 if __name__ == '__main__':

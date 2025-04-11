@@ -1,3 +1,5 @@
+import numpy as np
+
 from PCWannier import MeshData
 
 class TestMeshData():
@@ -15,14 +17,14 @@ class TestMeshData():
     
         idxs, dists = MeshData.match_data_to_mesh(mesh, raw_data)
 
-        assert idxs.shape[0] == mesh.vertices.shape[0], "Matched points should match mesh vertices"
-        assert dists.shape[0] == mesh.vertices.shape[0], "Matched dists should match mesh elements"
-        assert min(abs(dists)) <= 1e-6, "Minimum distance should be close to zero"
+        assert len(idxs) == mesh.vertices.shape[0], "Matched points should match mesh vertices"
+        assert len(dists) == mesh.vertices.shape[0], "Matched dists should match mesh elements"
+        assert min(np.abs(dists)) <= 1e-6, "Minimum distance should be close to zero"
 
         epsilon = MeshData.load_comsol_data("examples/epsilon.txt")
 
         idxs, dists = MeshData.match_data_to_mesh(mesh, epsilon)
-        eps = epsilon.value_matrix[idxs]
+        eps = epsilon.value_matrix[idxs].flatten()
 
         assert eps.shape[0] == mesh.vertices.shape[0], "Epsilon values should match mesh vertices"
 

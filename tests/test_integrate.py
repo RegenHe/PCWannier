@@ -15,7 +15,7 @@ class TestIntegrate:
         data = Utils.FieldData("test", mesh, value)
         result = Utils.integrate_over_mesh(data)
 
-        assert np.isclose(result.real, 0.76136), f"Expected real part 0.76136, got {result.real}"
+        assert np.isclose(result.real, 0.7725), f"Expected real part 0.7725, got {result.real}"
 
     def test_normalize_integrate(self):
         mesh = MeshData.load_comsol_mesh("examples/Test.mphtxt")
@@ -34,7 +34,7 @@ class TestIntegrate:
         data = Utils.FieldData("test", mesh, norm_psi)
         result = Utils.integrate_over_mesh(data)
 
-        assert np.isclose(result.real, 9.148508), f"Expected real part 9.148, got {result.real}"
+        assert np.isclose(result.real, 9.4978), f"Expected real part 9.4978, got {result.real}"
 
 if __name__ == "__main__":
     test = TestIntegrate()

@@ -151,11 +151,17 @@ def distribute_data(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
     sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
     shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
 
+    desired_shape = (sizes["k1"], sizes["k2"], sizes["E"])
+
     fields = [[[np.zeros(data.value_matrix.shape[0], dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
     t_fields = np.zeros((data.value_matrix.shape[0],) + shape, dtype=complex)
 
     for p in range(data.value_matrix.shape[0]):
         t_fields[p] = data.value_matrix[p].reshape(shape, order='C')
+
+    desired_order = ["k1", "k2", "E"]
+    indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
+    t_fields = np.transpose(t_fields, axes=(0, indices[0] + 1, indices[1] + 1, indices[2] + 1))
 
     for i in range(shape[0]):
         for j in range(shape[1]):
@@ -164,3 +170,4 @@ def distribute_data(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
     global_data.state_collection.field = fields
     
     print("distribute data finished")
+    return global_data.state_collection

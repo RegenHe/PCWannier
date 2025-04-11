@@ -1,6 +1,7 @@
 import numpy as np
 
 from PCWannier import Utils
+from PCWannier import MeshData
 
 class TestUtils:
     def test_integrate_over_mesh(self):
@@ -32,6 +33,26 @@ class TestUtils:
         wtools.preprocess()
         print(Utils.global_data.incar)
         assert np.array_equal(Utils.global_data.incar.reciprocal_lattice_vectors, np.array([[1, 0], [0, 1]])), "Reciprocal lattice vectors are not set correctly."
+
+    def test_state_collection(self):
+        mesh = MeshData.load_comsol_mesh("examples/Test.mphtxt")
+        raw_data = MeshData.load_comsol_data("examples/Ez.txt")
+
+        epsilon = MeshData.load_comsol_data("examples/epsilon.txt")
+        
+        idxs, dists = MeshData.match_data_to_mesh(mesh, raw_data)
+        raw_data.value_matrix = raw_data.value_matrix[idxs]
+        state_collection = MeshData.distribute_data(mesh, raw_data)
+
+        idxs, dists = MeshData.match_data_to_mesh(mesh, epsilon)
+
+        state_collection.epsilon = epsilon.value_matrix[idxs].flatten()
+
+        state_collection.normalize()
+
+        assert np.isclose(state_collection.normalization[0][0][0], 9.4978), f"Expected normalization 9.4979, got {state_collection.normalization[0][0][0]}"
+        assert np.isclose(state_collection.normalization[0][0][1], 5.2087), f"Expected normalization 5.2087, got {state_collection.normalization[0][0][1]}"
+        assert np.isclose(state_collection.normalization[2][3][1], 4.9224), f"Expected normalization 4.9224, got {state_collection.normalization[2][3][1]}"
 
 if __name__ == "__main__":
     test = TestUtils()

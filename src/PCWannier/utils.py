@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.tri import Triangulation
 
+from concurrent.futures import ProcessPoolExecutor, wait
+from multiprocessing import Manager
+
 class Mesh:
     def __init__(self, vertices: np.ndarray, elements: np.ndarray) -> None:
         self.vertices: np.ndarray = np.array(vertices)
@@ -48,12 +51,14 @@ class FieldData:
 
     def __repr__(self) -> str:
         return f"OneStateData(point_matrix={self.mesh}, value_matrix={self.value})"
-    
+
 class StateCollection:
     def __init__(self, name: str, mesh: Mesh) -> None:
         self.name: str = name
         self.mesh: Mesh = mesh
         self.field: list = []
+        self.epsilon: np.array = None
+        self.normalization: float = 0.0
 
     def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
         while len(self.field) <= i:
@@ -75,11 +80,51 @@ class StateCollection:
 
         return self.field[k][i][j]
     
+    def normalize(self) -> None:
+        if self.field is None:
+            raise ValueError("Field data is not initialized")
+        
+        self.normalization = [[[None for _ in range(len(self.field[0][0]))] for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
+        
+        futures = []
+        result_queue = Manager().Queue()
+        with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
+            for i in range(len(self.field)):
+                for j in range(len(self.field[i])):
+                    for k in range(len(self.field[i][j])):
+                        fd = FieldData(self.name, self.mesh, np.abs(self.field[i][j][k]) ** 2 * self.epsilon)
+                        futures.append(
+                            executor.submit(process_field_data, i, j, k, fd, result_queue)
+                            )
+            wait(futures, return_when='ALL_COMPLETED')
+        
+        while not result_queue.empty():
+            i, j, k, result = result_queue.get()
+            self.normalization[i][j][k] = result
+            print(f"Normalization for field ({i}, {j}, {k}) => {result}")
+    
     def plot_field(self, i: int, j: int, k: int) -> None:
         fig, ax = plt.subplots()
         triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
 
-        plt.tricontourf(triang, np.real(self.field[i][j][k]), levels=14, cmap='RdBu')
+        plt.tricontourf(triang, np.real(self.field[i][j][k]), levels=255, cmap='jet')
+        plt.colorbar(label='Real Part')
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        min_x, max_x = np.min(self.mesh.vertices[:, 0]), np.max(self.mesh.vertices[:, 0])
+        min_y, max_y = np.min(self.mesh.vertices[:, 1]), np.max(self.mesh.vertices[:, 1])
+        
+        margin = 0.1
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
+        plt.show()
+
+    def plot_epsilon(self) -> None:
+        fig, ax = plt.subplots()
+        triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
+
+        plt.tricontourf(triang, np.real(self.epsilon), levels=255, cmap='jet')
         plt.colorbar(label='Real Part')
         ax.set_aspect('equal')
         ax.set_xlabel('X')
@@ -108,6 +153,11 @@ def integrate_over_mesh(data: FieldData) -> complex:
         data_on_triangle = data.value[element]
         total_integral += integrate_over_triangle(vertices, data_on_triangle)
     return total_integral
+
+def process_field_data(i, j, k, fd, result_queue):
+    result = integrate_over_mesh(fd)
+    result_queue.put((i, j, k, result))
+
 
 class IncarData:
     def __init__(self):

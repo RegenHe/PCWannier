@@ -8,7 +8,7 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "hopping_file", "wannier_file", "wannier_figure"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file"]:
             return value
         elif key == "lattice_const":
             return [float(x) for x in value.split()]

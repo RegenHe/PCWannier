@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.tri import Triangulation
 
 class Mesh:
     def __init__(self, vertices: np.ndarray, elements: np.ndarray) -> None:
@@ -39,7 +40,7 @@ class RawData:
     def __repr__(self) -> str:
         return f"RawData(point_matrix={self.point_matrix}, value_matrix={self.value_matrix})"
     
-class OneStateData:
+class FieldData:
     def __init__(self, name: str, mesh: Mesh, value: np.ndarray) -> None:
         self.name: str = name
         self.mesh: Mesh = mesh
@@ -47,13 +48,59 @@ class OneStateData:
 
     def __repr__(self) -> str:
         return f"OneStateData(point_matrix={self.mesh}, value_matrix={self.value})"
+    
+class StateCollection:
+    def __init__(self, name: str, mesh: Mesh) -> None:
+        self.name: str = name
+        self.mesh: Mesh = mesh
+        self.field: list = []
+
+    def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
+        while len(self.field) <= i:
+            self.field.append([])
+        while len(self.field[i]) <= j:
+            self.field[i].append([])
+        while len(self.field[i][j]) <= k:
+            self.field[i][j].append(None)
+        
+        self.field[i][j][k] = state
+
+    def __getitem__(self, index: tuple) -> np.ndarray:
+        if self.field is None:
+            raise IndexError("Field data is not initialized")
+
+        i, j, k = index
+        if not (0 <= i < len(self.mesh) and 0 <= j < len(self.mesh) and 0 <= k < len(self.field)):
+            raise IndexError("Index out of range")
+
+        return self.field[k][i][j]
+    
+    def plot_field(self, i: int, j: int, k: int) -> None:
+        fig, ax = plt.subplots()
+        triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
+
+        plt.tricontourf(triang, np.real(self.field[i][j][k]), levels=14, cmap='RdBu')
+        plt.colorbar(label='Real Part')
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        min_x, max_x = np.min(self.mesh.vertices[:, 0]), np.max(self.mesh.vertices[:, 0])
+        min_y, max_y = np.min(self.mesh.vertices[:, 1]), np.max(self.mesh.vertices[:, 1])
+        
+        margin = 0.1
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
+        plt.show()
+
+    def __repr__(self) -> str:
+        return f"StateCollection(point_matrix={self.mesh}, field_number={len(self.field)})"
 
 
 def integrate_over_triangle(vertices: np.ndarray, data_on_triangle: np.ndarray) -> complex:
     jacobian = np.array([[vertices[1, 0] - vertices[0, 0], vertices[2, 0] - vertices[0, 0]], [vertices[1, 1] - vertices[0, 1], vertices[2, 1] - vertices[0, 1]]])
     return np.sum(data_on_triangle) * np.abs(np.linalg.det(jacobian)) / 6.0
 
-def integrate_over_mesh(data: OneStateData) -> complex:
+def integrate_over_mesh(data: FieldData) -> complex:
     total_integral = 0.0 + 0.0j
     for idx in range(len(data.mesh.elements)):
         element = data.mesh.elements[idx]
@@ -77,6 +124,8 @@ class IncarData:
         self.hopping_file = None
         self.wannier_file = None
         self.wannier_figure = None
+
+        self.mesh_file = None
 
         self.b_vectors = None
         self.composition_of_b = None
@@ -106,44 +155,54 @@ class IncarData:
             f"  wb={self.wb},\n"
             f"  band_window={self.band_window},\n"
             f"  band_calc={self.band_calc}\n"
+            f"  mesh_file={self.mesh_file}\n"
         )
+    
+class GlobalData:
+    def __init__(self) -> None:
+        self.threads = 1
+        self.incar = None
+        self.state_collection = None
+
+global_data = GlobalData()
 
 class wannier_tools:
     def __init__(self) -> None:
         self.init = False
 
     def preprocess(self) -> None:
-        if np.array_equal(self.incar.reciprocal_lattice_vectors, np.array([[0, 0], [0, 0]])):
-            print(self.incar.real_lattice_vectors)
-            v = np.linalg.inv(self.incar.real_lattice_vectors) * np.eye(len(self.incar.real_lattice_vectors))
+        if np.array_equal(global_data.incar.reciprocal_lattice_vectors, np.array([[0, 0], [0, 0]])):
+            v = np.linalg.inv(global_data.incar.real_lattice_vectors) * np.eye(len(global_data.incar.real_lattice_vectors))
             print("reciprocal_lattice_vectors will be set to: ", v)
-            self.incar.reciprocal_lattice_vectors = v
+            global_data.incar.reciprocal_lattice_vectors = v
         
         if self.init is False:
             self.init = True
-            self.incar.composition_of_b = [self.incar.composition_of_b, [[-v for v in sublist] for sublist in self.incar.composition_of_b]]
-            self.incar.composition_of_b = [item for sublist in self.incar.composition_of_b for item in sublist]
+            global_data.incar.composition_of_b = [global_data.incar.composition_of_b, [[-v for v in sublist] for sublist in global_data.incar.composition_of_b]]
+            global_data.incar.composition_of_b = [item for sublist in global_data.incar.composition_of_b for item in sublist]
 
-            self.incar.b_vectors = []
-            for i in range(len(self.incar.composition_of_b)):
-                self.incar.b_vectors.append((self.incar.composition_of_b[i][0] * self.incar.reciprocal_lattice_vectors[0] / len(self.incar.k_points[0]) * 2 * np.pi / self.incar.lattice_const[0]
-                                            + self.incar.composition_of_b[i][1] * self.incar.reciprocal_lattice_vectors[1] / len(self.incar.k_points[1]) * 2 * np.pi / self.incar.lattice_const[1]).tolist())
+            global_data.incar.b_vectors = []
+            for i in range(len(global_data.incar.composition_of_b)):
+                global_data.incar.b_vectors.append((global_data.incar.composition_of_b[i][0] * global_data.incar.reciprocal_lattice_vectors[0] / len(global_data.incar.k_points[0]) * 2 * np.pi / global_data.incar.lattice_const[0]
+                                            + global_data.incar.composition_of_b[i][1] * global_data.incar.reciprocal_lattice_vectors[1] / len(global_data.incar.k_points[1]) * 2 * np.pi / global_data.incar.lattice_const[1]).tolist())
 
             mat_a = np.eye(2).reshape(-1, 1)
-            mat_b = np.zeros((2 ** 2, len(self.incar.composition_of_b)))
+            mat_b = np.zeros((2 ** 2, len(global_data.incar.composition_of_b)))
             for i in range(2):
                 for j in range(2):
-                    for k in range(len(self.incar.composition_of_b)):
-                        mat_b[i * 2 + j][k] = self.incar.b_vectors[k][i] * self.incar.b_vectors[k][j]
+                    for k in range(len(global_data.incar.composition_of_b)):
+                        mat_b[i * 2 + j][k] = global_data.incar.b_vectors[k][i] * global_data.incar.b_vectors[k][j]
             
-            self.incar.wb = np.linalg.pinv(mat_b) @ mat_a
-            self.incar.wb = [item for sublist in self.incar.wb for item in sublist]
+            global_data.incar.wb = np.linalg.pinv(mat_b) @ mat_a
+            global_data.incar.wb = [item for sublist in global_data.incar.wb for item in sublist]
 
     def set_incar(self, incar_data: IncarData) -> None:
-        self.incar = incar_data
+        global_data.incar = incar_data
 
     def neighbor_reciprocal_lattice_vectors(self, lattice_vector_idxs: np.ndarray, direction: int) -> np.ndarray:
         pass
+
+
 
 if __name__ == "__main__":
     from PCWannier import IncarParser
@@ -151,4 +210,4 @@ if __name__ == "__main__":
     wtools = wannier_tools()
     wtools.set_incar(parser_data.parse_file())
     wtools.preprocess()
-    print(wtools.incar)
+    print(global_data.incar)

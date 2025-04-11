@@ -18,7 +18,7 @@ class TestUtils:
             1.0 + 6.0j, 1.0 + 0.0j, 2.0 + 0.0j, 3.0 + 3.0j
         ])
 
-        data = Utils.OneStateData("test", mesh, value)
+        data = Utils.FieldData("test", mesh, value)
 
         result = Utils.integrate_over_mesh(data)
         assert np.isclose(result.real, 5/3), f"Expected real part 5/3, got {result.real}"
@@ -30,8 +30,8 @@ class TestUtils:
         wtools = Utils.wannier_tools()
         wtools.set_incar(parser_data.parse_file())
         wtools.preprocess()
-        print(wtools.incar)
-        assert np.array_equal(wtools.incar.reciprocal_lattice_vectors, np.array([[1, 0], [0, 1]])), "Reciprocal lattice vectors are not set correctly."
+        print(Utils.global_data.incar)
+        assert np.array_equal(Utils.global_data.incar.reciprocal_lattice_vectors, np.array([[1, 0], [0, 1]])), "Reciprocal lattice vectors are not set correctly."
 
 if __name__ == "__main__":
     test = TestUtils()

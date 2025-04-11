@@ -3,7 +3,8 @@ from scipy.spatial import cKDTree
 
 import warnings
 
-from .Utils import Mesh, RawData
+from .Utils import Mesh, RawData, StateCollection
+from .Utils import global_data
 from typing import List, Tuple
 
 
@@ -124,9 +125,42 @@ def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarra
     if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
         warnings.warn("Mesh and data dimensions do not match.", RuntimeWarning)
 
-    tree = cKDTree(mesh.vertices)
-    dists, idxs = tree.query(data.point_matrix, k=1)
+    # tree = cKDTree(mesh.vertices)
+    # dists, idxs = tree.query(data.point_matrix, k=1)
+    tree = cKDTree(data.point_matrix)
+    dists, idxs = tree.query(mesh.vertices, k=1)
 
-    idxs, unique_idx = np.unique(idxs, return_index=True)
-    dists = dists[unique_idx]
-    return idxs, dists
+    seen = set()
+    unique_idx = []
+    unique_dists = []
+    
+    for i, idx in enumerate(idxs):
+        if idx not in seen:
+            seen.add(idx)
+            unique_idx.append(idx)
+            unique_dists.append(dists[i])
+
+    return unique_idx, unique_dists
+
+def distribute_data(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
+    if global_data.incar is None:
+        raise RuntimeError("Incar data is not initialized.")
+    
+    global_data.state_collection = StateCollection(global_data.incar.name, mesh)
+    
+    sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
+    shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
+
+    fields = [[[np.zeros(data.value_matrix.shape[0], dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
+    t_fields = np.zeros((data.value_matrix.shape[0],) + shape, dtype=complex)
+
+    for p in range(data.value_matrix.shape[0]):
+        t_fields[p] = data.value_matrix[p].reshape(shape, order='C')
+
+    for i in range(shape[0]):
+        for j in range(shape[1]):
+            for k in range(shape[2]):
+                fields[i][j][k] = t_fields[:, i, j, k]
+    global_data.state_collection.field = fields
+    
+    print("distribute data finished")

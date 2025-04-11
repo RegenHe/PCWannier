@@ -20,7 +20,7 @@ reciprocal_lattice_vectors = 0 0, 0 0
 # k-point lists in the reciprocal space:
 # The first range corresponds to the divisions along the reciprocal lattice vector b1,
 # and the second range corresponds to the divisions along b2.
-k_points = -0.5:0.125:0.5, -0.5:0.125:0.5
+k_points = -0.5:0.25:0.26, -0.5:0.25:0.26
 
 
 composition_of_b = 1 0, 0 1
@@ -35,6 +35,8 @@ dataset_type = comsol
 
 # The dataset file name, which contains the field data.
 dataset_file = examples/Ez.txt
+
+mesh_file = examples/Test.mphtxt
 
 # The order of the data in the dataset.
 # For example, if the dataset is organized such that the fastest-varying index is E (energy),
@@ -55,7 +57,7 @@ dataset_file = examples/Ez.txt
 # Here, "k2-0" indicates the first index along the k2 direction, "k1-0" the first index along k1,
 # and "E-0" the first index along the energy dimension.
 # Adjust the ordering parameter accordingly to match your data layout.
-dataset_order = k2, k1, E
+dataset_order = k1, k2, E
 
 # the data file name, which contains the dielectric function data.
 dielectric_file = examples/epsilon.txt

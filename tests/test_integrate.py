@@ -12,7 +12,7 @@ class TestIntegrate:
         idxs, dists = MeshData.match_data_to_mesh(mesh, raw_data)
         value = [raw_data.value_matrix[idx][0] for idx in idxs]
 
-        data = Utils.OneStateData("test", mesh, value)
+        data = Utils.FieldData("test", mesh, value)
         result = Utils.integrate_over_mesh(data)
 
         assert np.isclose(result.real, 0.76136), f"Expected real part 0.76136, got {result.real}"
@@ -31,7 +31,7 @@ class TestIntegrate:
 
         norm_psi = np.abs(value) ** 2 * eps
 
-        data = Utils.OneStateData("test", mesh, norm_psi)
+        data = Utils.FieldData("test", mesh, norm_psi)
         result = Utils.integrate_over_mesh(data)
 
         assert np.isclose(result.real, 9.148508), f"Expected real part 9.148, got {result.real}"

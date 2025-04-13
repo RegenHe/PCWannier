@@ -5,6 +5,9 @@ from matplotlib.tri import Triangulation
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
+from .GlobalData import global_data
+from .CallableWrapper import CallableWrapper
+
 class Mesh:
     def __init__(self, vertices: np.ndarray, elements: np.ndarray) -> None:
         self.vertices: np.ndarray = np.array(vertices)
@@ -60,6 +63,9 @@ class StateCollection:
         self.epsilon: np.array = None
         self.normalization: float = 0.0
 
+        self.is_normalized = False
+        self.is_bloch = False
+
     def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
         while len(self.field) <= i:
             self.field.append([])
@@ -74,11 +80,11 @@ class StateCollection:
         if self.field is None:
             raise IndexError("Field data is not initialized")
 
-        i, j, k = index
-        if not (0 <= i < len(self.mesh) and 0 <= j < len(self.mesh) and 0 <= k < len(self.field)):
+        i, j, n = index
+        if not (0 <= i < len(self.mesh) and 0 <= j < len(self.mesh) and 0 <= n < len(self.field)):
             raise IndexError("Index out of range")
 
-        return self.field[k][i][j]
+        return self.field[i][j][n]
     
     def normalize(self) -> None:
         if self.field is None:
@@ -88,26 +94,63 @@ class StateCollection:
         
         futures = []
         result_queue = Manager().Queue()
+        def process_batch(i, j, n_range, result_queue):
+            for n in n_range:
+                fd = FieldData(self.name, self.mesh, np.abs(self.field[i][j][n]) ** 2 * self.epsilon)
+                result_queue.put((i, j, n, integrate_over_mesh(fd)))
+
         with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
             for i in range(len(self.field)):
                 for j in range(len(self.field[i])):
-                    for k in range(len(self.field[i][j])):
-                        fd = FieldData(self.name, self.mesh, np.abs(self.field[i][j][k]) ** 2 * self.epsilon)
-                        futures.append(
-                            executor.submit(process_field_data, i, j, k, fd, result_queue)
-                            )
+                    futures.append(
+                        executor.submit(
+                            CallableWrapper(process_batch), i, j, range(len(self.field[i][j])), result_queue
+                            ))
+            
             wait(futures, return_when='ALL_COMPLETED')
-        
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as e:
+                    raise e
+
         while not result_queue.empty():
-            i, j, k, result = result_queue.get()
-            self.normalization[i][j][k] = result
-            print(f"Normalization for field ({i}, {j}, {k}) => {result}")
+            i, j, n, result = result_queue.get()
+            self.normalization[i][j][n] = result
+            print(f"Normalization for field ({i}, {j}, {n}) => {result}")
+        
+        self.is_normalized = True
+        for i in range(len(self.field)):
+            for j in range(len(self.field[0])):
+                for n in range(len(self.field[0][0])):
+                    if self.normalization[i][j][n] == 0.0:
+                        raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
+                    self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
+        
+    def turn_to_Bloch(self) -> None:
+        if self.field is None:
+            raise ValueError("Field data is not initialized")
+        
+        if self.is_bloch:
+            print("Field data is already in Bloch form")
+            return
+        self.is_bloch = True
+
+        for i in range(len(self.field)):
+            for j in range(len(self.field[0])):
+                for n in range(len(self.field[0][0])):
+                    if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
+                        sign = -1
+                    k = WannierTools.get_kx_ky([i, j])
+                    phrase = np.exp(-1j * sign * np.dot(self.mesh.vertices, k))
+                    self.field[i][j][n] = phrase * self.field[i][j][n]
+        
     
-    def plot_field(self, i: int, j: int, k: int) -> None:
+    def plot_field(self, i: int, j: int, n: int) -> None:
         fig, ax = plt.subplots()
         triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
 
-        plt.tricontourf(triang, np.real(self.field[i][j][k]), levels=255, cmap='jet')
+        plt.tricontourf(triang, np.real(self.field[i][j][n]), levels=255, cmap='jet')
         plt.colorbar(label='Real Part')
         ax.set_aspect('equal')
         ax.set_xlabel('X')
@@ -153,10 +196,6 @@ def integrate_over_mesh(data: FieldData) -> complex:
         data_on_triangle = data.value[element]
         total_integral += integrate_over_triangle(vertices, data_on_triangle)
     return total_integral
-
-def process_field_data(i, j, k, fd, result_queue):
-    result = integrate_over_mesh(fd)
-    result_queue.put((i, j, k, result))
 
 
 class IncarData:
@@ -207,16 +246,9 @@ class IncarData:
             f"  band_calc={self.band_calc}\n"
             f"  mesh_file={self.mesh_file}\n"
         )
-    
-class GlobalData:
-    def __init__(self) -> None:
-        self.threads = 1
-        self.incar = None
-        self.state_collection = None
 
-global_data = GlobalData()
 
-class wannier_tools:
+class WannierTools:
     def __init__(self) -> None:
         self.init = False
 
@@ -249,15 +281,23 @@ class wannier_tools:
     def set_incar(self, incar_data: IncarData) -> None:
         global_data.incar = incar_data
 
-    def neighbor_reciprocal_lattice_vectors(self, lattice_vector_idxs: np.ndarray, direction: int) -> np.ndarray:
-        pass
-
+    @staticmethod
+    def neighbor_reciprocal_lattice_vectors(k: list, direction: int) -> np.ndarray:
+        n_k1_idx = int(np.mod(k[0] + global_data.incar.composition_of_b[direction][0], len(global_data.incar.k_points[0])))
+        n_k2_idx = int(np.mod(k[1] + global_data.incar.composition_of_b[direction][1], len(global_data.incar.k_points[1])))
+        return [n_k1_idx, n_k2_idx]
+    
+    @staticmethod
+    def get_kx_ky(k: list) -> np.ndarray:
+        kx = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const[0] + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const[1]
+        ky = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const[0] + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const[1]
+        return np.array([kx, ky])
 
 
 if __name__ == "__main__":
     from PCWannier import IncarParser
     parser_data = IncarParser.IncarParser("examples/incar")
-    wtools = wannier_tools()
+    wtools = WannierTools()
     wtools.set_incar(parser_data.parse_file())
     wtools.preprocess()
     print(global_data.incar)

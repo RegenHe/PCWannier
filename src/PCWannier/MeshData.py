@@ -1,11 +1,12 @@
 import numpy as np
 from scipy.spatial import cKDTree
 
+from typing import List, Tuple
 import warnings
 
+from .GlobalData import global_data
 from .Utils import Mesh, RawData, StateCollection
-from .Utils import global_data
-from typing import List, Tuple
+
 
 
 def load_comsol_mesh(filename: str) -> Mesh:
@@ -146,12 +147,10 @@ def distribute_data(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
     if global_data.incar is None:
         raise RuntimeError("Incar data is not initialized.")
     
-    global_data.state_collection = StateCollection(global_data.incar.name, mesh)
+    global_data.state_collection = StateCollection("psi", mesh)
     
     sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
     shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
-
-    desired_shape = (sizes["k1"], sizes["k2"], sizes["E"])
 
     fields = [[[np.zeros(data.value_matrix.shape[0], dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
     t_fields = np.zeros((data.value_matrix.shape[0],) + shape, dtype=complex)

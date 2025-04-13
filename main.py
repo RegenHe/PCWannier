@@ -3,9 +3,10 @@
 import argparse
 
 from PCWannier.Utils import global_data
-from PCWannier.Utils import wannier_tools
+from PCWannier.Utils import WannierTools
 from PCWannier.IncarParser import IncarParser
 import PCWannier.MeshData as MeshData
+import PCWannier.MSet as MSet
 
 def parse_args():
     parser = argparse.ArgumentParser(description="PCWannier v0.1.0")
@@ -18,7 +19,7 @@ def main():
     global_data.threads = args.threads
     print(f"Running with {args.threads} threads")
     parser = IncarParser(args.input)
-    wtools = wannier_tools()
+    wtools = WannierTools()
     wtools.set_incar(parser.parse_file())
     wtools.preprocess()
     print(global_data.incar)
@@ -40,6 +41,10 @@ def main():
 
     global_data.state_collection.normalize()
 
+    global_data.state_collection.turn_to_Bloch()
+
+    global_data.m_set = MSet.MSet()
+    global_data.m_set.init_M0(global_data.state_collection)
 
 if __name__ == '__main__':
     main()

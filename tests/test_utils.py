@@ -28,7 +28,7 @@ class TestUtils:
     def test_wannier_tools(self):
         from PCWannier import IncarParser
         parser_data = IncarParser.IncarParser("examples/incar")
-        wtools = Utils.wannier_tools()
+        wtools = Utils.WannierTools()
         wtools.set_incar(parser_data.parse_file())
         wtools.preprocess()
         print(Utils.global_data.incar)
@@ -53,8 +53,21 @@ class TestUtils:
         assert np.isclose(state_collection.normalization[0][0][0], 9.4978), f"Expected normalization 9.4979, got {state_collection.normalization[0][0][0]}"
         assert np.isclose(state_collection.normalization[0][0][1], 5.2087), f"Expected normalization 5.2087, got {state_collection.normalization[0][0][1]}"
         assert np.isclose(state_collection.normalization[2][3][1], 4.9224), f"Expected normalization 4.9224, got {state_collection.normalization[2][3][1]}"
+    
+    def test_neighbor_reciprocal_lattice_vectors(self):
+        from PCWannier import IncarParser
+        parser_data = IncarParser.IncarParser("examples/incar")
+        wtools = Utils.WannierTools()
+        wtools.set_incar(parser_data.parse_file())
+        wtools.preprocess()
+
+        assert np.array_equal(wtools.neighbor_reciprocal_lattice_vectors([1, 1], 0), np.array([2, 1])), "neighbor_reciprocal_lattice_vectors functions are not set correctly."
+        assert np.array_equal(wtools.neighbor_reciprocal_lattice_vectors([1, 2], 1), np.array([1, 3])), "neighbor_reciprocal_lattice_vectors functions are not set correctly."
+        assert np.array_equal(wtools.neighbor_reciprocal_lattice_vectors([3, 3], 0), np.array([0, 3])), "neighbor_reciprocal_lattice_vectors functions are not set correctly."
 
 if __name__ == "__main__":
     test = TestUtils()
     test.test_integrate_over_mesh()
     test.test_wannier_tools()
+    test.test_neighbor_reciprocal_lattice_vectors()
+    # test.test_state_collection()

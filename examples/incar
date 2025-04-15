@@ -1,7 +1,7 @@
 # Model name, any strings is fine.
 name = model
 
-# Your model lattice constants on two axes, a1 and a2.
+# Lattice constants on two axes, a1 and a2 in unit of [m].
 lattice_const = 1 1
 
 # Lattice vectors in the real space, vec(a1) and vec(a2), defined in the Cartesian coordinate system.
@@ -62,7 +62,7 @@ dataset_order = k1, k2, E
 # the data file name, which contains the dielectric function data.
 dielectric_file = examples/epsilon.txt
 
-# If you want to set M Matrix by yourself, you can set this value to you M Matrix file.
+# If you want to set M Matrix by yourself, you can set this value to your M Matrix file.
 M_in = false
 
 # The M matrix file name, which contains the M matrix data.

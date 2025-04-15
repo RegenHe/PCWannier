@@ -12,5 +12,12 @@ class GlobalData:
         self.state_collection = None
 
         self.m_set = None
+    
+    def init(self):
+        self.threads = 1
+        self.incar = None
+        self.state_collection = None
+
+        self.m_set = None
 
 global_data = GlobalData()

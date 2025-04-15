@@ -1,6 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.tri import Triangulation
+from scipy.spatial import cKDTree
+
+import copy
+
+from typing import List, Tuple
 
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
@@ -9,9 +14,16 @@ from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
 
 class Mesh:
-    def __init__(self, vertices: np.ndarray, elements: np.ndarray) -> None:
+    def __init__(self, vertices: np.ndarray, elements: np.ndarray, edge: np.ndarray=None) -> None:
         self.vertices: np.ndarray = np.array(vertices)
         self.elements: np.ndarray = np.array(elements)
+
+        self.edge: np.ndarray = np.array(edge)
+        # self.edge_index: np.ndarray = np.unique(self.edge.flatten())
+
+        tree = cKDTree(self.vertices)
+        dists, idxs = tree.query(self.vertices, k=2)
+        self.mindist = np.min(dists[:, 1])
 
     def __repr__(self) -> str:
         return f"Mesh(vertices={self.vertices}, elements={self.elements})"
@@ -24,9 +36,13 @@ class Mesh:
             triangle = plt.Polygon(triangle_vertices, edgecolor='black', fill=None)
             ax.add_patch(triangle)
 
-            ax.set_aspect('equal')
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
+        for line in self.edge:
+            point1, point2 = self.vertices[line[0]], self.vertices[line[1]]
+            ax.plot([point1[0], point2[0]], [point1[1], point2[1]], color='red', linewidth=2)
+
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
         
         min_x, max_x = np.min(self.vertices[:, 0]), np.max(self.vertices[:, 0])
         min_y, max_y = np.min(self.vertices[:, 1]), np.max(self.vertices[:, 1])
@@ -36,6 +52,70 @@ class Mesh:
         ax.set_ylim(min_y - margin, max_y + margin)
 
         plt.show()
+    def extension(self, n: list):
+        if n[0] < 1 or n[1] < 1:
+            raise ValueError("n must be greater than 1")
+        if len(self.vertices) == 0:
+            raise ValueError("Mesh must be initialized")
+        
+        original_vertices = self.vertices.copy()
+        original_elements = self.elements.copy()
+
+        # TODO: using the edge to find the same vertices
+        # original_index = self.edge_index.copy()
+        
+        for i in range(n[0]):
+            for j in range(n[1]):
+                if i == 0 and j == 0:
+                    continue
+                offset_x = global_data.incar.real_lattice_vectors[0][0] * i + global_data.incar.real_lattice_vectors[1][0] * j
+                offset_y = global_data.incar.real_lattice_vectors[0][1] * i + global_data.incar.real_lattice_vectors[1][1] * j
+
+                new_elements = original_elements + np.max(self.elements) + 1
+                # new_vertices = original_vertices + np.array([offset_x + 1e-3 * i, offset_y + 1e-3 * j])
+                new_vertices = original_vertices + np.array([offset_x, offset_y])
+                vertex_idx_in_new_vertices, vertex_idx_in_vertices = self.match(new_vertices, self.vertices)
+                for k in range(len(vertex_idx_in_new_vertices)):
+                    new_elements[new_elements == (vertex_idx_in_new_vertices[k] + np.max(self.elements) + 1)] = vertex_idx_in_vertices[k]
+                
+                self.elements = np.vstack((self.elements, new_elements))
+                self.vertices = np.vstack((self.vertices, new_vertices))
+                self.rebuild_index()
+
+    def match(self, new_vertices, vertices) -> Tuple[np.ndarray, np.ndarray]:
+        tree = cKDTree(new_vertices)
+        dists, idxs = tree.query(vertices, k=1)
+        vertex_idx_in_vertices = np.where(dists < self.mindist * 0.5)[0]
+
+        vertex_idx_in_new_vertices = []
+        if vertex_idx_in_vertices.size > 0:
+                t_tree = cKDTree(new_vertices)
+                for i in vertex_idx_in_vertices:
+                    t_dists, t_idxs = t_tree.query(vertices[i], k=1)
+                    vertex_idx_in_new_vertices.append(t_idxs)
+        else:
+            Warning(f"No points found")
+
+        return np.array(vertex_idx_in_new_vertices), vertex_idx_in_vertices
+    
+    def rebuild_index(self) -> None:
+        used_indices = set(self.elements.flatten())
+        
+        new_vertices = [self.vertices[i] for i in sorted(used_indices)]
+        new_vertices = np.array(new_vertices)
+        
+        old_to_new_index = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted(used_indices))}
+        
+        new_elements = []
+        for element in self.elements:
+            new_element = [old_to_new_index[idx] for idx in element]
+            new_elements.append(new_element)
+        
+        self.vertices = new_vertices
+        self.elements = np.array(new_elements)
+    
+    def __deepcopy__(self, memo=None):
+        return Mesh(copy.deepcopy(self.vertices, memo), copy.deepcopy(self.elements, memo), copy.deepcopy(self.edge, memo))
 
 
 class RawData:

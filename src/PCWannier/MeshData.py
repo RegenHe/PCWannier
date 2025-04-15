@@ -15,11 +15,16 @@ def load_comsol_mesh(filename: str) -> Mesh:
     in_vertex_block = False
 
     nelems = 0
-    in_elems_block = False
+    in_block = False
+
     lines_read = 0
     elements = None
 
     tri_elements_block = False
+
+    ndege = 0
+    edg_elements = None
+    edg_elements_block = False
 
     with open(filename, "r") as f:
         for line in f:
@@ -53,6 +58,41 @@ def load_comsol_mesh(filename: str) -> Mesh:
                 else:
                     in_vertex_block = False
 
+            if line_str.startswith("3 edg"):
+                edg_elements_block = True
+                continue
+            if "number of elements" in line_str and edg_elements_block:
+                tokens = line_str.split()
+                if len(tokens) >= 1:
+                    try:
+                        ndege = int(tokens[0])
+                        edg_elements = np.empty((ndege, 2), dtype=int)
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to parse the number of elements: {line_str}") from e
+                continue
+
+            if line_str.startswith("# Elements") and (edg_elements_block or tri_elements_block):
+                in_block = True
+                lines_read = 0
+                continue
+
+            if in_block and edg_elements_block and line_str:
+                if lines_read < ndege:
+                    tokens = line_str.split()
+                    if len(tokens) >= 2:
+                        try:
+                            edg_elements[lines_read, 0] = int(tokens[0])
+                            edg_elements[lines_read, 1] = int(tokens[1])
+                        except Exception as e:
+                            raise RuntimeError(f"Failed to parse edge indices: {line_str}") from e
+                    else:
+                        raise RuntimeError(f"Not enough integers in the line: {line_str}")
+                    lines_read += 1
+                else:
+                    in_block = False
+                    edg_elements_block = False
+
+
             if line_str.startswith("3 tri"):
                 tri_elements_block = True
                 continue
@@ -67,12 +107,7 @@ def load_comsol_mesh(filename: str) -> Mesh:
                         raise RuntimeError(f"Failed to parse the number of elements: {line_str}") from e
                 continue
 
-            if line_str.startswith("# Elements"):
-                in_elems_block = True
-                lines_read = 0
-                continue
-
-            if in_elems_block and tri_elements_block and line_str:
+            if in_block and tri_elements_block and line_str:
                 if lines_read < nelems:
                     tokens = line_str.split()
                     if len(tokens) >= 3:
@@ -86,13 +121,14 @@ def load_comsol_mesh(filename: str) -> Mesh:
                         raise RuntimeError(f"Not enough integers in the line: {line_str}")
                     lines_read += 1
                 else:
-                    in_elems_block = False
+                    in_block = False
+                    tri_elements_block = False
 
 
     if coords is None or elements is None:
         raise RuntimeError("Failed to load mesh: coords or elements data is missing.")
 
-    return Mesh(coords, elements)
+    return Mesh(coords, elements, edg_elements)
 
 def load_comsol_data(filename: str) -> RawData:
     points = []

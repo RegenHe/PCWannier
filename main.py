@@ -25,6 +25,7 @@ def main():
     print(global_data.incar)
 
     mesh = MeshData.load_comsol_mesh(global_data.incar.mesh_file)
+    mesh.plot_mesh()
     raw_data = MeshData.load_comsol_data(global_data.incar.dataset_file)
 
     idxs, dists = MeshData.match_data_to_mesh(mesh, raw_data)
@@ -34,17 +35,17 @@ def main():
 
     idxs, dists = MeshData.match_data_to_mesh(mesh, epsilon)
 
-    MeshData.distribute_data(mesh, raw_data)
-    global_data.state_collection.epsilon = epsilon.value_matrix[idxs].flatten()
+    # MeshData.distribute_data(mesh, raw_data)
+    # global_data.state_collection.epsilon = epsilon.value_matrix[idxs].flatten()
     # global_data.state_collection.plot_field(0, 0, 0)
     # global_data.state_collection.plot_epsilon()
 
-    global_data.state_collection.normalize()
+    # global_data.state_collection.normalize()
 
-    global_data.state_collection.turn_to_Bloch()
+    # global_data.state_collection.turn_to_Bloch()
 
-    global_data.m_set = MSet.MSet()
-    global_data.m_set.init_M0(global_data.state_collection)
+    # global_data.m_set = MSet.MSet()
+    # global_data.m_set.init_M0(global_data.state_collection)
 
 if __name__ == '__main__':
     main()

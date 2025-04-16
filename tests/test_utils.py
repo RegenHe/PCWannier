@@ -41,8 +41,19 @@ class TestUtils:
         assert np.array_equal(vertex_idx_in_vertices, np.array([0, 2, 3])), "Matching indices are not correct."
 
         mesh.rebuild_index()
-        assert np.array_equal(mesh.vertices, np.array([[0, 0], [1, 0], [0, 1], [2, 2]])), "Elements are not set correctly."
-        assert np.array_equal(mesh.elements, np.array([[0, 1, 2], [1, 2, 3]])), "Elements are not set correctly."
+        assert np.array_equal(np.sort(mesh.vertices.flatten()), np.sort(np.array([[0, 0], [1, 0], [0, 1], [2, 2]]).flatten())), "Elements are not set correctly."
+        assert np.array_equal(np.sort(mesh.elements.flatten()), np.sort(np.array([[0, 1, 2], [1, 2, 3]]).flatten())), "Elements are not set correctly."
+
+        from PCWannier import IncarParser
+        parser_data = IncarParser.IncarParser("examples/incar")
+        wtools = Utils.WannierTools()
+        wtools.set_incar(parser_data.parse_file())
+
+        vertices = np.array([[0, 0], [1, 0], [0, 1], [1, 1]])
+        elements = np.array([[0, 1, 2], [1, 2, 3]])
+        mesh = Utils.Mesh(vertices, elements)
+        space_to_original_mapping = mesh.extension([2, 2])
+        assert np.array_equal(np.sort(np.array(space_to_original_mapping).flatten()), np.sort(np.array([0, 1, 2, 3, 2, 3, 1, 3, 3])))
     
     def test_wannier_tools(self):
         from PCWannier import IncarParser

@@ -10,25 +10,38 @@ from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
+from PCWannier.Timer import Timer, timer
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
 
 class Mesh:
     def __init__(self, vertices: np.ndarray, elements: np.ndarray, edge: np.ndarray=None) -> None:
-        self.vertices: np.ndarray = np.array(vertices)
-        self.elements: np.ndarray = np.array(elements)
-
-        self.edge: np.ndarray = np.array(edge)
+        if vertices is None:
+            self.vertices = None
+            self.mindist = None
+        else:
+            self.vertices: np.ndarray = np.array(vertices)
+            tree = cKDTree(self.vertices)
+            dists, idxs = tree.query(self.vertices, k=2)
+            self.mindist = np.min(dists[:, 1])
+        
+        if elements is None:
+            self.elements = None
+        else:
+            self.elements: np.ndarray = np.array(elements)
+        
+        if edge is None:
+            self.edge = None
+        else:
+            self.edge: np.ndarray = np.array(edge)
         # self.edge_index: np.ndarray = np.unique(self.edge.flatten())
 
-        tree = cKDTree(self.vertices)
-        dists, idxs = tree.query(self.vertices, k=2)
-        self.mindist = np.min(dists[:, 1])
+        
 
     def __repr__(self) -> str:
         return f"Mesh(vertices={self.vertices}, elements={self.elements})"
     
-    def plot_mesh(self) -> None:
+    def plot(self) -> None:
         fig, ax = plt.subplots()
         for element in self.elements:
             triangle_vertices = self.vertices[element]
@@ -36,9 +49,10 @@ class Mesh:
             triangle = plt.Polygon(triangle_vertices, edgecolor='black', fill=None)
             ax.add_patch(triangle)
 
-        for line in self.edge:
-            point1, point2 = self.vertices[line[0]], self.vertices[line[1]]
-            ax.plot([point1[0], point2[0]], [point1[1], point2[1]], color='red', linewidth=2)
+        if self.edge is not None:
+            for line in self.edge:
+                point1, point2 = self.vertices[line[0]], self.vertices[line[1]]
+                ax.plot([point1[0], point2[0]], [point1[1], point2[1]], color='red', linewidth=2)
 
         ax.set_aspect('equal')
         ax.set_xlabel('X')
@@ -52,10 +66,10 @@ class Mesh:
         ax.set_ylim(min_y - margin, max_y + margin)
 
         plt.show()
-    def extension(self, n: list):
+    def extension(self, n: list) -> List:
         if n[0] < 1 or n[1] < 1:
             raise ValueError("n must be greater than 1")
-        if len(self.vertices) == 0:
+        if self.vertices is None:
             raise ValueError("Mesh must be initialized")
         
         original_vertices = self.vertices.copy()
@@ -64,6 +78,9 @@ class Mesh:
         # TODO: using the edge to find the same vertices
         # original_index = self.edge_index.copy()
         
+        index_map = None
+        space_to_original_mapping = list(range(len(original_vertices)))
+
         for i in range(n[0]):
             for j in range(n[1]):
                 if i == 0 and j == 0:
@@ -80,7 +97,15 @@ class Mesh:
                 
                 self.elements = np.vstack((self.elements, new_elements))
                 self.vertices = np.vstack((self.vertices, new_vertices))
-                self.rebuild_index()
+
+                space_to_original_mapping = np.hstack((space_to_original_mapping, np.arange(len(original_vertices))))
+
+                index_map, space_to_original_mapping = self.rebuild_index(space_to_original_mapping)
+        
+        offset_x = global_data.incar.real_lattice_vectors[0][0] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][0] * np.floor((n[1] - 1) / 2)
+        offset_y = global_data.incar.real_lattice_vectors[0][1] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][1] * np.floor((n[1] - 1) / 2)
+        self.vertices = self.vertices - np.array([offset_x, offset_y])
+        return space_to_original_mapping
 
     def match(self, new_vertices, vertices) -> Tuple[np.ndarray, np.ndarray]:
         tree = cKDTree(new_vertices)
@@ -98,13 +123,18 @@ class Mesh:
 
         return np.array(vertex_idx_in_new_vertices), vertex_idx_in_vertices
     
-    def rebuild_index(self) -> None:
+    def rebuild_index(self, space_to_original_mapping=None):
         used_indices = set(self.elements.flatten())
         
         new_vertices = [self.vertices[i] for i in sorted(used_indices)]
         new_vertices = np.array(new_vertices)
-        
+
         old_to_new_index = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted(used_indices))}
+        if space_to_original_mapping is None:
+            space_to_original_mapping = list(range(len(self.vertices)))
+        else:
+            space_to_original_mapping = [space_to_original_mapping[i] for i in sorted(old_to_new_index.keys())]
+        # space_to_original_mapping = list(sorted(used_indices))
         
         new_elements = []
         for element in self.elements:
@@ -113,6 +143,8 @@ class Mesh:
         
         self.vertices = new_vertices
         self.elements = np.array(new_elements)
+
+        return old_to_new_index, space_to_original_mapping
     
     def __deepcopy__(self, memo=None):
         return Mesh(copy.deepcopy(self.vertices, memo), copy.deepcopy(self.elements, memo), copy.deepcopy(self.edge, memo))
@@ -146,6 +178,9 @@ class StateCollection:
         self.is_normalized = False
         self.is_bloch = False
 
+        self.extention_mesh = None
+        self.space_to_original_mapping = None
+
     def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
         while len(self.field) <= i:
             self.field.append([])
@@ -166,6 +201,7 @@ class StateCollection:
 
         return self.field[i][j][n]
     
+    @timer
     def normalize(self) -> None:
         if self.field is None:
             raise ValueError("Field data is not initialized")
@@ -224,6 +260,16 @@ class StateCollection:
                     k = WannierTools.get_kx_ky([i, j])
                     phrase = np.exp(-1j * sign * np.dot(self.mesh.vertices, k))
                     self.field[i][j][n] = phrase * self.field[i][j][n]
+    
+    @timer
+    def extention(self, n: List) -> None:
+        self.extention_mesh = copy.deepcopy(self.mesh)
+        self.space_to_original_mapping = self.extention_mesh.extension(n)
+    
+    def get_extention_field(self, i: int, j: int, n: int) -> List:
+        if self.extention_mesh is None:
+            raise ValueError("The field has not been extended")
+        return [self.field[i][j][n][k] for k in self.space_to_original_mapping]
         
     
     def plot_field(self, i: int, j: int, n: int) -> None:
@@ -237,6 +283,24 @@ class StateCollection:
         ax.set_ylabel('Y')
         min_x, max_x = np.min(self.mesh.vertices[:, 0]), np.max(self.mesh.vertices[:, 0])
         min_y, max_y = np.min(self.mesh.vertices[:, 1]), np.max(self.mesh.vertices[:, 1])
+        
+        margin = 0.1
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
+        plt.show()
+    
+    def plot_extention_field(self, i: int, j: int, n: int) -> None:
+        fig, ax = plt.subplots()
+        triang = Triangulation(self.extention_mesh.vertices[:, 0], self.extention_mesh.vertices[:, 1], self.extention_mesh.elements)
+
+        field = self.get_extention_field(i, j, n)
+        plt.tricontourf(triang, np.real(field), levels=255, cmap='jet')
+        plt.colorbar(label='Real Part')
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        min_x, max_x = np.min(self.extention_mesh.vertices[:, 0]), np.max(self.extention_mesh.vertices[:, 0])
+        min_y, max_y = np.min(self.extention_mesh.vertices[:, 1]), np.max(self.extention_mesh.vertices[:, 1])
         
         margin = 0.1
         ax.set_xlim(min_x - margin, max_x + margin)
@@ -260,6 +324,16 @@ class StateCollection:
         ax.set_ylim(min_y - margin, max_y + margin)
         plt.show()
 
+    def __deepcopy__(self, memo=None):
+        sc = StateCollection(copy.deepcopy(self.name, memo), copy.deepcopy(self.mesh, memo))
+        sc.field = copy.deepcopy(self.field)
+        sc.epsilon = copy.deepcopy(self.epsilon)
+        sc.normalization = copy.deepcopy(self.normalization)
+
+        sc.is_normalized = copy.deepcopy(self.is_normalized)
+        sc.is_bloch = copy.deepcopy(self.is_bloch)
+        return sc
+    
     def __repr__(self) -> str:
         return f"StateCollection(point_matrix={self.mesh}, field_number={len(self.field)})"
 

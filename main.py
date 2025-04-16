@@ -4,6 +4,7 @@ import argparse
 
 from PCWannier.Utils import global_data
 from PCWannier.Utils import WannierTools
+from PCWannier.Timer import Timer, timer
 from PCWannier.IncarParser import IncarParser
 import PCWannier.MeshData as MeshData
 import PCWannier.MSet as MSet
@@ -25,7 +26,7 @@ def main():
     print(global_data.incar)
 
     mesh = MeshData.load_comsol_mesh(global_data.incar.mesh_file)
-    mesh.plot_mesh()
+    # mesh.plot_mesh()
     raw_data = MeshData.load_comsol_data(global_data.incar.dataset_file)
 
     idxs, dists = MeshData.match_data_to_mesh(mesh, raw_data)
@@ -35,14 +36,15 @@ def main():
 
     idxs, dists = MeshData.match_data_to_mesh(mesh, epsilon)
 
-    # MeshData.distribute_data(mesh, raw_data)
-    # global_data.state_collection.epsilon = epsilon.value_matrix[idxs].flatten()
-    # global_data.state_collection.plot_field(0, 0, 0)
-    # global_data.state_collection.plot_epsilon()
+    MeshData.distribute_data(mesh, raw_data)
+    global_data.state_collection.epsilon = epsilon.value_matrix[idxs].flatten()
 
-    # global_data.state_collection.normalize()
+    global_data.state_collection.normalize()
 
-    # global_data.state_collection.turn_to_Bloch()
+    global_data.state_collection.turn_to_Bloch()
+    global_data.state_collection.extention([4, 4])
+    # global_data.state_collection.extention_mesh.plot()
+    global_data.state_collection.plot_extention_field(0, 0, 0)
 
     # global_data.m_set = MSet.MSet()
     # global_data.m_set.init_M0(global_data.state_collection)

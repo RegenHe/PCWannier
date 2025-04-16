@@ -179,7 +179,7 @@ def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarra
 
     return unique_idx, unique_dists
 
-def distribute_data(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
+def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
     if global_data.incar is None:
         raise RuntimeError("Incar data is not initialized.")
     

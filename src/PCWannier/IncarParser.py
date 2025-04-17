@@ -40,16 +40,70 @@ class IncarParser:
                 raise ValueError(f"Invalid band_window format: '{value}'")
         elif key == "dataset_order":
             return [x.strip() for x in value.split(',')]
+        elif key == "projections":
+            projections = []
+            value = value.strip().strip('end').strip()
+            lines = value.splitlines()
+
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if line:
+                    projections_dict = {}
+                    parts = line.split(';')
+
+                    state_list = []
+                    for i in range(len(parts)):
+                        if i == 0:
+                            projections_dict['atom'] = parts[i].strip()
+                        elif i == 1:
+                            if '(' in parts[i].strip() and ')' in parts[i].strip():
+                                coefficient, term = parts[i].split('(')
+                                coefficient = coefficient.strip()
+                                term = term.split(')')[0].strip()
+                                projections_dict['position'] = [float(v.strip()) for v in term.split(',')]
+                            else:
+                                raise ValueError(f"Invalid positon in projections: '{parts[i].strip()}'")
+                        elif i == 2:
+                            projections_dict['xaxis_angluar'] = float(parts[i].strip())
+                        else:
+                            if '(' in parts[i].strip() and ')' in parts[i].strip():
+                                coefficient, term = parts[i].split('(')
+                                coefficient = coefficient.strip()
+                                term = term.split(')')[0].strip().split(',')
+                                state_list.append([int(term[0].strip()), term[1].strip(), float(term[2].strip())])
+                            else:
+                                raise ValueError(f"Invalid states in projections: '{parts[i].strip()}'")
+
+                    projections_dict['states'] = state_list
+                    projections.append(projections_dict)
+
+            return projections
         else:
             return value
 
     def parse_file(self) -> IncarData:
         incar_data = IncarData()
         with open(self.filename, 'r', encoding='utf-8') as f:
+            inside_projections = False
+            projections_data = ''
+
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
+
+                if "projections" in line:
+                    inside_projections = True
+                    continue
+                elif "end" in line and inside_projections:
+                    inside_projections = False
+                    setattr(incar_data, 'projections', self.parse_value('projections', projections_data))
+                    continue
+                
+                if inside_projections:
+                    projections_data += '\n' + line
 
                 if '=' in line:
                     key, value = line.split('=', 1)

@@ -8,6 +8,7 @@ from PCWannier.Timer import Timer, timer
 from PCWannier.IncarParser import IncarParser
 import PCWannier.MeshData as MeshData
 import PCWannier.MSet as MSet
+import PCWannier.StateInitializer as StateInitializer
 
 def parse_args():
     parser = argparse.ArgumentParser(description="PCWannier v0.1.0")
@@ -43,11 +44,14 @@ def main():
 
     global_data.state_collection.turn_to_Bloch()
     global_data.state_collection.extention([4, 4])
-    # global_data.state_collection.extention_mesh.plot()
-    global_data.state_collection.plot_extention_field(0, 0, 0)
 
-    # global_data.m_set = MSet.MSet()
-    # global_data.m_set.init_M0(global_data.state_collection)
+    global_data.m_set = MSet.MSet()
+    global_data.m_set.init_M0(global_data.state_collection)
+
+    global_data.state_initializer = StateInitializer.StateInitializer()
+    global_data.state_initializer.projection()
+    # global_data.state_collection.plot_extention_epsilon()
+    # global_data.state_initializer.iter(1e-6, 100)
 
 if __name__ == '__main__':
     main()

@@ -3,14 +3,17 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
+from PCWannier.Timer import Timer, timer
+
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
-from .Utils import FieldData, StateCollection, WannierTools, integrate_over_mesh
+from .Utils import FieldData, StateCollection, WannierTools
 
 class MSet:
     def __init__(self):
         self.M0 = None
 
+    @timer
     def init_M0(self, state_collection: StateCollection):
         global_data.state_collection.turn_to_Bloch()
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), int(len(global_data.incar.composition_of_b) / 2), len(global_data.incar.band_window)]
@@ -26,7 +29,7 @@ class MSet:
                         n_k1_idx, n_k2_idx = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
                         r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n]
                         fd = FieldData("M0", state_collection.mesh, np.conj(l_psi) * state_collection.epsilon * r_psi)
-                        result_queue.put((i, j, m, n, b, integrate_over_mesh(fd)))
+                        result_queue.put((i, j, m, n, b, WannierTools.integrate_over_mesh(fd)))
 
         with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
             for i in range(shape[0]):

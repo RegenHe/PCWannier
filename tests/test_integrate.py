@@ -13,7 +13,7 @@ class TestIntegrate:
         value = [raw_data.value_matrix[idx][0] for idx in idxs]
 
         data = Utils.FieldData("test", mesh, value)
-        result = Utils.integrate_over_mesh(data)
+        result = Utils.WannierTools.integrate_over_mesh(data)
 
         assert np.isclose(result.real, 0.7725), f"Expected real part 0.7725, got {result.real}"
 
@@ -32,7 +32,7 @@ class TestIntegrate:
         norm_psi = np.abs(value) ** 2 * eps
 
         data = Utils.FieldData("test", mesh, norm_psi)
-        result = Utils.integrate_over_mesh(data)
+        result = Utils.WannierTools.integrate_over_mesh(data)
 
         assert np.isclose(result.real, 9.4978), f"Expected real part 9.4978, got {result.real}"
 

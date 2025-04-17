@@ -36,6 +36,11 @@ class Mesh:
             self.edge: np.ndarray = np.array(edge)
         # self.edge_index: np.ndarray = np.unique(self.edge.flatten())
 
+    def func(self, f, offset=[0, 0]):
+        return [f(p[0] - offset[0], p[1] - offset[1]) for p in self.vertices]
+    
+    def rfunc(self, f, offset=[0, 0], ang=0):
+        return [f(np.sqrt((p[0] - offset[0]) ** 2 + (p[1] - offset[1]) ** 2), np.atan2(p[0] - offset[0], p[1] - offset[1]) - np.radians(ang)) for p in self.vertices]
         
 
     def __repr__(self) -> str:
@@ -162,10 +167,27 @@ class FieldData:
     def __init__(self, name: str, mesh: Mesh, value: np.ndarray) -> None:
         self.name: str = name
         self.mesh: Mesh = mesh
-        self.value: np.ndarray = np.array(value)
+        self.field: np.ndarray = np.array(value)
 
     def __repr__(self) -> str:
-        return f"OneStateData(point_matrix={self.mesh}, value_matrix={self.value})"
+        return f"OneStateData(point_matrix={self.mesh}, value_matrix={self.field})"
+    
+    def plot(self) -> None:
+        fig, ax = plt.subplots()
+        triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
+
+        plt.tricontourf(triang, np.real(self.field), levels=255, cmap='jet')
+        plt.colorbar(label='Real Part')
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        min_x, max_x = np.min(self.mesh.vertices[:, 0]), np.max(self.mesh.vertices[:, 0])
+        min_y, max_y = np.min(self.mesh.vertices[:, 1]), np.max(self.mesh.vertices[:, 1])
+        
+        margin = 0.1
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
+        plt.show()
 
 class StateCollection:
     def __init__(self, name: str, mesh: Mesh) -> None:
@@ -180,6 +202,8 @@ class StateCollection:
 
         self.extention_mesh = None
         self.space_to_original_mapping = None
+
+        self.extention_epsilon: np.array = None
 
     def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
         while len(self.field) <= i:
@@ -213,7 +237,7 @@ class StateCollection:
         def process_batch(i, j, n_range, result_queue):
             for n in n_range:
                 fd = FieldData(self.name, self.mesh, np.abs(self.field[i][j][n]) ** 2 * self.epsilon)
-                result_queue.put((i, j, n, integrate_over_mesh(fd)))
+                result_queue.put((i, j, n, WannierTools.integrate_over_mesh(fd)))
 
         with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
             for i in range(len(self.field)):
@@ -255,21 +279,39 @@ class StateCollection:
         for i in range(len(self.field)):
             for j in range(len(self.field[0])):
                 for n in range(len(self.field[0][0])):
-                    if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
-                        sign = -1
-                    k = WannierTools.get_kx_ky([i, j])
-                    phrase = np.exp(-1j * sign * np.dot(self.mesh.vertices, k))
-                    self.field[i][j][n] = phrase * self.field[i][j][n]
+                    phase = self.get_phase(i, j)
+                    self.field[i][j][n] = phase * self.field[i][j][n]
+    
+    def get_phase(self, i: int, j: int):
+        if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
+            sign = -1
+        k = WannierTools.get_kx_ky([i, j])
+        return np.exp(-1j * sign * np.dot(self.mesh.vertices, k))
+    
+    def get_extention_phase(self, i: int, j: int):
+        if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
+            sign = -1
+        k = WannierTools.get_kx_ky([i, j])
+        return np.exp(-1j * sign * np.dot(self.extention_mesh.vertices, k))
     
     @timer
     def extention(self, n: List) -> None:
         self.extention_mesh = copy.deepcopy(self.mesh)
         self.space_to_original_mapping = self.extention_mesh.extension(n)
+        if self.epsilon is not None:
+            self.get_extention_epsilon()
     
     def get_extention_field(self, i: int, j: int, n: int) -> List:
         if self.extention_mesh is None:
             raise ValueError("The field has not been extended")
         return [self.field[i][j][n][k] for k in self.space_to_original_mapping]
+    
+    def get_extention_epsilon(self) -> List:
+        if self.extention_mesh is None:
+            raise ValueError("The field has not been extended")
+        if self.extention_epsilon is None:
+            self.extention_epsilon = [self.epsilon[k] for k in self.space_to_original_mapping]
+        return self.extention_epsilon
         
     
     def plot_field(self, i: int, j: int, n: int) -> None:
@@ -323,6 +365,23 @@ class StateCollection:
         ax.set_xlim(min_x - margin, max_x + margin)
         ax.set_ylim(min_y - margin, max_y + margin)
         plt.show()
+    
+    def plot_extention_epsilon(self) -> None:
+        fig, ax = plt.subplots()
+        triang = Triangulation(self.extention_mesh.vertices[:, 0], self.extention_mesh.vertices[:, 1], self.extention_mesh.elements)
+
+        plt.tricontourf(triang, np.real(self.extention_epsilon), levels=255, cmap='jet')
+        plt.colorbar(label='Real Part')
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        min_x, max_x = np.min(self.extention_mesh.vertices[:, 0]), np.max(self.extention_mesh.vertices[:, 0])
+        min_y, max_y = np.min(self.extention_mesh.vertices[:, 1]), np.max(self.extention_mesh.vertices[:, 1])
+        
+        margin = 0.1
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
+        plt.show()
 
     def __deepcopy__(self, memo=None):
         sc = StateCollection(copy.deepcopy(self.name, memo), copy.deepcopy(self.mesh, memo))
@@ -337,45 +396,32 @@ class StateCollection:
     def __repr__(self) -> str:
         return f"StateCollection(point_matrix={self.mesh}, field_number={len(self.field)})"
 
-
-def integrate_over_triangle(vertices: np.ndarray, data_on_triangle: np.ndarray) -> complex:
-    jacobian = np.array([[vertices[1, 0] - vertices[0, 0], vertices[2, 0] - vertices[0, 0]], [vertices[1, 1] - vertices[0, 1], vertices[2, 1] - vertices[0, 1]]])
-    return np.sum(data_on_triangle) * np.abs(np.linalg.det(jacobian)) / 6.0
-
-def integrate_over_mesh(data: FieldData) -> complex:
-    total_integral = 0.0 + 0.0j
-    for idx in range(len(data.mesh.elements)):
-        element = data.mesh.elements[idx]
-        vertices = data.mesh.vertices[element, :]
-        data_on_triangle = data.value[element]
-        total_integral += integrate_over_triangle(vertices, data_on_triangle)
-    return total_integral
-
-
 class IncarData:
     def __init__(self):
-        self.name = None
-        self.lattice_const = None
-        self.real_lattice_vectors = None
-        self.reciprocal_lattice_vectors = None
-        self.k_points = None
-        self.dataset_type = None
-        self.dataset_file = None
-        self.dataset_order = None
-        self.dielectric_file = None
-        self.U_file = None
-        self.hopping_file = None
-        self.wannier_file = None
-        self.wannier_figure = None
+        self.name: str = None
+        self.lattice_const: float = None
+        self.real_lattice_vectors: list = None
+        self.reciprocal_lattice_vectors: list = None
+        self.k_points: list = None
+        self.dataset_type: str = None
+        self.dataset_file: str = None
+        self.dataset_order: list = None
+        self.dielectric_file: str = None
+        self.U_file: str = None
+        self.hopping_file: str = None
+        self.wannier_file: str = None
+        self.wannier_figure: str = None
 
-        self.mesh_file = None
+        self.mesh_file: str = None
 
-        self.b_vectors = None
-        self.composition_of_b = None
-        self.wb = None
+        self.b_vectors: list = None
+        self.composition_of_b: list = None
+        self.wb: list = None
 
-        self.band_window = None
-        self.band_calc = None
+        self.band_window: list = None
+        self.band_calc: list = None
+
+        self.projections: list = None
 
     def __repr__(self):
         return (
@@ -392,13 +438,14 @@ class IncarData:
             f"  U_file={self.U_file},\n"
             f"  hopping_file={self.hopping_file},\n"
             f"  wannier_file={self.wannier_file},\n"
-            f"  wannier_figure={self.wannier_figure}\n"
+            f"  wannier_figure={self.wannier_figure},\n"
             f"  b_vectors={self.b_vectors},\n"
-            f"  composition_of_b={self.composition_of_b}\n"
+            f"  composition_of_b={self.composition_of_b},\n"
             f"  wb={self.wb},\n"
             f"  band_window={self.band_window},\n"
-            f"  band_calc={self.band_calc}\n"
-            f"  mesh_file={self.mesh_file}\n"
+            f"  band_calc={self.band_calc},\n"
+            f"  mesh_file={self.mesh_file},\n"
+            f"  projections={self.projections}\n"
         )
 
 
@@ -446,6 +493,21 @@ class WannierTools:
         kx = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const[0] + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const[1]
         ky = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const[0] + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const[1]
         return np.array([kx, ky])
+    
+    @staticmethod
+    def integrate_over_triangle(vertices: np.ndarray, data_on_triangle: np.ndarray) -> complex:
+        jacobian = np.array([[vertices[1, 0] - vertices[0, 0], vertices[2, 0] - vertices[0, 0]], [vertices[1, 1] - vertices[0, 1], vertices[2, 1] - vertices[0, 1]]])
+        return np.sum(data_on_triangle) * np.abs(np.linalg.det(jacobian)) / 6.0
+    
+    @staticmethod
+    def integrate_over_mesh(data: FieldData) -> complex:
+        total_integral = 0.0 + 0.0j
+        for idx in range(len(data.mesh.elements)):
+            element = data.mesh.elements[idx]
+            vertices = data.mesh.vertices[element, :]
+            data_on_triangle = data.field[element]
+            total_integral += WannierTools.integrate_over_triangle(vertices, data_on_triangle)
+        return total_integral
 
 
 if __name__ == "__main__":

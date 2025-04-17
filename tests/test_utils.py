@@ -24,7 +24,7 @@ class TestUtils:
 
         data = Utils.FieldData("test", mesh, value)
 
-        result = Utils.integrate_over_mesh(data)
+        result = Utils.WannierTools.integrate_over_mesh(data)
         assert np.isclose(result.real, 5/3), f"Expected real part 5/3, got {result.real}"
         assert np.isclose(result.imag, 1.5), f"Expected imaginary part 1.5, got {result.imag}"
     

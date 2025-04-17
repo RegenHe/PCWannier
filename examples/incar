@@ -29,6 +29,12 @@ band_window = 1:6
 
 band_calc = 1:6
 
+# site, positon, xaxis angular, (raial, angular/hybrids, zona)
+projections
+a; (0, 0); 0; (1, s, 5); (2, s, 10); (2, px, 10); (2, py, 10); (3, dx2-y2, 20); (3, dxy, 20) 
+# b; (0.5, 0.5); 0; (1, s); (1, px); (1, py); (1, dx2-y2); (1, dxy) 
+end
+
 # The type of the dataset, you shuold generate the dataset file following the tutorial.
 # It can be set to "comsol" until now.
 dataset_type = comsol

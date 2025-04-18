@@ -280,19 +280,19 @@ class StateCollection:
             for j in range(len(self.field[0])):
                 for n in range(len(self.field[0][0])):
                     phase = self.get_phase(i, j)
-                    self.field[i][j][n] = phase * self.field[i][j][n]
+                    self.field[i][j][n] = np.conj(phase) * self.field[i][j][n]
     
     def get_phase(self, i: int, j: int):
         if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
             sign = -1
         k = WannierTools.get_kx_ky([i, j])
-        return np.exp(-1j * sign * np.dot(self.mesh.vertices, k))
+        return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
     
     def get_extention_phase(self, i: int, j: int):
         if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
             sign = -1
         k = WannierTools.get_kx_ky([i, j])
-        return np.exp(-1j * sign * np.dot(self.extention_mesh.vertices, k))
+        return np.exp(1j * sign * np.dot(self.extention_mesh.vertices, k))
     
     @timer
     def extention(self, n: List) -> None:
@@ -304,13 +304,13 @@ class StateCollection:
     def get_extention_field(self, i: int, j: int, n: int) -> List:
         if self.extention_mesh is None:
             raise ValueError("The field has not been extended")
-        return [self.field[i][j][n][k] for k in self.space_to_original_mapping]
+        return np.array([self.field[i][j][n][k] / 4 for k in self.space_to_original_mapping])
     
     def get_extention_epsilon(self) -> List:
         if self.extention_mesh is None:
             raise ValueError("The field has not been extended")
         if self.extention_epsilon is None:
-            self.extention_epsilon = [self.epsilon[k] for k in self.space_to_original_mapping]
+            self.extention_epsilon = np.array([self.epsilon[k] for k in self.space_to_original_mapping])
         return self.extention_epsilon
         
     

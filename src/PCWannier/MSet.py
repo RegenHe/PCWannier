@@ -48,4 +48,11 @@ class MSet:
             i, j, m, n, b, result = result_queue.get()
             self.M0[i, j, b][m, n] = result
         print("M0 initialized")
+    
+    def get_M0(self, i: int, j: int, b: int):
+        if b < len(global_data.incar.composition_of_b) // 2:
+            return self.M0[i, j, b]
+        else:
+            n_k1, n_k2 = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+            return np.conj(self.M0[n_k1, n_k2, b - len(global_data.incar.composition_of_b) // 2]).T
 

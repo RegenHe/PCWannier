@@ -49,7 +49,7 @@ def main():
     global_data.m_set.init_M0(global_data.state_collection)
 
     global_data.state_initializer = StateInitializer.StateInitializer()
-    global_data.state_initializer.projection()
+    global_data.state_initializer.iter(1e-6, 1000)
     # global_data.state_collection.plot_extention_epsilon()
     # global_data.state_initializer.iter(1e-6, 100)
 

@@ -22,9 +22,10 @@ class TestStateInitializer:
         GlobalData.global_data.state_collection.extention([4, 4])
         GlobalData.global_data.state_initializer = StateInitializer.StateInitializer()
         states = GlobalData.global_data.incar.projections[0]
-        f = lambda r, phi: StateInitializer.StateBases.Radial(states['states'][2][0])(r, states['states'][2][2]) * StateInitializer.StateBases.Angular(states['states'][2][1])(phi)
+        f = lambda r, phi: StateInitializer.StateBases.Radial(states['states'][4][0])(r, states['states'][4][2]) * StateInitializer.StateBases.Angular(states['states'][4][1])(phi)
         field = GlobalData.global_data.state_collection.extention_mesh.rfunc(f, states['position'], states['xaxis_angluar'])
         fd = Utils.FieldData('', GlobalData.global_data.state_collection.extention_mesh, field)
+        fd.plot()
 
 if __name__ == "__main__":
     test = TestStateInitializer()

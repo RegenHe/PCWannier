@@ -27,11 +27,11 @@ composition_of_b = 1 0, 0 1
 
 band_window = 1:6
 
-band_calc = 1:6
+band_calc = 1:5
 
 # site, positon, xaxis angular, (raial, angular/hybrids, zona)
 projections
-a; (0, 0); 0; (1, s, 5); (2, s, 10); (2, px, 10); (2, py, 10); (3, dx2-y2, 20); (3, dxy, 20) 
+a; (0, 0); 0; (1, s, 10); (2, px, 30); (2, py, 30); (3, dx2-y2, 50); (3, dxy, 50) 
 # b; (0.5, 0.5); 0; (1, s); (1, px); (1, py); (1, dx2-y2); (1, dxy) 
 end
 

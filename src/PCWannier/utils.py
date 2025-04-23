@@ -468,7 +468,8 @@ class WannierTools:
             for i in range(len(global_data.incar.composition_of_b)):
                 global_data.incar.b_vectors.append((global_data.incar.composition_of_b[i][0] * global_data.incar.reciprocal_lattice_vectors[0] / len(global_data.incar.k_points[0]) * 2 * np.pi / global_data.incar.lattice_const[0]
                                             + global_data.incar.composition_of_b[i][1] * global_data.incar.reciprocal_lattice_vectors[1] / len(global_data.incar.k_points[1]) * 2 * np.pi / global_data.incar.lattice_const[1]).tolist())
-
+                
+            global_data.incar.b_vectors = np.array(global_data.incar.b_vectors)
             mat_a = np.eye(2).reshape(-1, 1)
             mat_b = np.zeros((2 ** 2, len(global_data.incar.composition_of_b)))
             for i in range(2):
@@ -486,7 +487,7 @@ class WannierTools:
     def neighbor_reciprocal_lattice_vectors(k: list, direction: int) -> np.ndarray:
         n_k1_idx = int(np.mod(k[0] + global_data.incar.composition_of_b[direction][0], len(global_data.incar.k_points[0])))
         n_k2_idx = int(np.mod(k[1] + global_data.incar.composition_of_b[direction][1], len(global_data.incar.k_points[1])))
-        return [n_k1_idx, n_k2_idx]
+        return n_k1_idx, n_k2_idx
     
     @staticmethod
     def get_kx_ky(k: list) -> np.ndarray:

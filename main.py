@@ -9,6 +9,7 @@ from PCWannier.IncarParser import IncarParser
 import PCWannier.MeshData as MeshData
 import PCWannier.MSet as MSet
 import PCWannier.StateInitializer as StateInitializer
+import PCWannier.Gradient as Gradient
 
 def parse_args():
     parser = argparse.ArgumentParser(description="PCWannier v0.1.0")
@@ -48,10 +49,11 @@ def main():
     global_data.m_set = MSet.MSet()
     global_data.m_set.init_M0(global_data.state_collection)
 
-    global_data.state_initializer = StateInitializer.StateInitializer()
-    global_data.state_initializer.iter(1e-6, 1000)
-    # global_data.state_collection.plot_extention_epsilon()
-    # global_data.state_initializer.iter(1e-6, 100)
+    # global_data.state_initializer = StateInitializer.StateInitializer()
+    # global_data.state_initializer.iter(1e-6, 1000)
+
+    gradient = Gradient.Gradient()
+    gradient.iter(1e-5, 100)
 
 if __name__ == '__main__':
     main()

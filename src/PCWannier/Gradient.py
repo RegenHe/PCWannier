@@ -17,7 +17,7 @@ from .Utils import FieldData, StateCollection, WannierTools
 
 class Gradient:
     def __init__(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_calc)]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num]
         self.U = [[np.eye(shape[2], shape[2], dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
         self.G = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
         self.dW = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
@@ -56,7 +56,7 @@ class Gradient:
 
 
     def calc(self, isUpdate=True):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_calc), int(len(global_data.incar.composition_of_b))]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num, int(len(global_data.incar.composition_of_b))]
         self.generateRn()
         for i in range(shape[0]):
             for j in range(shape[1]):
@@ -78,7 +78,7 @@ class Gradient:
 
 
     def generateRn(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_calc), int(len(global_data.incar.composition_of_b))]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num, int(len(global_data.incar.composition_of_b))]
         self.rn = np.zeros((2, shape[2]), dtype=complex)
         for i in range(shape[0]):
             for j in range(shape[1]):
@@ -89,7 +89,7 @@ class Gradient:
         self.rn = self.rn / (shape[0] * shape[1])
 
     def update(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_calc), int(len(global_data.incar.composition_of_b))]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num, int(len(global_data.incar.composition_of_b))]
         self.generateRn()
         self.omega = [0, 0, 0]
 

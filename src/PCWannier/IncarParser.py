@@ -10,8 +10,14 @@ class IncarParser:
         value = value.strip()
         if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file"]:
             return value
+        elif key in ["err_diff"]:
+            return float(value.strip())
+        elif key in ["max_iter"]:
+            return int(value.strip())
+        elif key in ["extension",]:
+            return [int(x) for x in value.split(',')]
         elif key == "lattice_const":
-            return [float(x) for x in value.split()]
+            return [float(x) for x in value.split(',')]
         elif key in ["real_lattice_vectors", "reciprocal_lattice_vectors", "composition_of_b"]:
             parts = value.split(',')
             vectors = []

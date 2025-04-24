@@ -430,10 +430,16 @@ class IncarData:
         self.wb: list = None
 
         self.band_window: list = None
-        self.band_calc: list = None
 
         self.projections: list = None
         self.M_in: str = None
+
+        self.err_diff: float = None
+        self.max_iter: float = None
+
+        self.extension: list = None
+
+        self.band_calc_num: int = None
 
     def __repr__(self):
         return (
@@ -455,7 +461,6 @@ class IncarData:
             f"  composition_of_b={self.composition_of_b},\n"
             f"  wb={self.wb},\n"
             f"  band_window={self.band_window},\n"
-            f"  band_calc={self.band_calc},\n"
             f"  mesh_file={self.mesh_file},\n"
             f"  projections={self.projections}\n"
         )
@@ -491,6 +496,10 @@ class WannierTools:
             
             global_data.incar.wb = np.linalg.pinv(mat_b) @ mat_a
             global_data.incar.wb = [item for sublist in global_data.incar.wb for item in sublist]
+        
+        global_data.incar.band_calc_num = 0
+        for p in global_data.incar.projections:
+            global_data.incar.band_calc_num += len(p['states'])
 
     def set_incar(self, incar_data: IncarData) -> None:
         global_data.incar = incar_data

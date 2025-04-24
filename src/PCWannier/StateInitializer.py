@@ -26,7 +26,7 @@ class StateInitializer:
         self.projection()
         self.matV = self.matC
 
-        if len(global_data.incar.band_window) == len(global_data.incar.band_calc):
+        if len(global_data.incar.band_window) == global_data.incar.band_calc_num:
             global_data.m_set.initial(self.matV)
             return
         
@@ -48,7 +48,7 @@ class StateInitializer:
 
     @timer
     def projection(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), len(global_data.incar.band_calc)]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         self.matC = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
         self.matZ = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
         self.last_matZ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
@@ -104,7 +104,7 @@ class StateInitializer:
         print('projection compeleted')
 
     def update_Z(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), int(len(global_data.incar.composition_of_b)), len(global_data.incar.band_window), len(global_data.incar.band_calc)]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), int(len(global_data.incar.composition_of_b)), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         for i in range(shape[0]):
             for j in range(shape[1]):
                 self.matZ[i][j] = np.zeros((shape[3], shape[3]), dtype=complex)
@@ -119,7 +119,7 @@ class StateInitializer:
                     self.last_matZ[i][j] = self.matZ[i][j]
     
     def sort_Z(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), len(global_data.incar.band_calc)]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         for i in range(shape[0]):
             for j in range(shape[1]):
                 D, V = np.linalg.eig(self.matZ[i][j])
@@ -131,7 +131,7 @@ class StateInitializer:
                 self.matV[i][j] = sort_V[:, :shape[3]]
     
     def get_omega_I(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), len(global_data.incar.band_calc)]
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         res = 0
         s_N_wb = shape[3] * np.sum(global_data.incar.wb)
 

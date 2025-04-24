@@ -2,7 +2,7 @@
 name = model
 
 # Lattice constants on two axes, a1 and a2 in unit of [m].
-lattice_const = 1 1
+lattice_const = 1, 1
 
 # Lattice vectors in the real space, vec(a1) and vec(a2), defined in the Cartesian coordinate system.
 real_lattice_vectors = 1 0, 0 1
@@ -25,9 +25,7 @@ k_points = -0.5:0.25:0.26, -0.5:0.25:0.26
 
 composition_of_b = 1 0, 0 1
 
-band_window = 1:6
-
-band_calc = 1:6
+band_window = 0:5
 
 # site, positon, xaxis angular, (raial, angular/hybrids, zona)
 projections
@@ -38,6 +36,11 @@ end
 # The type of the dataset, you shuold generate the dataset file following the tutorial.
 # It can be set to "comsol" until now.
 dataset_type = comsol
+
+err_diff = 1e-6
+max_iter = 1000
+
+extension = 4, 4
 
 # The dataset file name, which contains the field data.
 dataset_file = examples/Ez.txt

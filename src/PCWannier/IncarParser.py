@@ -8,7 +8,7 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file"]:
             return value
         elif key == "lattice_const":
             return [float(x) for x in value.split()]
@@ -80,6 +80,11 @@ class IncarParser:
                     projections.append(projections_dict)
 
             return projections
+        elif key in ["M_in"]:
+            if value.strip().lower() == "true":
+                return True
+            else:
+                return False
         else:
             return value
 

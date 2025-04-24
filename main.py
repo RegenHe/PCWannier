@@ -49,8 +49,8 @@ def main():
     global_data.m_set = MSet.MSet()
     global_data.m_set.init_M0(global_data.state_collection)
 
-    # global_data.state_initializer = StateInitializer.StateInitializer()
-    # global_data.state_initializer.iter(1e-6, 1000)
+    global_data.state_initializer = StateInitializer.StateInitializer()
+    global_data.state_initializer.iter(1e-6, 100)
 
     gradient = Gradient.Gradient()
     gradient.iter(1e-5, 100)

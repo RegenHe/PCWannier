@@ -283,13 +283,23 @@ class StateCollection:
                     self.field[i][j][n] = np.conj(phase) * self.field[i][j][n]
     
     def get_phase(self, i: int, j: int):
-        if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
+        if global_data.incar.dataset_type.lower() == 'comsol':
             sign = -1
         k = WannierTools.get_kx_ky([i, j])
         return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
     
+    def get_phase(self, i: int, j: int, name: str=None):
+        if global_data.incar.dataset_type.lower() == 'comsol':
+            sign = -1
+        k = WannierTools.get_kx_ky([i, j])
+        if name == 'x':
+            k[1] = 0
+        elif name == 'y':
+            k[0] = 0
+        return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
+    
     def get_extention_phase(self, i: int, j: int):
-        if global_data.incar.dataset_type in ["comsol", "Comsol", "COMSOL"]:
+        if global_data.incar.dataset_type.lower() == 'comsol':
             sign = -1
         k = WannierTools.get_kx_ky([i, j])
         return np.exp(1j * sign * np.dot(self.extention_mesh.vertices, k))
@@ -408,6 +418,7 @@ class IncarData:
         self.dataset_order: list = None
         self.dielectric_file: str = None
         self.U_file: str = None
+        self.M_file: str = None
         self.hopping_file: str = None
         self.wannier_file: str = None
         self.wannier_figure: str = None
@@ -422,6 +433,7 @@ class IncarData:
         self.band_calc: list = None
 
         self.projections: list = None
+        self.M_in: str = None
 
     def __repr__(self):
         return (
@@ -487,7 +499,12 @@ class WannierTools:
     def neighbor_reciprocal_lattice_vectors(k: list, direction: int) -> np.ndarray:
         n_k1_idx = int(np.mod(k[0] + global_data.incar.composition_of_b[direction][0], len(global_data.incar.k_points[0])))
         n_k2_idx = int(np.mod(k[1] + global_data.incar.composition_of_b[direction][1], len(global_data.incar.k_points[1])))
-        return n_k1_idx, n_k2_idx
+        out_flag = [0, 0]
+        if n_k1_idx != k[0] + global_data.incar.composition_of_b[direction][0]:
+            out_flag[0] = 1
+        if n_k2_idx != k[1] + global_data.incar.composition_of_b[direction][1]:
+            out_flag[1] = 1
+        return n_k1_idx, n_k2_idx, out_flag
     
     @staticmethod
     def get_kx_ky(k: list) -> np.ndarray:

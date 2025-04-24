@@ -9,28 +9,48 @@ from PCWannier.Timer import Timer, timer
 
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
+from .IO import IO
 from .Utils import FieldData, StateCollection, WannierTools
 
 class MSet:
     def __init__(self):
-        self.M0 = None
-        self.M = None
+        self.mM0 = None
+        self.mMInitial = None
+        self.mM = None
 
     @timer
     def init_M0(self, state_collection: StateCollection):
-        global_data.state_collection.turn_to_Bloch()
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.composition_of_b) // 2, len(global_data.incar.band_window)]
-        self.M0 = np.array([[[np.zeros((shape[3], shape[3]), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
+        if global_data.incar.M_in:
+            self.mM0 = IO.load_cell_matrix(global_data.incar.M_file, shape=(shape[0], shape[1], shape[2]))
+            self.mMInitial = copy.deepcopy(self.mM0)
+            self.mM = copy.deepcopy(self.mM0)
+            return
+        global_data.state_collection.turn_to_Bloch()
+        self.mM0 = np.array([[[np.zeros((shape[3], shape[3]), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
 
         futures = []
         result_queue = Manager().Queue()
         def process_batch(i, j, m_range, n_range, b_range, result_queue):
+            if i == 3 and j == 3:
+                pass
             for m in m_range:
                 for n in n_range:
                     for b in b_range:
                         l_psi = global_data.state_collection.field[i][j][m]
-                        n_k1_idx, n_k2_idx = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                        r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n]
+                        n_k1_idx, n_k2_idx, out_flag = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+                        if out_flag[0] == 1 and out_flag[1] == 1:
+                            phase_x = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'x')
+                            phase_y = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'y')
+                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * (phase_x ** 2) * (phase_y ** 2)
+                        elif out_flag[0] == 1:
+                            phase_x = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'x')
+                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * (phase_x ** 2)
+                        elif out_flag[1] == 1:
+                            phase_y = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'y')
+                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * (phase_y ** 2)
+                        else:
+                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n]
                         fd = FieldData("M0", state_collection.mesh, np.conj(l_psi) * state_collection.epsilon * r_psi)
                         result_queue.put((i, j, m, n, b, WannierTools.integrate_over_mesh(fd)))
 
@@ -49,29 +69,38 @@ class MSet:
                     raise e
         while not result_queue.empty():
             i, j, m, n, b, result = result_queue.get()
-            self.M0[i, j, b][m, n] = result
+            self.mM0[i, j, b][m, n] = result
         print("M0 initialized")
 
-        self.M = copy.deepcopy(self.M0)
+        self.mMInitial = copy.deepcopy(self.mM0)
+        self.mM = copy.deepcopy(self.mM0)
     
     def get_M0(self, i: int, j: int, b: int):
         if b < len(global_data.incar.composition_of_b) // 2:
-            return self.M0[i, j, b]
+            return self.mM0[i, j, b]
         else:
-            n_k1, n_k2 = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-            return np.conj(self.M0[n_k1, n_k2, b - len(global_data.incar.composition_of_b) // 2]).T
+            n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+            return np.conj(self.mM0[n_k1, n_k2, b - len(global_data.incar.composition_of_b) // 2]).T
     
     def get(self, i: int, j: int, b: int):
         if b < len(global_data.incar.composition_of_b) // 2:
-            return self.M[i, j, b]
+            return self.mM[i, j, b]
         else:
-            n_k1, n_k2 = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-            return np.conj(self.M[n_k1, n_k2, b - len(global_data.incar.composition_of_b) // 2]).T
+            n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+            return np.conj(self.mM[n_k1, n_k2, b - len(global_data.incar.composition_of_b) // 2]).T
         
+    def initial(self, V):
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.composition_of_b) // 2]
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                for b in range(shape[2]):
+                    n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+                    self.mMInitial[i, j, b] = np.conj(V[i][j]).T @ self.mM0[i, j, b] @ V[n_k1][n_k2]
+
     def update(self, U):
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.composition_of_b) // 2]
         for i in range(shape[0]):
             for j in range(shape[1]):
                 for b in range(shape[2]):
-                    n_k1, n_k2 = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                    self.M[i, j, b] = np.conj(U[i][j]).T @ self.M0[i, j, b] @ U[n_k1][n_k2]
+                    n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+                    self.mM[i, j, b] = np.conj(U[i][j]).T @ self.mMInitial[i, j, b] @ U[n_k1][n_k2]

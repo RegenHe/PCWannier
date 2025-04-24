@@ -44,13 +44,14 @@ class Gradient:
             self.calc()
             global_data.m_set.update(self.U)
             self.update()
+            err = np.abs(lastOmega - np.sum(self.omega))
             print(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
-            if np.abs(lastOmega - np.sum(self.omega)) < err_diff:
+            if err < err_diff:
                 print(f"Convergence criterion met, err_diff = {np.abs(lastOmega - np.sum(self.omega))}, total iterations: {n + 1}")
                 break
             lastOmega = np.sum(self.omega)
         self.update()
-        print(f"iter n = {max_iter} - end, err_diff = {np.abs(lastOmega - np.sum(self.omega))}")
+        print(f"iter n = {max_iter} - end, err_diff = {err}")
         print(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
 
 
@@ -71,9 +72,9 @@ class Gradient:
                             mT[m, n] = mM[m, n] / mM[n, n] * (np.imag(np.log(mM[n, n])) + np.dot(global_data.incar.b_vectors[b, :], self.rn[:, n]))
                     self.G[i][j] += global_data.incar.wb[b] * (self.operator_A(mR) - self.operator_S(mT))
                 self.G[i][j] = 4 * self.G[i][j]
-                self.dW = self.epsilon * self.G[i][j]
+                self.dW[i][j] = self.epsilon * self.G[i][j]
                 if isUpdate:
-                    self.U[i][j] = self.U[i][j] @ scipy.linalg.expm(self.dW)
+                    self.U[i][j] = self.U[i][j] @ scipy.linalg.expm(self.dW[i][j])
 
 
     def generateRn(self):
@@ -100,8 +101,8 @@ class Gradient:
                     temp_I = shape[2]
                     temp_OD = 0
                     temp_D = 0
-                    for m in range(shape[3]):
-                        for n in range(shape[3]):
+                    for m in range(shape[2]):
+                        for n in range(shape[2]):
                             temp_I = temp_I - np.abs(mM[m, n]) ** 2
                             if m != n:
                                 temp_OD += np.abs(mM[m, n]) ** 2

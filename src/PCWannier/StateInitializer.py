@@ -27,6 +27,7 @@ class StateInitializer:
         self.matV = self.matC
 
         if len(global_data.incar.band_window) == len(global_data.incar.band_calc):
+            global_data.m_set.initial(self.matV)
             return
         
         last_omega_I = 1e6
@@ -42,6 +43,7 @@ class StateInitializer:
                 print(f"Convergence criterion met, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
                 break
             last_omega_I = omega
+        global_data.incar.m_set.initial(self.matV)
 
 
     @timer
@@ -108,7 +110,7 @@ class StateInitializer:
                 self.matZ[i][j] = np.zeros((shape[3], shape[3]), dtype=complex)
                 for b in range(shape[2]):
                     mM = global_data.m_set.get_M0(i, j, b)
-                    n_k1, n_k2 = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+                    n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
                     self.matZ[i][j] += global_data.incar.wb[b] * mM @ (self.matV[n_k1][n_k2] @ np.conj(self.matV[n_k1][n_k2]).T) @ np.conj(mM).T
                 if self.last_matZ[i][j] is None:
                     self.last_matZ[i][j] = self.matZ[i][j]

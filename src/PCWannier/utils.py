@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.tri import Triangulation
@@ -71,6 +73,35 @@ class Mesh:
         ax.set_ylim(min_y - margin, max_y + margin)
 
         plt.show()
+    def save_fig(self, filename):
+        directory = os.path.dirname(filename)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+
+        fig, ax = plt.subplots()
+        for element in self.elements:
+            triangle_vertices = self.vertices[element]
+            
+            triangle = plt.Polygon(triangle_vertices, edgecolor='black', fill=None)
+            ax.add_patch(triangle)
+
+        if self.edge is not None:
+            for line in self.edge:
+                point1, point2 = self.vertices[line[0]], self.vertices[line[1]]
+                ax.plot([point1[0], point2[0]], [point1[1], point2[1]], color='red', linewidth=2)
+
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        
+        min_x, max_x = np.min(self.vertices[:, 0]), np.max(self.vertices[:, 0])
+        min_y, max_y = np.min(self.vertices[:, 1]), np.max(self.vertices[:, 1])
+        
+        margin = 0.1
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+
     def extension(self, n: list) -> List:
         if n[0] < 1 or n[1] < 1:
             raise ValueError("n must be greater than 1")
@@ -176,7 +207,8 @@ class FieldData:
         fig, ax = plt.subplots()
         triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
 
-        plt.tricontourf(triang, np.real(self.field), levels=255, cmap='jet')
+        plt.tricontourf(triang, np.real(self.field), levels=255, cmap='bwr')
+        plt.clim(-max(np.abs(self.field)), max(np.abs(self.field)))
         plt.colorbar(label='Real Part')
         ax.set_aspect('equal')
         ax.set_xlabel('X')
@@ -188,6 +220,27 @@ class FieldData:
         ax.set_xlim(min_x - margin, max_x + margin)
         ax.set_ylim(min_y - margin, max_y + margin)
         plt.show()
+    def save_fig(self, filename):
+        directory = os.path.dirname(filename)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+
+        fig, ax = plt.subplots()
+        triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
+
+        plt.tricontourf(triang, np.real(self.field), levels=255, cmap='bwr')
+        plt.clim(-max(np.abs(self.field)), max(np.abs(self.field)))
+        plt.colorbar(label='Real Part')
+        ax.set_aspect('equal')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        min_x, max_x = np.min(self.mesh.vertices[:, 0]), np.max(self.mesh.vertices[:, 0])
+        min_y, max_y = np.min(self.mesh.vertices[:, 1]), np.max(self.mesh.vertices[:, 1])
+        
+        margin = 0.1
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
 
 class StateCollection:
     def __init__(self, name: str, mesh: Mesh) -> None:
@@ -323,6 +376,11 @@ class StateCollection:
             self.extention_epsilon = np.array([self.epsilon[k] for k in self.space_to_original_mapping])
         return self.extention_epsilon
         
+    def get_zero_field(self):
+        return [0.0 + 0.0j] * self.mesh.vertices.shape[0]
+    
+    def get_zero_extension_field(self):
+        return [0.0 + 0.0j] * self.extention_mesh.vertices.shape[0]
     
     def plot_field(self, i: int, j: int, n: int) -> None:
         fig, ax = plt.subplots()
@@ -422,7 +480,7 @@ class IncarData:
         self.M_file: str = None
         self.hopping_file: str = None
         self.wannier_file: str = None
-        self.wannier_figure: str = None
+        self.wannier_figures: str = None
 
         self.mesh_file: str = None
 
@@ -457,7 +515,7 @@ class IncarData:
             f"  U_file={self.U_file},\n"
             f"  hopping_file={self.hopping_file},\n"
             f"  wannier_file={self.wannier_file},\n"
-            f"  wannier_figure={self.wannier_figure},\n"
+            f"  wannier_figures={self.wannier_figures},\n"
             f"  b_vectors={self.b_vectors},\n"
             f"  composition_of_b={self.composition_of_b},\n"
             f"  wb={self.wb},\n"
@@ -484,8 +542,8 @@ class WannierTools:
 
             global_data.incar.b_vectors = []
             for i in range(len(global_data.incar.composition_of_b)):
-                global_data.incar.b_vectors.append((global_data.incar.composition_of_b[i][0] * global_data.incar.reciprocal_lattice_vectors[0] / len(global_data.incar.k_points[0]) * 2 * np.pi / global_data.incar.lattice_const[0]
-                                            + global_data.incar.composition_of_b[i][1] * global_data.incar.reciprocal_lattice_vectors[1] / len(global_data.incar.k_points[1]) * 2 * np.pi / global_data.incar.lattice_const[1]).tolist())
+                global_data.incar.b_vectors.append((global_data.incar.composition_of_b[i][0] * global_data.incar.reciprocal_lattice_vectors[0] / len(global_data.incar.k_points[0]) * 2 * np.pi / global_data.incar.lattice_const
+                                            + global_data.incar.composition_of_b[i][1] * global_data.incar.reciprocal_lattice_vectors[1] / len(global_data.incar.k_points[1]) * 2 * np.pi / global_data.incar.lattice_const).tolist())
                 
             global_data.incar.b_vectors = np.array(global_data.incar.b_vectors)
             mat_a = np.eye(2).reshape(-1, 1)
@@ -518,8 +576,8 @@ class WannierTools:
     
     @staticmethod
     def get_kx_ky(k: list) -> np.ndarray:
-        kx = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const[0] + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const[1]
-        ky = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const[0] + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const[1]
+        kx = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
+        ky = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
         return np.array([kx, ky])
     
     @staticmethod

@@ -17,7 +17,7 @@ class IncarParser:
         elif key in ["extension",]:
             return [int(x) for x in value.split(',')]
         elif key == "lattice_const":
-            return [float(x) for x in value.split(',')]
+            return float(value.strip())
         elif key in ["real_lattice_vectors", "reciprocal_lattice_vectors", "composition_of_b"]:
             parts = value.split(',')
             vectors = []
@@ -78,7 +78,7 @@ class IncarParser:
                                 coefficient, term = parts[i].split('(')
                                 coefficient = coefficient.strip()
                                 term = term.split(')')[0].strip().split(',')
-                                state_list.append([int(term[0].strip()), term[1].strip(), float(term[2].strip())])
+                                state_list.append([int(term[0].strip()), int(term[1].strip()), float(term[2].strip())])
                             else:
                                 raise ValueError(f"Invalid states in projections: '{parts[i].strip()}'")
 

@@ -1,5 +1,9 @@
+import numpy as np
+
+import warnings
+
 from PCWannier.Utils import global_data
-from PCWannier.Utils import WannierTools
+from PCWannier.Utils import WannierTools, FieldData
 from PCWannier.Timer import Timer, timer
 from PCWannier.IncarParser import IncarParser
 import PCWannier.MeshData as MeshData
@@ -50,11 +54,47 @@ class PCWannier:
         global_data.push_gradient(Gradient.Gradient())
         global_data.gradient.iter(global_data.incar.err_diff, global_data.incar.max_iter)
 
+        self.gen_wannier()
+
         if not global_data.incar.M_in:
             global_data.m_set.save_as(global_data.incar.M_file)
         
         global_data.state_initializer.save_as(global_data.incar.V_file)
         global_data.gradient.save_as(global_data.incar.U_file)
 
-    def gen_wannier(self, n: int, R: list=[0, 0]):
-        pass
+
+
+    def gen_wannier(self, r: list=[0, 0]):
+        r_ = [0, 0]
+        r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + r[1] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const)
+        r_[1] = (r[0] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const + r[1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+        print(f"Generating Wannier Functions - r = ({r[0]}, {r[1]})")
+
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
+
+        ubloch = np.array([[[None for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
+        for n in range(shape[2]):
+            for i in range(shape[0]):
+                for j in range(shape[1]):
+                    t_ = global_data.state_collection.get_zero_extension_field()
+                    mV = global_data.state_initializer.matV[i][j]
+                    mU = global_data.gradient.U[i][j]
+                    for m in range(shape[3]):
+                        t_ += (mV @ mU)[m, n] * global_data.state_collection.get_extention_field(i, j, m)
+                    ubloch[i, j, n] = t_
+        
+        wannier = [global_data.state_collection.get_zero_extension_field() for _ in range(shape[2])]
+        for n in range(shape[2]):
+            for i in range(shape[0]):
+                for j in range(shape[1]):
+                    kx, ky = WannierTools.get_kx_ky([i, j])
+                    phase = global_data.state_collection.get_extention_phase(i, j) * np.exp(np.dot([kx, ky], r_))
+                    wannier[n] += phase * ubloch[i, j, n]
+            wannier[n] /= np.sqrt(shape[0] * shape[1])
+            norm = WannierTools.integrate_over_mesh(FieldData('wannier', global_data.state_collection.extention_mesh, np.abs(wannier[n]) ** 2 * global_data.state_collection.extention_epsilon))
+            print(f"Check wannier function norm = {norm}")
+            if not np.isclose(np.abs(norm), 1.0, atol=1e-3):
+                warnings.warn(f"Normalization ({np.abs(norm)}) not equal to 1 in Wannier State - {n}")
+            if global_data.incar.wannier_figures.lower() != "false":
+                fd = FieldData('wannier', global_data.state_collection.extention_mesh, wannier[n])
+                fd.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}.png")

@@ -5,10 +5,7 @@ from typing import Dict, Tuple
 
 class IO:
     @staticmethod
-    def load_cell_matrix(filename: str, shape) -> Dict[Tuple[int, int, int], np.ndarray]:
-        with open(filename, "r") as f:
-            content = f.read()
-
+    def load_cell_matrix(filename: str, shape) -> np.ndarray:
         data = np.empty(shape, dtype=object)
 
         with open(filename, "r") as f:
@@ -33,6 +30,7 @@ class IO:
                 matrix.append(row)
 
             data[i, j, k] = np.array(matrix, dtype=complex)
+        return data
 
     @staticmethod
     def save_to_txt(filename: str, data: np.ndarray, shape: tuple) -> None:
@@ -44,7 +42,7 @@ class IO:
                 data = np.array(data)
                 for idx in np.ndindex(shape):
                     matrix = data[idx]
-                    f.write(f"Matrix at index {idx}:\n")
+                    f.write(f"CELL{idx}:\n")
                     for row in matrix:
                         row_str = ', '.join([f"{entry.real:.8f}" + (' + ' if entry.imag >= 0 else ' - ') + f"{abs(entry.imag):.8f}j" if np.iscomplexobj(data) else f"{entry:.8f}" for entry in row])
                         f.write(row_str + '\n')

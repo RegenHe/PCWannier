@@ -33,8 +33,6 @@ class MSet:
         futures = []
         result_queue = Manager().Queue()
         def process_batch(i, j, m_range, n_range, b_range, result_queue):
-            if i == 3 and j == 3:
-                pass
             for m in m_range:
                 for n in n_range:
                     for b in b_range:

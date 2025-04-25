@@ -1,8 +1,8 @@
 # Model name, any strings is fine.
 name = model
 
-# Lattice constants on two axes, a1 and a2 in unit of [m].
-lattice_const = 1, 1
+# Lattice constants in unit of [m].
+lattice_const = 1
 
 # Lattice vectors in the real space, vec(a1) and vec(a2), defined in the Cartesian coordinate system.
 real_lattice_vectors = 1 0, 0 1
@@ -27,10 +27,10 @@ composition_of_b = 1 0, 0 1
 
 band_window = 0:5
 
-# site, positon, xaxis angular, (raial, angular/hybrids, zona)
+# site, positon, xaxis angular, (n, l, zona)
 projections
-a; (0, 0); 0; (1, s, 10); (2, s, 30); (2, px, 30); (2, py, 30); (3, dx2-y2, 50); (3, dxy, 50)
-# b; (0.5, 0.5); 0; (1, s); (1, px); (1, py); (1, dx2-y2); (1, dxy) 
+a; (0, 0); 0; (1, 0, 5); (2, 0, 10); (2, 1, 10); (2, -1, 10); (3, 2, 20); (3, -2, 20)
+# b; (0, 0.5); 0; (1, 0, 5); (2, 0, 10); (2, 1, 10); (2, -1, 10); (3, 2, 20); (3, -2, 20)
 end
 
 # The type of the dataset, you shuold generate the dataset file following the tutorial.
@@ -71,26 +71,23 @@ dataset_order = k1, k2, E
 # the data file name, which contains the dielectric function data.
 dielectric_file = examples/epsilon.txt
 
-# If you want to set M Matrix by yourself, you can set this value to your M Matrix file.
+# If you want to set M Matrix by yourself, you can set this value to true.
 M_in = false
 
 # The M matrix file name, which contains the M matrix data.
-# If you don't set this value, the M matrix will be saved with the name "M.txt".
 M_file = examples/M0.txt
 
 # Output file name, which contains the calculated U matrix.
-# If you don't set this value, U matrix will be saved with the name "U.txt".
 U_file = examples/U.txt
 
+# Output file name, which contains the calculated V matrix.
 V_file = examples/V.txt
 
 # The hopping file name, which contains the calculated hopping matrix.
-# If you don't set this value, the hopping matrix will be saved with the name "hopping.txt".
 hopping_file = examples/hopping.txt
 
 # The output file name, which contains the calculated Wannier functions.
-# If you don't set this value, the Wannier functions will be saved with the name "wannier.txt".
 wannier_file = examples/wannier.txt
 
 # If you don't want to save the wannier functions, you can set this value to "false", e.g. "wannier_figure = false".
-wannier_figure = examples/wannier.png
+wannier_figures = examples/wanniers

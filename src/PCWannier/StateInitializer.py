@@ -45,6 +45,13 @@ class StateInitializer:
                 print(f"Convergence criterion met, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
                 break
             last_omega_I = omega
+        
+        for i in range(len(global_data.incar.k_points[0])):
+                for j in range(len(global_data.incar.k_points[1])):
+                    t_ = np.conj(self.matV[i][j]).T @ self.matA[i][j]
+                    mU, mS, mVh = np.linalg.svd(t_)
+                    self.matV[i][j] = mU @ np.eye(global_data.incar.band_calc_num, global_data.incar.band_calc_num) @ mVh
+
         global_data.incar.m_set.initial(self.matV)
 
 
@@ -56,13 +63,13 @@ class StateInitializer:
         self.last_matZ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
         self.lambda_ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
 
-        matA = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        matS = [[None for _ in range(shape[1])]for _ in range(shape[0])]
+        self.matA = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
+        # matS = [[None for _ in range(shape[1])]for _ in range(shape[0])]
 
         g = []
         for p in global_data.incar.projections:
             for state in p['states']:
-                f = lambda r, phi: StateBases.Radial(state[0])(r, state[2]) * StateBases.Angular(state[1])(phi)
+                f = lambda r, phi: StateBases.Radial(state[0], state[1])(r, state[2]) * StateBases.Angular(state[1])(phi)
                 h = global_data.state_collection.extention_mesh.rfunc(f, p['position'], p['xaxis_angluar'])
                 # f = StateBases.temp(state[1], 0)
                 # h = global_data.state_collection.extention_mesh.rfunc(f, p['position'], p['xaxis_angluar'])
@@ -97,11 +104,11 @@ class StateInitializer:
                     raise e
         while not result_queue.empty():
             i, j, m, n, result = result_queue.get()
-            matA[i][j][m, n] = result
+            self.matA[i][j][m, n] = result
         
         for i in range(shape[0]):
             for j in range(shape[1]):
-                mU, mS, mVh = np.linalg.svd(matA[i][j])
+                mU, mS, mVh = np.linalg.svd(self.matA[i][j])
                 self.matC[i][j] = mU @ np.eye(shape[2], shape[3]) @ mVh
         print('projection compeleted')
 
@@ -148,23 +155,23 @@ class StateInitializer:
 
 class StateBases:
     @staticmethod
-    def Angular(name: str):
-        if name == 's':
+    def Angular(l: int=0):
+        if l == 0:
             return StateBases.s
-        elif name == 'px':
+        elif l == 1:
             return StateBases.px
-        elif name == 'py':
+        elif l == -1:
             return StateBases.py
-        elif name == 'dx2-y2':
+        elif l == 2:
             return StateBases.dx2_y2
-        elif name == 'dxy':
+        elif l == -2:
             return StateBases.dxy
-        elif name == 'fx(x2-3y2)':
+        elif l == 3:
             return StateBases.fxx2_3y2
-        elif name == 'fy(3x2-y2)':
+        elif l == -3:
             return StateBases.fy3x2_y2
         else:
-            raise ValueError(f"Invalid Angular state: '{name}'")
+            raise ValueError(f"Invalid Angular state: '{l}'")
     
     @staticmethod
     def s(phi: float):
@@ -193,69 +200,53 @@ class StateBases:
     def Radial(n: int, l: int=None):
         if l is None:
             l = n - 1
-        radial_functions = {
-            (1, 0): StateBases.r10,
-            (2, 0): StateBases.r20,
-            (2, 1): StateBases.r21,
-            (3, 0): StateBases.r30,
-            (3, 1): StateBases.r31,
-            (3, 2): StateBases.r32,
-        }
+        name = f"r{n}{abs(l)}"
         try:
-            return radial_functions[(n, l)]
-        except KeyError:
-            raise ValueError(f"Invalid (n, l) combination: ({n}, {l})")
+            fn = getattr(StateBases, name)
+        except AttributeError:
+            raise ValueError(f"No radial function defined for (n={n}, l={l})")
+        return fn
         
     @staticmethod
     def r10(r: float, alpha: float=1.0):
-        return 2 * alpha ** (3 / 2) * np.exp(-alpha * r)
+        r = r / global_data.incar.lattice_const
+        return 2 * alpha ** (3 / 2) * np.exp(-alpha * r / 2)
     
     @staticmethod
     def r20(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
         return 1 / np.sqrt(2) * alpha ** (3 / 2) * (1 - 0.5 * alpha * r) * np.exp(-alpha * r / 2)
     @staticmethod
     def r21(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
         return 1 / (2 * np.sqrt(6)) * alpha ** (3 / 2) * alpha * r * np.exp(-alpha * r / 2)
     
     @staticmethod
     def r30(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
         return np.sqrt(4 / 27) * alpha ** (3 / 2) * (1 - 2 * alpha * r / 3 + 2 * alpha ** 2 * r ** 2 / 27) * np.exp(-alpha * r / 3)
     @staticmethod
     def r31(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
         return 8 / (27 * np.sqrt(6)) * alpha ** (3 / 2) * (1 - alpha * r / 6) * alpha * r * np.exp(-alpha * r / 3)
     @staticmethod
     def r32(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
         return 4 / (81 * np.sqrt(30)) * alpha ** (3 / 2) * alpha ** 2 * r ** 2 * np.exp(-alpha * r / 3)
     
-    # just for test
-    def temp(name, n):
-        if name == 's':
-            return StateBases.s1
-        elif name == 'px':
-            return StateBases.p1
-        elif name == 'py':
-            return StateBases.p2
-        elif name == 'dx2-y2':
-            return StateBases.d1
-        elif name == 'dxy':
-            return StateBases.d2
     @staticmethod
-    def s1(r, phi):
-        r = 10 * r
-        return np.exp(-r ** 2 / 20)
+    def r40(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
+        return 1 / 4 * alpha ** (3 / 2) * (1 + 3 / 4 * alpha * r + 1 / 8 * alpha ** 2 * r ** 2 - 1 / 192 * alpha ** 3 * r ** 3) * np.exp(-alpha * r / 4)
     @staticmethod
-    def p1(r, phi):
-        r = 10 * r
-        return np.real(np.exp(-r ** 2 / 40) * np.exp(1j * phi) * r)
+    def r41(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
+        return 5 / (16 * np.sqrt(15)) * alpha ** (3 / 2) * (1 - 1 / 4 * alpha * r + 1 / 80 * alpha ** 2 * r ** 2) * alpha * r * np.exp(-alpha * r / 4)
     @staticmethod
-    def p2(r, phi):
-        r = 10 * r
-        return np.real(np.exp(-r ** 2 / 40) * np.exp(1j * phi) * r * np.exp(1j * np.pi * 0.5))
+    def r42(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
+        return 1 / (64 * np.sqrt(5)) * alpha ** (3 / 2) * (1 - 1 * 12 * alpha * r) * alpha ** 2 * r ** 2 * np.exp(-alpha * r / 4)
     @staticmethod
-    def d1(r, phi):
-        r = 10 * r
-        return np.real(np.exp(-r ** 2 / 40) * np.exp(1j * 2 * phi) * r)
-    @staticmethod
-    def d2(r, phi):
-        r = 10 * r
-        return np.real(np.exp(-r ** 2 / 40) * np.exp(1j * 2 * phi) * r * np.exp(1j * np.pi * 0.5))
+    def r43(r: float, alpha: float=1.0):
+        r = r / global_data.incar.lattice_const
+        return 1 / (768 * np.sqrt(35)) * alpha ** (3 / 2) * alpha ** 3 * r ** 3 * np.exp(-alpha * r / 4)

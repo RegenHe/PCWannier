@@ -6,6 +6,7 @@ from multiprocessing import Manager
 import copy
 
 from PCWannier.Timer import Timer, timer
+from PCWannier.IO import IO
 
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
@@ -104,3 +105,7 @@ class MSet:
                 for b in range(shape[2]):
                     n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
                     self.mM[i, j, b] = np.conj(U[i][j]).T @ self.mMInitial[i, j, b] @ U[n_k1][n_k2]
+
+    def save_as(self, filename):
+        IO.save_to_txt(filename, self.mM0, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.composition_of_b) // 2))
+

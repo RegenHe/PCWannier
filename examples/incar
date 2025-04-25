@@ -76,11 +76,13 @@ M_in = false
 
 # The M matrix file name, which contains the M matrix data.
 # If you don't set this value, the M matrix will be saved with the name "M.txt".
-M_file = examples/M.txt
+M_file = examples/M0.txt
 
 # Output file name, which contains the calculated U matrix.
 # If you don't set this value, U matrix will be saved with the name "U.txt".
 U_file = examples/U.txt
+
+V_file = examples/V.txt
 
 # The hopping file name, which contains the calculated hopping matrix.
 # If you don't set this value, the hopping matrix will be saved with the name "hopping.txt".

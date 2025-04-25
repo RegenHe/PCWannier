@@ -418,6 +418,7 @@ class IncarData:
         self.dataset_order: list = None
         self.dielectric_file: str = None
         self.U_file: str = None
+        self.V_file: str = None
         self.M_file: str = None
         self.hopping_file: str = None
         self.wannier_file: str = None

@@ -10,6 +10,8 @@ from multiprocessing import Manager
 import scipy.linalg
 
 from PCWannier.Timer import Timer, timer
+from PCWannier.IO import IO
+
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
 
@@ -111,6 +113,9 @@ class Gradient:
                     self.omega[1] += temp_OD * global_data.incar.wb[b]
                     self.omega[2] += temp_D * global_data.incar.wb[b]
         self.omega = np.real(self.omega) / (shape[0] * shape[1])
+    
+    def save_as(self, filename):
+        IO.save_to_txt(filename, self.U, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
 
 
     @staticmethod

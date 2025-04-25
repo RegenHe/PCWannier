@@ -7,6 +7,8 @@ from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
 from PCWannier.Timer import Timer, timer
+from PCWannier.IO import IO
+
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
 
@@ -140,6 +142,9 @@ class StateInitializer:
                 res += s_N_wb - np.sum(self.lambda_[i][j])
         
         return res / (shape[0] * shape[1])
+    
+    def save_as(self, filename):
+        IO.save_to_txt(filename, self.matV, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
 
 class StateBases:
     @staticmethod

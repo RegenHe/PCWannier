@@ -35,30 +35,21 @@ class IO:
             data[i, j, k] = np.array(matrix, dtype=complex)
 
     @staticmethod
-    def save_to_txt(filename: str, data: np.ndarray) -> None:
+    def save_to_txt(filename: str, data: np.ndarray, shape: tuple) -> None:
         try:
             with open(filename, 'w') as f:
-                shape_info = f"Shape of the data array: {data.shape}"
-
+                shape_info = f"Shape of the data array: {shape}"
                 f.write(f"# {shape_info}\n")
 
-                if np.iscomplexobj(data):
-                    for idx in np.ndindex(data.shape):
-                        matrix = data[idx]
-                        f.write(f"Matrix at index {idx}:\n")
-                        for row in matrix:
-                            row_str = ' '.join([f"{entry.real:.8f} + {entry.imag:.8f}j" for entry in row])
-                            f.write(row_str + '\n')
-                else:
-                    for idx in np.ndindex(data.shape):
-                        matrix = data[idx]
-                        f.write(f"Matrix at index {idx}:\n")
-                        for row in matrix:
-                            row_str = ' '.join([f"{entry:.8f}" for entry in row])
-                            f.write(row_str + '\n')
+                data = np.array(data)
+                for idx in np.ndindex(shape):
+                    matrix = data[idx]
+                    f.write(f"Matrix at index {idx}:\n")
+                    for row in matrix:
+                        row_str = ', '.join([f"{entry.real:.8f}" + (' + ' if entry.imag >= 0 else ' - ') + f"{abs(entry.imag):.8f}j" if np.iscomplexobj(data) else f"{entry:.8f}" for entry in row])
+                        f.write(row_str + '\n')
 
             logging.info(f"Data successfully saved to {filename}")
         except Exception as e:
             logging.error(f"Error saving data to {filename}: {str(e)}")
             raise
-        return data

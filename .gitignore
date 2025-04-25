@@ -42,7 +42,7 @@ htmlcov/
 .coverage
 .coverage.*
 .cache/
-pytest_cache/           # ← pytest 缓存
+pytest_cache/
 nosetests.xml
 coverage.xml
 *.cover
@@ -86,3 +86,11 @@ dmypy.json
 
 # pytest cache
 .pytest_cache/
+
+# figures
+*.png
+*.jpg
+*.jpeg
+*.svg
+
+examples/

@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 import warnings
 
@@ -85,6 +86,8 @@ class PCWannier:
         if global_data.incar.hopping_file.lower() != "false":
             self.save_hoppings(global_data.incar.hopping_file)
 
+        self.gen_band()
+
 
 
     def gen_wannier(self, r: list=[0, 0]):
@@ -149,3 +152,58 @@ class PCWannier:
             for j in range(len(global_data.incar.hopping_state[1])):
                 hoppings[i][j] = self.gen_hopping([global_data.incar.hopping_state[0][i], global_data.incar.hopping_state[1][j]])
         IO.save_to_txt(filename, hoppings, (len(global_data.incar.hopping_state[0]), len(global_data.incar.hopping_state[1])))
+
+    def gen_band(self):
+        if global_data.incar.band_figure.lower() == 'false':
+            return
+        H0 = self.gen_hopping()
+        
+        high_sym_points = []
+        k_list = np.array(global_data.incar.k_path[0]['point'])
+        total = 0
+        for i in range(len(global_data.incar.k_path)):
+            high_sym_points.append([global_data.incar.k_path[i]['name'], total])
+            total += global_data.incar.k_path[i]['num']
+
+            start = global_data.incar.k_path[i]['point']
+            stop = global_data.incar.k_path[(i + 1) % len(global_data.incar.k_path)]['point']
+            kx_list = np.linspace(start[0], stop[0], global_data.incar.k_path[i]['num'] + 1)[1:]
+            ky_list = np.linspace(start[1], stop[1], global_data.incar.k_path[i]['num'] + 1)[1:]
+            k_list = np.vstack((k_list, (np.vstack((kx_list, ky_list))).T))
+        high_sym_points.append([global_data.incar.k_path[0]['name'], total])
+        K = np.arange(0, total + 1)
+
+        hoppings = []
+        for p in global_data.incar.neighbor:
+            hoppings.append(self.gen_hopping(p))
+        
+        E = []
+        for k_ in k_list:
+            Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+            kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
+            ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
+            k = [kx, ky]
+            for i in range(len(global_data.incar.neighbor)):
+                r_ = [0, 0]
+                r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const)
+                r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+                Hi += hoppings[i] * np.exp(1j * np.dot(k, r_))
+            Hi = Hi + np.conj(Hi).T
+            H = H0 + Hi
+            D, V = np.linalg.eig(H)
+            E.append(np.sort(np.real(D)))
+        E = np.array(E)
+
+        fig, ax = plt.subplots()
+        for band in range(E.shape[1]):
+            plt.plot(K, E[:, band], color='blue')
+
+        for pos in [p[1] for p in high_sym_points]:
+            plt.axvline(x=pos, color='black', linestyle='--', linewidth=0.5)
+        plt.xticks([p[1] for p in high_sym_points], [p[0] for p in high_sym_points])
+        plt.xlim(0, total)
+        plt.title("Band Structure", fontsize=14)
+        plt.ylabel("E", fontsize=12)
+        plt.tight_layout()
+        plt.savefig(global_data.incar.band_figure, dpi=300, bbox_inches='tight')
+

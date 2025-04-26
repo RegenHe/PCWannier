@@ -8,7 +8,7 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure"]:
             return value
         elif key in ["err_diff"]:
             return float(value.strip())
@@ -98,11 +98,39 @@ class IncarParser:
                     projections.append(projections_dict)
 
             return projections
+        elif key == "k_path":
+            k_path = []
+            value = value.strip().strip('end').strip()
+            lines = value.splitlines()
+
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if line:
+                    k_path_dict = {}
+                    parts = line.split(';')
+
+                    for i in range(len(parts)):
+                        if i == 0:
+                            k_path_dict['name'] = parts[i].strip()
+                        elif i == 1:
+                            k_path_dict['point'] = [float(p) for p in parts[i].strip().split(',')]
+                        elif i == 2:
+                            k_path_dict['num'] = int(parts[i].strip())
+                    k_path.append(k_path_dict)
+            return k_path
         elif key in ["M_in", "E_is_real"]:
             if value.strip().lower() == "true":
                 return True
             else:
                 return False
+        elif key in ["neighbor"]:
+            neighbor = []
+            parts = value.strip().split(',')
+            for part in parts:
+                neighbor.append([int(p.strip()) for p in part.strip().split(' ')])
+            return neighbor
         else:
             return value
 
@@ -111,6 +139,8 @@ class IncarParser:
         with open(self.filename, 'r', encoding='utf-8') as f:
             inside_projections = False
             projections_data = ''
+            inside_k_path = False
+            k_path_data = ''
 
             for line in f:
                 line = line.strip()
@@ -127,6 +157,17 @@ class IncarParser:
                 
                 if inside_projections:
                     projections_data += '\n' + line
+
+                if "k_path" in line:
+                    inside_k_path = True
+                    continue
+                elif "end" in line and inside_k_path:
+                    inside_k_path = False
+                    setattr(incar_data, 'k_path', self.parse_value('k_path', k_path_data))
+                    continue
+                
+                if inside_k_path:
+                    k_path_data += '\n' + line
 
                 if '=' in line:
                     key, value = line.split('=', 1)

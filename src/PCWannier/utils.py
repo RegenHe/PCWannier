@@ -505,6 +505,10 @@ class IncarData:
         self.band_calc_num: int = None
         self.hopping_state: list = None
 
+        self.neighbor: list = None
+        self.k_path: list = None
+        self.band_figure: str = None
+
     def __repr__(self):
         return (
             f"IncarData =>\n"

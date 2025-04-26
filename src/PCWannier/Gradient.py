@@ -53,7 +53,7 @@ class Gradient:
                 break
             lastOmega = np.sum(self.omega)
         self.update()
-        print(f"iter n = {max_iter} - end, err_diff = {err}")
+        print(f"iter n = {n + 1} - end, err_diff = {err}")
         print(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
 
 

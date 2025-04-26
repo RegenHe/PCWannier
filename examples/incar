@@ -97,3 +97,13 @@ wannier_file = examples/wannier.txt
 
 # If you don't want to save the wannier functions, you can set this value to "false", e.g. "wannier_figure = false".
 wannier_figures = examples/wanniers
+
+band_figure = examples/band.png
+neighbor = 0 1, 1 1, 1 0, 1 -1
+# point name; k1, k2; num
+# G -- X -- M -- G
+k_path
+G; 0, 0; 100
+X; 0.5, 0; 100
+M; 0.5, 0.5; 100
+end

@@ -258,6 +258,8 @@ class StateCollection:
 
         self.extention_epsilon: np.array = None
 
+        self.E: list = []
+
     def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
         while len(self.field) <= i:
             self.field.append([])
@@ -478,6 +480,8 @@ class IncarData:
         self.U_file: str = None
         self.V_file: str = None
         self.M_file: str = None
+        self.E_is_real: bool = None
+        self.E_file: str = None
         self.hopping_file: str = None
         self.wannier_file: str = None
         self.wannier_figures: str = None
@@ -499,6 +503,7 @@ class IncarData:
         self.extension: list = None
 
         self.band_calc_num: int = None
+        self.hopping_state: list = None
 
     def __repr__(self):
         return (

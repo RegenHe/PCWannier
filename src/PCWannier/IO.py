@@ -34,6 +34,7 @@ class IO:
 
     @staticmethod
     def save_to_txt(filename: str, data: np.ndarray, shape: tuple) -> None:
+        data = np.array(data)
         try:
             with open(filename, 'w') as f:
                 shape_info = f"Shape of the data array: {shape}"

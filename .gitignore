@@ -92,5 +92,3 @@ dmypy.json
 *.jpg
 *.jpeg
 *.svg
-
-examples/

@@ -8,7 +8,7 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file"]:
             return value
         elif key in ["err_diff"]:
             return float(value.strip())
@@ -25,7 +25,7 @@ class IncarParser:
                 vec = [float(x) for x in part.strip().split()]
                 vectors.append(vec)
             return vectors
-        elif key == "k_points":
+        elif key in ["k_points"]:
             parts = value.split(',')
             ranges = []
             for part in parts:
@@ -36,6 +36,18 @@ class IncarParser:
                     ranges.append(np.arange(start, stop, step))
                 else:
                     raise ValueError(f"Invalid k_points range format: '{part}'")
+            return ranges
+        elif key in ["hopping_state"]:
+            parts = value.split(',')
+            ranges = []
+            for part in parts:
+                part = part.strip()
+                tokens = part.split(':')
+                if len(tokens) == 2:
+                    start, stop = map(int, tokens)
+                    ranges.append(np.arange(start, stop))
+                else:
+                    raise ValueError(f"Invalid hopping_state range format: '{part}'")
             return ranges
         elif key in ["band_window", "band_calc"]:
             tokens = value.split(':')
@@ -86,7 +98,7 @@ class IncarParser:
                     projections.append(projections_dict)
 
             return projections
-        elif key in ["M_in"]:
+        elif key in ["M_in", "E_is_real"]:
             if value.strip().lower() == "true":
                 return True
             else:

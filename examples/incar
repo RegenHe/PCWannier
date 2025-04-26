@@ -83,6 +83,12 @@ U_file = examples/U.txt
 # Output file name, which contains the calculated V matrix.
 V_file = examples/V.txt
 
+E_is_real = true
+# (omega*a/c)^2
+E_file = examples/E.txt
+
+# <0|H|R>
+hopping_state = 0:3, 0:3
 # The hopping file name, which contains the calculated hopping matrix.
 hopping_file = examples/hopping.txt
 

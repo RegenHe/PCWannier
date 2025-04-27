@@ -12,7 +12,8 @@ from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
-from PCWannier.Timer import Timer, timer
+from .Log import Logger
+from .Timer import Timer, timer
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
 
@@ -104,9 +105,13 @@ class Mesh:
 
     def extension(self, n: list) -> List:
         if n[0] < 1 or n[1] < 1:
-            raise ValueError("n must be greater than 1")
+            err_msg = "n must be greater than 1"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
         if self.vertices is None:
-            raise ValueError("Mesh must be initialized")
+            err_msg = "Mesh must be initialized"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
         
         original_vertices = self.vertices.copy()
         original_elements = self.elements.copy()
@@ -155,7 +160,7 @@ class Mesh:
                     t_dists, t_idxs = t_tree.query(vertices[i], k=1)
                     vertex_idx_in_new_vertices.append(t_idxs)
         else:
-            Warning(f"No points found")
+            Logger.warning(f"No points found")
 
         return np.array(vertex_idx_in_new_vertices), vertex_idx_in_vertices
     
@@ -241,6 +246,8 @@ class FieldData:
         ax.set_xlim(min_x - margin, max_x + margin)
         ax.set_ylim(min_y - margin, max_y + margin)
         plt.savefig(filename, dpi=300, bbox_inches='tight')
+        Logger.info(f"figure successfully saved to {filename}")
+
 
 class StateCollection:
     def __init__(self, name: str, mesh: Mesh) -> None:
@@ -272,18 +279,24 @@ class StateCollection:
 
     def __getitem__(self, index: tuple) -> np.ndarray:
         if self.field is None:
-            raise IndexError("Field data is not initialized")
+            err_msg = "Field data is not initialized"
+            Logger.error(err_msg)
+            raise IndexError(err_msg)
 
         i, j, n = index
         if not (0 <= i < len(self.mesh) and 0 <= j < len(self.mesh) and 0 <= n < len(self.field)):
-            raise IndexError("Index out of range")
+            err_msg = "Index out of range"
+            Logger.error(err_msg)
+            raise IndexError(err_msg)
 
         return self.field[i][j][n]
     
-    @timer
+    @timer("Normalize - ")
     def normalize(self) -> None:
         if self.field is None:
-            raise ValueError("Field data is not initialized")
+            err_msg = "Field data is not initialized"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
         
         self.normalization = [[[None for _ in range(len(self.field[0][0]))] for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
         
@@ -312,7 +325,7 @@ class StateCollection:
         while not result_queue.empty():
             i, j, n, result = result_queue.get()
             self.normalization[i][j][n] = result
-            print(f"Normalization for field ({i}, {j}, {n}) => {result}")
+            Logger.info(f"Normalization for field ({i}, {j}, {n}) => {result}")
         
         self.is_normalized = True
         for i in range(len(self.field)):
@@ -324,10 +337,12 @@ class StateCollection:
         
     def turn_to_Bloch(self) -> None:
         if self.field is None:
-            raise ValueError("Field data is not initialized")
+            err_msg = "Field data is not initialized"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
         
         if self.is_bloch:
-            print("Field data is already in Bloch form")
+            Logger.info("Field data is already in Bloch form")
             return
         self.is_bloch = True
 
@@ -359,7 +374,7 @@ class StateCollection:
         k = WannierTools.get_kx_ky([i, j])
         return np.exp(1j * sign * np.dot(self.extention_mesh.vertices, k))
     
-    @timer
+    @timer("Extention - ")
     def extention(self, n: List) -> None:
         self.extention_mesh = copy.deepcopy(self.mesh)
         self.space_to_original_mapping = self.extention_mesh.extension(n)
@@ -368,12 +383,16 @@ class StateCollection:
     
     def get_extention_field(self, i: int, j: int, n: int) -> List:
         if self.extention_mesh is None:
-            raise ValueError("The field has not been extended")
-        return np.array([self.field[i][j][n][k] / 4 for k in self.space_to_original_mapping])
+            err_msg = "The field has not been extended"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
+        return np.array([self.field[i][j][n][k] / np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1]) for k in self.space_to_original_mapping])
     
     def get_extention_epsilon(self) -> List:
         if self.extention_mesh is None:
-            raise ValueError("The field has not been extended")
+            err_msg = "The field has not been extended"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
         if self.extention_epsilon is None:
             self.extention_epsilon = np.array([self.epsilon[k] for k in self.space_to_original_mapping])
         return self.extention_epsilon
@@ -509,6 +528,8 @@ class IncarData:
         self.k_path: list = None
         self.band_figure: str = None
 
+        self.use_cached_data: list = None
+
     def __repr__(self):
         return (
             f"IncarData =>\n"
@@ -541,7 +562,7 @@ class WannierTools:
     def preprocess(self) -> None:
         if np.array_equal(global_data.incar.reciprocal_lattice_vectors, np.array([[0, 0], [0, 0]])):
             v = np.linalg.inv(global_data.incar.real_lattice_vectors) * np.eye(len(global_data.incar.real_lattice_vectors))
-            print("reciprocal_lattice_vectors will be set to: ", v)
+            Logger.info(f"reciprocal_lattice_vectors will be set to: {v}")
             global_data.incar.reciprocal_lattice_vectors = v
         
         if self.init is False:
@@ -611,4 +632,4 @@ if __name__ == "__main__":
     wtools = WannierTools()
     wtools.set_incar(parser_data.parse_file())
     wtools.preprocess()
-    print(global_data.incar)
+    Logger.info(global_data.incar)

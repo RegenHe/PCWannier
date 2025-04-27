@@ -9,8 +9,9 @@ from multiprocessing import Manager
 
 import scipy.linalg
 
-from PCWannier.Timer import Timer, timer
-from PCWannier.IO import IO
+from .Log import Logger
+from .Timer import Timer, timer
+from .IO import IO
 
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
@@ -30,31 +31,41 @@ class Gradient:
 
         self.rn = np.zeros((2, shape[2]), dtype=complex)
 
+    @timer("Gradient iter - ")
     def iter(self, err_diff: float, max_iter: int, epsilon: float=0.01):
+        Logger.info('Starting Gradient iteration')
+
+        if 'U' in global_data.incar.use_cached_data:
+            Logger.info(f"using cache data - U")
+            self.U = IO.load_cell_matrix(global_data.incar.U_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+        
         lastOmega = 1e6
         if max_iter == 0:
-            print(f'iter n = 0')
+            Logger.info(f'iter n = 0')
             self.update()
-            print(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
+            Logger.info(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
             self.calc(False)
             return
         
         global_data.m_set.update(self.U)
 
         for n in range(max_iter):
-            print(f'iter n = {n + 1}')
+            Logger.info(f'iter n = {n + 1}')
             self.calc()
             global_data.m_set.update(self.U)
             self.update()
             err = np.abs(lastOmega - np.sum(self.omega))
-            print(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
+            Logger.info(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
             if err < err_diff:
-                print(f"Convergence criterion met, err_diff = {np.abs(lastOmega - np.sum(self.omega))}, total iterations: {n + 1}")
+                Logger.info(f"Convergence criterion met, err_diff = {np.abs(lastOmega - np.sum(self.omega))}, total iterations: {n + 1}")
                 break
             lastOmega = np.sum(self.omega)
+        if err > err_diff:
+            Logger.warning(f"Convergence criteria not met, iteration limit reached, err_diff = {err}, total iterations: {n + 1}")
         self.update()
-        print(f"iter n = {n + 1} - end, err_diff = {err}")
-        print(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
+        Logger.info(f"iter n = {n + 1} - end, err_diff = {err}")
+        Logger.info(f"Omega: {np.sum(self.omega)},\t Omega_I: {self.omega[0]},\t Omega_OD: {self.omega[1]},\t Omega_D: {self.omega[2]}")
+        Logger.info('Gradient iteration completed')
 
 
     def calc(self, isUpdate=True):

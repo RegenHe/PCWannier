@@ -131,6 +131,8 @@ class IncarParser:
             for part in parts:
                 neighbor.append([int(p.strip()) for p in part.strip().split(' ')])
             return neighbor
+        elif key in ["use_cached_data"]:
+            return [p.strip().upper() for p in value.split(',')]
         else:
             return value
 

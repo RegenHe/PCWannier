@@ -1,6 +1,9 @@
 # Model name, any strings is fine.
 name = model
 
+# use_cached_data = false
+use_cached_data = false
+
 # Lattice constants in unit of [m].
 lattice_const = 1
 

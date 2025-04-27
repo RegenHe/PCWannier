@@ -92,3 +92,7 @@ dmypy.json
 *.jpg
 *.jpeg
 *.svg
+
+data/
+
+**/log.txt

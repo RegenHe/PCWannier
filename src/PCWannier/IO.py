@@ -1,7 +1,8 @@
-import logging
 import numpy as np
 import re
 from typing import Dict, Tuple
+
+from .Log import Logger
 
 class IO:
     @staticmethod
@@ -11,15 +12,24 @@ class IO:
         with open(filename, "r") as f:
             content = f.read()
 
-        cells = re.split(r"\n(?=CELL\[)", content.strip())
+        content = re.sub(r'#.*$', '', content)
+
+        cells = re.split(r"(?=CELL[\[\(])", content.strip())
 
         for cell in cells:
             lines = cell.strip().splitlines()
             if not lines:
                 continue
             header = lines[0]
-            i, j, k = map(int, re.findall(r"\d+", header))
-            i, j, k = i - 1, j - 1, k - 1
+
+            indices = list(map(int, re.findall(r"\d+", header)))
+
+            if len(indices) > len(shape):
+                raise ValueError(f"Parsed dimensions {len(indices)} are greater than expected shape dimensions {len(shape)}.")
+            
+            indices = indices[:len(shape)]
+
+            indices = [i - 1 for i in indices]  
 
             matrix = []
             for line in lines[1:]:
@@ -29,7 +39,9 @@ class IO:
                 row = [complex(eval(e.replace(' ', ''))) for e in entries]
                 matrix.append(row)
 
-            data[i, j, k] = np.array(matrix, dtype=complex)
+            idx = tuple(indices)
+            data[idx] = np.array(matrix, dtype=complex)
+
         return data
 
     @staticmethod
@@ -48,7 +60,7 @@ class IO:
                         row_str = ', '.join([f"{entry.real:.8f}" + (' + ' if entry.imag >= 0 else ' - ') + f"{abs(entry.imag):.8f}j" if np.iscomplexobj(data) else f"{entry:.8f}" for entry in row])
                         f.write(row_str + '\n')
 
-            logging.info(f"Data successfully saved to {filename}")
+            Logger.info(f"Data successfully saved to {filename}")
         except Exception as e:
-            logging.error(f"Error saving data to {filename}: {str(e)}")
+            Logger.error(f"Error saving data to {filename}: {str(e)}")
             raise

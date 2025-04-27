@@ -5,8 +5,9 @@ from multiprocessing import Manager
 
 import copy
 
-from PCWannier.Timer import Timer, timer
-from PCWannier.IO import IO
+from .Log import Logger
+from .Timer import Timer, timer
+from .IO import IO
 
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
@@ -19,19 +20,24 @@ class MSet:
         self.mMInitial = None
         self.mM = None
 
-    @timer
+    @timer("M matrix initialize - ")
     def init_M0(self, state_collection: StateCollection):
+        Logger.info('Starting to M Matrix initialization')
+
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.composition_of_b) // 2, len(global_data.incar.band_window)]
-        if global_data.incar.M_in:
+        if global_data.incar.M_in or 'M' in global_data.incar.use_cached_data:
+            Logger.info(f"using cache data - M")
             self.mM0 = IO.load_cell_matrix(global_data.incar.M_file, shape=(shape[0], shape[1], shape[2]))
             self.mMInitial = copy.deepcopy(self.mM0)
             self.mM = copy.deepcopy(self.mM0)
+            global_data.state_collection.turn_to_Bloch()
             return
         global_data.state_collection.turn_to_Bloch()
         self.mM0 = np.array([[[np.zeros((shape[3], shape[3]), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
 
         futures = []
         result_queue = Manager().Queue()
+
         def process_batch(i, j, m_range, n_range, b_range, result_queue):
             for m in m_range:
                 for n in n_range:
@@ -69,10 +75,12 @@ class MSet:
         while not result_queue.empty():
             i, j, m, n, b, result = result_queue.get()
             self.mM0[i, j, b][m, n] = result
-        print("M0 initialized")
+        Logger.info("M0 initialized")
 
         self.mMInitial = copy.deepcopy(self.mM0)
         self.mM = copy.deepcopy(self.mM0)
+
+        Logger.info('M Matrix initialization completed')
     
     def get_M0(self, i: int, j: int, b: int):
         if b < len(global_data.incar.composition_of_b) // 2:

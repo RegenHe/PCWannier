@@ -4,6 +4,7 @@ from scipy.spatial import cKDTree
 from typing import List, Tuple
 import warnings
 
+from .Log import Logger
 from .GlobalData import global_data
 from .Utils import Mesh, RawData, StateCollection
 
@@ -160,7 +161,7 @@ def load_comsol_data(filename: str) -> RawData:
 
 def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
     if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
-        warnings.warn("Mesh and data dimensions do not match.", RuntimeWarning)
+        Logger.warning("Mesh and data dimensions do not match.")
 
     # tree = cKDTree(mesh.vertices)
     # dists, idxs = tree.query(data.point_matrix, k=1)

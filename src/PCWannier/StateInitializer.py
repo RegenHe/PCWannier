@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -6,8 +8,9 @@ from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
-from PCWannier.Timer import Timer, timer
-from PCWannier.IO import IO
+from .Log import Logger
+from .Timer import Timer, timer
+from .IO import IO
 
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
@@ -20,13 +23,20 @@ class StateInitializer:
         self.matV = None
         self.matZ = None
         self.last_matZ = None
+        self.matA = None
 
         self.lambda_ = None
         self.alpha = 0.5
 
+    @timer("State Initialize iter - ")
     def iter(self, err_diff: float, max_iter: int):
-        self.projection()
-        self.matV = self.matC
+        Logger.info('Starting state initialization iteration')
+        if 'V' in global_data.incar.use_cached_data:
+            Logger.info(f"using cache data - V")
+            self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+        else:
+            self.projection()
+            self.matV = self.matC
 
         if len(global_data.incar.band_window) == global_data.incar.band_calc_num:
             global_data.m_set.initial(self.matV)
@@ -38,14 +48,18 @@ class StateInitializer:
             self.sort_Z()
             omega = self.get_omega_I()
             if i != 0:
-                print(f"initializer iter: n = {i},\t omega = {np.abs(omega)},\t err_diff = {abs(omega - last_omega_I)}")
+                Logger.info(f"initializer iter: n = {i},\t omega = {np.abs(omega)},\t err_diff = {abs(omega - last_omega_I)}")
             else:
-                print(f"initializer iter: n = {i},\t omega = {np.abs(omega)}")
+                Logger.info(f"initializer iter: n = {i},\t omega = {np.abs(omega)}")
             if abs(omega - last_omega_I) < err_diff:
-                print(f"Convergence criterion met, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
+                Logger.info(f"Convergence criterion met, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
                 break
             last_omega_I = omega
+        if abs(omega - last_omega_I) > err_diff:
+            Logger.warning(f"Convergence criteria not met, iteration limit reached, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
         
+        if self.matA is None:
+            self.projection()
         for i in range(len(global_data.incar.k_points[0])):
                 for j in range(len(global_data.incar.k_points[1])):
                     t_ = np.conj(self.matV[i][j]).T @ self.matA[i][j]
@@ -53,10 +67,12 @@ class StateInitializer:
                     self.matV[i][j] = mU @ np.eye(global_data.incar.band_calc_num, global_data.incar.band_calc_num) @ mVh
 
         global_data.incar.m_set.initial(self.matV)
+        Logger.info('State initialization iteration compeleted')
 
 
-    @timer
+    @timer("State Projection iter - ")
     def projection(self):
+        Logger.info('Starting to initialize projection')
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         self.matC = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
         self.matZ = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
@@ -80,7 +96,6 @@ class StateInitializer:
         futures = []
         result_queue = Manager().Queue()
 
-        @timer
         def process_batch(i, j, m_range, n_range, g, result_queue):
             phase = global_data.state_collection.get_extention_phase(i, j)
             for m in m_range:
@@ -110,7 +125,7 @@ class StateInitializer:
             for j in range(shape[1]):
                 mU, mS, mVh = np.linalg.svd(self.matA[i][j])
                 self.matC[i][j] = mU @ np.eye(shape[2], shape[3]) @ mVh
-        print('projection compeleted')
+        Logger.info('Projection compeleted')
 
     def update_Z(self):
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), int(len(global_data.incar.composition_of_b)), len(global_data.incar.band_window), global_data.incar.band_calc_num]
@@ -204,7 +219,9 @@ class StateBases:
         try:
             fn = getattr(StateBases, name)
         except AttributeError:
-            raise ValueError(f"No radial function defined for (n={n}, l={l})")
+            err_msg = f"No radial function defined for (n={n}, l={l})"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
         return fn
         
     @staticmethod
@@ -237,7 +254,7 @@ class StateBases:
     @staticmethod
     def r40(r: float, alpha: float=1.0):
         r = r / global_data.incar.lattice_const
-        return 1 / 4 * alpha ** (3 / 2) * (1 + 3 / 4 * alpha * r + 1 / 8 * alpha ** 2 * r ** 2 - 1 / 192 * alpha ** 3 * r ** 3) * np.exp(-alpha * r / 4)
+        return 1 / 4 * alpha ** (3 / 2) * (1 - 3 / 4 * alpha * r + 1 / 8 * alpha ** 2 * r ** 2 - 1 / 192 * alpha ** 3 * r ** 3) * np.exp(-alpha * r / 4)
     @staticmethod
     def r41(r: float, alpha: float=1.0):
         r = r / global_data.incar.lattice_const
@@ -245,8 +262,55 @@ class StateBases:
     @staticmethod
     def r42(r: float, alpha: float=1.0):
         r = r / global_data.incar.lattice_const
-        return 1 / (64 * np.sqrt(5)) * alpha ** (3 / 2) * (1 - 1 * 12 * alpha * r) * alpha ** 2 * r ** 2 * np.exp(-alpha * r / 4)
+        return 1 / (64 * np.sqrt(5)) * alpha ** (3 / 2) * (1 - 1 / 12 * alpha * r) * alpha ** 2 * r ** 2 * np.exp(-alpha * r / 4)
     @staticmethod
     def r43(r: float, alpha: float=1.0):
         r = r / global_data.incar.lattice_const
         return 1 / (768 * np.sqrt(35)) * alpha ** (3 / 2) * alpha ** 3 * r ** 3 * np.exp(-alpha * r / 4)
+    
+    @staticmethod
+    def plot_all(filename: str='./base/'):
+        directory = os.path.dirname(filename)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+        max_n = 4
+
+        x = np.linspace(-40 * global_data.incar.lattice_const, 40 * global_data.incar.lattice_const, 400)
+        y = np.linspace(-40 * global_data.incar.lattice_const, 40 * global_data.incar.lattice_const, 400)
+        X, Y = np.meshgrid(x, y, indexing='xy')
+        for n in range(max_n + 1):
+            for l in range(n):
+                if l == 0:
+                    r = np.sqrt(np.power(X, 2) + np.power(Y, 2))
+                    phi = np.atan2(X, Y)
+                    f = lambda r, phi: StateBases.Radial(n, l)(r) * StateBases.Angular(l)(phi)
+                    Z = f(r, phi)
+                    fig, ax = plt.subplots(figsize=(6, 6))
+                    cs = plt.contourf(X, Y, Z, 256, cmap="bwr")
+                    plt.clim(-np.max(np.abs(Z)), np.max(np.abs(Z)))
+                    plt.axis('equal')
+                    plt.title(f'({n}, {l})')
+                    plt.tight_layout()
+                    plt.savefig(f"{filename}/base-({n}-{l})", dpi=300, bbox_inches='tight')
+                else:
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    r = np.sqrt(np.power(X, 2) + np.power(Y, 2))
+                    phi = np.atan2(X, Y)
+                    f = lambda r, phi: StateBases.Radial(n, l)(r) * StateBases.Angular(l)(phi)
+                    Z = f(r, phi)
+                    plt.subplot(1, 2, 1)
+                    plt.contourf(X, Y, Z, 256, cmap="bwr")
+                    plt.clim(-np.max(np.abs(Z)), np.max(np.abs(Z)))
+                    plt.axis('equal')
+                    plt.title(f'({n}, {l})')
+                    plt.tight_layout()
+
+                    f = lambda r, phi: StateBases.Radial(n, -l)(r) * StateBases.Angular(-l)(phi)
+                    Z = f(r, phi)
+                    plt.subplot(1, 2, 2)
+                    plt.contourf(X, Y, Z, 256, cmap="bwr")
+                    plt.clim(-np.max(np.abs(Z)), np.max(np.abs(Z)))
+                    plt.axis('equal')
+                    plt.title(f'({n}, {-l})')
+                    plt.tight_layout()
+                    plt.savefig(f"{filename}/base-({n}-{l})", dpi=300, bbox_inches='tight')

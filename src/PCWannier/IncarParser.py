@@ -8,7 +8,7 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file"]:
             return value
         elif key in ["err_diff"]:
             return float(value.strip())
@@ -53,7 +53,7 @@ class IncarParser:
             tokens = value.split(':')
             if len(tokens) == 2:
                 start, stop = map(int, tokens)
-                return np.arange(start, stop + 1)
+                return np.arange(start, stop)
             else:
                 raise ValueError(f"Invalid band_window format: '{value}'")
         elif key == "dataset_order":

@@ -28,11 +28,11 @@ k_points = -0.5:0.25:0.26, -0.5:0.25:0.26
 
 composition_of_b = 1 0, 0 1
 
-band_window = 0:5
+band_window = 0:4
 
 # site, positon, xaxis angular, (n, l, zona)
 projections
-a; (0, 0); 0; (1, 0, 5); (2, 0, 10); (2, 1, 10); (2, -1, 10); (3, 2, 20); (3, -2, 20)
+a; (0, 0); 0;(1, 0, 5); (2, 1, 10); (2, -1, 10)
 # b; (0, 0.5); 0; (1, 0, 5); (2, 0, 10); (2, 1, 10); (2, -1, 10); (3, 2, 20); (3, -2, 20)
 end
 
@@ -102,6 +102,7 @@ wannier_file = examples/wannier.txt
 wannier_figures = examples/wanniers
 
 band_figure = examples/band.png
+band_file = examples/band.txt
 neighbor = 0 1, 1 1, 1 0, 1 -1
 # point name; k1, k2; num
 # G -- X -- M -- G

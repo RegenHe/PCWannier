@@ -64,3 +64,23 @@ class IO:
         except Exception as e:
             Logger.error(f"Error saving data to {filename}: {str(e)}")
             raise
+
+    @staticmethod
+    def save_band(filename: str, data: np.ndarray, k_path: np.ndarray):
+        try:
+            with open(filename, 'w') as f:
+                num_k_points = k_path.shape[0]
+                num_bands = data.shape[1]
+                f.write(f"# k-points: {num_k_points}, Bands: {num_bands}\n")
+                f.write("# kx, ky, band_1, band_2, ..., band_n\n")
+
+                for i in range(num_k_points):
+                    k_point = ", ".join([f"{k_path[i, j]:.8f}" for j in range(k_path.shape[1])])
+                    
+                    band_energies = ", ".join([f"{data[i, j].real:.8f}+{data[i, j].imag:.8f}j" if data[i, j].imag != 0 else f"{data[i, j].real:.8f}" for j in range(num_bands)])
+                    
+                    f.write(f"{k_point},{band_energies}\n")
+            Logger.info(f"Band structure data has been saved to {filename}")
+        except Exception as e:
+            Logger.error(f"An error occurred while saving the band structure: {e}")
+            raise

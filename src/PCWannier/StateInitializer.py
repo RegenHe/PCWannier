@@ -64,9 +64,9 @@ class StateInitializer:
                 for j in range(len(global_data.incar.k_points[1])):
                     t_ = np.conj(self.matV[i][j]).T @ self.matA[i][j]
                     mU, mS, mVh = np.linalg.svd(t_)
-                    self.matV[i][j] = mU @ np.eye(global_data.incar.band_calc_num, global_data.incar.band_calc_num) @ mVh
+                    self.matV[i][j] = self.matV[i][j] @ (mU @ np.eye(global_data.incar.band_calc_num, global_data.incar.band_calc_num) @ mVh)
 
-        global_data.incar.m_set.initial(self.matV)
+        global_data.m_set.initial(self.matV)
         Logger.info('State initialization iteration compeleted')
 
 
@@ -81,6 +81,11 @@ class StateInitializer:
 
         self.matA = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
         # matS = [[None for _ in range(shape[1])]for _ in range(shape[0])]
+
+        if shape[3] > shape[2]:
+            err_msg = f"The number of calculated bands cannot exceed the band window, {shape[3]} > {shape[2]}"
+            Logger.error(err_msg)
+            raise
 
         g = []
         for p in global_data.incar.projections:
@@ -270,7 +275,7 @@ class StateBases:
     
     @staticmethod
     def plot_all(filename: str='./base/'):
-        directory = os.path.dirname(filename)
+        directory = os.path.dirname(filename + '/')
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
         max_n = 4
@@ -291,7 +296,8 @@ class StateBases:
                     plt.axis('equal')
                     plt.title(f'({n}, {l})')
                     plt.tight_layout()
-                    plt.savefig(f"{filename}/base-({n}-{l})", dpi=300, bbox_inches='tight')
+                    plt.savefig(f"{os.path.dirname(filename)}/base-({n}-{l})", dpi=300, bbox_inches='tight')
+                    Logger.info(f"figure successfully saved to {os.path.dirname(filename)}/base-({n}-{l})")
                 else:
                     fig, ax = plt.subplots(figsize=(12, 6))
                     r = np.sqrt(np.power(X, 2) + np.power(Y, 2))
@@ -313,4 +319,5 @@ class StateBases:
                     plt.axis('equal')
                     plt.title(f'({n}, {-l})')
                     plt.tight_layout()
-                    plt.savefig(f"{filename}/base-({n}-{l})", dpi=300, bbox_inches='tight')
+                    plt.savefig(f"{os.path.dirname(filename)}/base-({n}-{l})", dpi=300, bbox_inches='tight')
+                    Logger.info(f"figure successfully saved to {os.path.dirname(filename)}/base-({n}-{l})")

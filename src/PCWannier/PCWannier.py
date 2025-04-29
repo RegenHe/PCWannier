@@ -62,14 +62,14 @@ class PCWannier:
         if global_data.incar.E_is_real:
             sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
             shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
-            t_ = E_raw_data.value_matrix[0].reshape(shape, order='C')
+            t_ = E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
             desired_order = ["k1", "k2", "E"]
             indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
             global_data.state_collection.E = np.real(np.transpose(t_, axes=(indices[0], indices[1], indices[2])))
         else:
             sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
             shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
-            t_ = E_raw_data.value_matrix[0].reshape(shape, order='C')
+            t_ = E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
             desired_order = ["k1", "k2", "E"]
             indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
             global_data.state_collection.E = np.transpose(t_, axes=(indices[0], indices[1], indices[2]))
@@ -112,14 +112,14 @@ class PCWannier:
             for i in range(shape[0]):
                 for j in range(shape[1]):
                     extention_field[i, j, n] = global_data.state_collection.get_extention_field(i, j, n)
-        ubloch = np.array([[[None for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
-        for n in range(shape[2]):
+        ubloch = np.array([[[None for _ in range(shape[3])] for _ in range(shape[1])] for _ in range(shape[0])])
+        for n in range(shape[3]):
             for i in range(shape[0]):
                 for j in range(shape[1]):
                     t_ = global_data.state_collection.get_zero_extension_field()
                     mV = global_data.state_initializer.matV[i][j]
                     mU = global_data.gradient.U[i][j]
-                    for m in range(shape[3]):
+                    for m in range(shape[2]):
                         t_ += (mV @ mU)[m, n] * extention_field[i, j, m]
                     ubloch[i, j, n] = t_
         del extention_field
@@ -129,7 +129,7 @@ class PCWannier:
             for j in range(shape[1]):
                 phase_[i, j] = global_data.state_collection.get_extention_phase(i, j)
         wannier = [global_data.state_collection.get_zero_extension_field() for _ in range(shape[2])]
-        for n in range(shape[2]):
+        for n in range(shape[3]):
             for i in range(shape[0]):
                 for j in range(shape[1]):
                     kx, ky = WannierTools.get_kx_ky([i, j])
@@ -214,6 +214,8 @@ class PCWannier:
             D, V = np.linalg.eig(H)
             E.append(np.sort(np.real(D)))
         E = np.array(E)
+        if global_data.incar.band_file.lower() != "false":
+            IO.save_band(global_data.incar.band_file, E, k_list)
 
         fig, ax = plt.subplots()
         for band in range(E.shape[1]):

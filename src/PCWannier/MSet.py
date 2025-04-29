@@ -28,8 +28,8 @@ class MSet:
         if global_data.incar.M_in or 'M' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - M")
             self.mM0 = IO.load_cell_matrix(global_data.incar.M_file, shape=(shape[0], shape[1], shape[2]))
-            self.mMInitial = copy.deepcopy(self.mM0)
-            self.mM = copy.deepcopy(self.mM0)
+            self.mMInitial = np.array([[[np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
+            self.mM = np.array([[[np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
             global_data.state_collection.turn_to_Bloch()
             return
         global_data.state_collection.turn_to_Bloch()
@@ -77,8 +77,8 @@ class MSet:
             self.mM0[i, j, b][m, n] = result
         Logger.info("M0 initialized")
 
-        self.mMInitial = copy.deepcopy(self.mM0)
-        self.mM = copy.deepcopy(self.mM0)
+        self.mMInitial = np.array([[[np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
+        self.mM = np.array([[[np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
 
         Logger.info('M Matrix initialization completed')
     

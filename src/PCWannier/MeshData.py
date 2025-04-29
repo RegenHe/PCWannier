@@ -193,7 +193,7 @@ def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
     t_fields = np.zeros((data.value_matrix.shape[0],) + shape, dtype=complex)
 
     for p in range(data.value_matrix.shape[0]):
-        t_fields[p] = data.value_matrix[p].reshape(shape, order='C')[:,:, global_data.incar.band_window]
+        t_fields[p] = data.value_matrix[p].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
 
     desired_order = ["k1", "k2", "E"]
     indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
@@ -205,5 +205,5 @@ def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
                 fields[i][j][k] = t_fields[:, i, j, k]
     global_data.state_collection.field = fields
     
-    print("distribute data finished")
+    Logger.info("distribute data finished")
     return global_data.state_collection

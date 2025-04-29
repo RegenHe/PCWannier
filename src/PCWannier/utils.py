@@ -206,7 +206,7 @@ class FieldData:
         self.field: np.ndarray = np.array(value)
 
     def __repr__(self) -> str:
-        return f"OneStateData(point_matrix={self.mesh}, value_matrix={self.field})"
+        return f"FieldData(point_matrix={self.mesh}, value_matrix={self.field})"
     
     def plot(self) -> None:
         fig, ax = plt.subplots()
@@ -501,6 +501,7 @@ class IncarData:
         self.M_file: str = None
         self.E_is_real: bool = None
         self.E_file: str = None
+        self.band_file: str = None
         self.hopping_file: str = None
         self.wannier_file: str = None
         self.wannier_figures: str = None

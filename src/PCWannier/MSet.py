@@ -39,25 +39,22 @@ class MSet:
         result_queue = Manager().Queue()
 
         def process_batch(i, j, m_range, n_range, b_range, result_queue):
-            for m in m_range:
-                for n in n_range:
-                    for b in b_range:
-                        l_psi = global_data.state_collection.field[i][j][m]
-                        n_k1_idx, n_k2_idx, out_flag = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                        if out_flag[0] == 1 and out_flag[1] == 1:
-                            phase_x = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'x')
-                            phase_y = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'y')
-                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * (phase_x ** 2) * (phase_y ** 2)
-                        elif out_flag[0] == 1:
-                            phase_x = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'x')
-                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * (phase_x ** 2)
-                        elif out_flag[1] == 1:
-                            phase_y = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx, 'y')
-                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * (phase_y ** 2)
-                        else:
-                            r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n]
-                        fd = FieldData("M0", state_collection.mesh, np.conj(l_psi) * state_collection.epsilon * r_psi)
-                        result_queue.put((i, j, m, n, b, WannierTools.integrate_over_mesh(fd)))
+            try:
+                for m in m_range:
+                    for n in n_range:
+                        for b in b_range:
+                            l_psi = global_data.state_collection.field[i][j][m]
+                            n_k1_idx, n_k2_idx, k_ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+                            if k_ is not None:
+                                phase1 = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx)
+                                phase2 = global_data.state_collection.get_phase(k_[0], k_[1])
+                                r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * phase1 * np.conj(phase2)
+                            else:
+                                r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n]
+                            fd = FieldData("M0", state_collection.mesh, np.conj(l_psi) * state_collection.epsilon * r_psi)
+                            result_queue.put((i, j, m, n, b, WannierTools.integrate_over_mesh(fd)))
+            except Exception as e:
+                    raise e
 
         with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
             for i in range(shape[0]):

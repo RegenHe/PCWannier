@@ -358,14 +358,9 @@ class StateCollection:
         k = WannierTools.get_kx_ky([i, j])
         return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
     
-    def get_phase(self, i: int, j: int, name: str=None):
+    def get_phase_k(self, k: np.ndarray):
         if global_data.incar.dataset_type.lower() == 'comsol':
             sign = -1
-        k = WannierTools.get_kx_ky([i, j])
-        if name == 'x':
-            k[1] = 0
-        elif name == 'y':
-            k[0] = 0
         return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
     
     def get_extention_phase(self, i: int, j: int):
@@ -565,9 +560,9 @@ class WannierTools:
 
     def preprocess(self) -> None:
         if np.array_equal(global_data.incar.reciprocal_lattice_vectors, np.array([[0, 0], [0, 0]])):
-            v = np.linalg.inv(global_data.incar.real_lattice_vectors) * np.eye(len(global_data.incar.real_lattice_vectors))
-            Logger.info(f"reciprocal_lattice_vectors will be set to: {v}")
-            global_data.incar.reciprocal_lattice_vectors = v
+            v = np.linalg.inv(global_data.incar.real_lattice_vectors) @ np.eye(len(global_data.incar.real_lattice_vectors))
+            Logger.info(f"reciprocal_lattice_vectors will be set to: {v.T}")
+            global_data.incar.reciprocal_lattice_vectors = v.T
         
         if self.init is False:
             self.init = True
@@ -601,15 +596,19 @@ class WannierTools:
     def neighbor_reciprocal_lattice_vectors(k: list, direction: int) -> np.ndarray:
         n_k1_idx = int(np.mod(k[0] + global_data.incar.composition_of_b[direction][0], len(global_data.incar.k_points[0])))
         n_k2_idx = int(np.mod(k[1] + global_data.incar.composition_of_b[direction][1], len(global_data.incar.k_points[1])))
-        out_flag = [0, 0]
-        if n_k1_idx != k[0] + global_data.incar.composition_of_b[direction][0]:
-            out_flag[0] = 1
-        if n_k2_idx != k[1] + global_data.incar.composition_of_b[direction][1]:
-            out_flag[1] = 1
-        return n_k1_idx, n_k2_idx, out_flag
+        k_ = None
+        if n_k1_idx != k[0] + global_data.incar.composition_of_b[direction][0] or n_k2_idx != k[1] + global_data.incar.composition_of_b[direction][1]:
+            k_ = [0, 0]
+            k_[0] = int(k[0] + global_data.incar.composition_of_b[direction][0])
+            k_[1] = int(k[1] + global_data.incar.composition_of_b[direction][1])
+        return n_k1_idx, n_k2_idx, k_
     
     @staticmethod
     def get_kx_ky(k: list) -> np.ndarray:
+        if k[0] >= global_data.incar.k_points[0].size or k[1] >= global_data.incar.k_points[1].size or k[0] < 0 or k[1] < 0:
+            kx = (((global_data.incar.k_points[0][1] - global_data.incar.k_points[0][0]) * k[0] + global_data.incar.k_points[0][0]) * global_data.incar.reciprocal_lattice_vectors[0][0] + ((global_data.incar.k_points[1][1] - global_data.incar.k_points[1][0]) * k[1] + global_data.incar.k_points[1][0]) * global_data.incar.reciprocal_lattice_vectors[1][0]) * 2 * np.pi / global_data.incar.lattice_const
+            ky = (((global_data.incar.k_points[0][1] - global_data.incar.k_points[0][0]) * k[0] + global_data.incar.k_points[0][0]) * global_data.incar.reciprocal_lattice_vectors[0][1] + ((global_data.incar.k_points[1][1] - global_data.incar.k_points[1][0]) * k[1] + global_data.incar.k_points[1][0]) * global_data.incar.reciprocal_lattice_vectors[1][1]) * 2 * np.pi / global_data.incar.lattice_const
+            return np.array([kx, ky])
         kx = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
         ky = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
         return np.array([kx, ky])

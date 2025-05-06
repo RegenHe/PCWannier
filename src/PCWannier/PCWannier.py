@@ -102,8 +102,8 @@ class PCWannier:
     @timer("Generate Wannier - ")
     def gen_wannier(self, r: list=[0, 0]):
         r_ = [0, 0]
-        r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + r[1] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const)
-        r_[1] = (r[0] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const + r[1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+        r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] + r[1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
+        r_[1] = (r[0] * global_data.incar.real_lattice_vectors[0][1] + r[1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
         Logger.info(f"Generating Wannier Functions - r = ({r[0]}, {r[1]})")
 
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
@@ -134,6 +134,7 @@ class PCWannier:
             for i in range(shape[0]):
                 for j in range(shape[1]):
                     kx, ky = WannierTools.get_kx_ky([i, j])
+                    sign = 1
                     if global_data.incar.dataset_type.lower() == 'comsol':
                         sign = -1
                     phase = phase_[i, j] * np.exp(1j * np.dot(-1 * sign * np.array([kx, ky]), r_))
@@ -151,8 +152,8 @@ class PCWannier:
     @timer("Generate hoppings - ")
     def gen_hopping(self, r: list=[0, 0]):
         r_ = [0, 0]
-        r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + r[1] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const)
-        r_[1] = (r[0] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const + r[1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+        r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] + r[1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
+        r_[1] = (r[0] * global_data.incar.real_lattice_vectors[0][1] + r[1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
         Logger.info(f"Generating hoppings - r = ({r[0]}, {r[1]})")
 
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
@@ -207,8 +208,8 @@ class PCWannier:
             k = [kx, ky]
             for i in range(len(global_data.incar.neighbor)):
                 r_ = [0, 0]
-                r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const)
-                r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+                r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const)
+                r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
                 Hi += hoppings[i] * np.exp(1j * np.dot(k, r_))
             Hi = Hi + np.conj(Hi).T
             H = H0 + Hi
@@ -242,8 +243,8 @@ class PCWannier:
                 k = [kx, ky]
                 for i in range(len(global_data.incar.neighbor)):
                     r_ = [0, 0]
-                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const)
-                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
+                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
                     Hi += hoppings[i] * np.exp(1j * np.dot(k, r_))
                 Hi = Hi + np.conj(Hi).T
                 H = H0 + Hi
@@ -262,8 +263,8 @@ class PCWannier:
                 k = [kx, ky]
                 for i in range(len(global_data.incar.neighbor)):
                     r_ = [0, 0]
-                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const)
-                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const)
+                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
                     Hi += hoppings[i] * np.exp(1j * np.dot(k, r_))
                 Hi = Hi + np.conj(Hi).T
                 H = H0 + Hi

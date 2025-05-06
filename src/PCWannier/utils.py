@@ -513,7 +513,7 @@ class IncarData:
         self.wb: list = None
 
         self.band_window: list = None
-
+        self.proj_iter: bool = None
         self.projections: list = None
         self.M_in: str = None
 
@@ -530,6 +530,9 @@ class IncarData:
         self.band_figure: str = None
 
         self.use_cached_data: list = None
+
+        self.DOS = None
+        self.DOS_eps = None
 
     def __repr__(self):
         return (

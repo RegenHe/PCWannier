@@ -10,9 +10,9 @@ class IncarParser:
         value = value.strip()
         if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file"]:
             return value
-        elif key in ["err_diff"]:
+        elif key in ["err_diff", "DOS_eps"]:
             return float(value.strip())
-        elif key in ["max_iter"]:
+        elif key in ["max_iter", "DOS", "DOS_num"]:
             return int(value.strip())
         elif key in ["extension",]:
             return [int(x) for x in value.split(',')]
@@ -120,7 +120,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real"]:
+        elif key in ["M_in", "E_is_real", "proj_iter"]:
             if value.strip().lower() == "true":
                 return True
             else:

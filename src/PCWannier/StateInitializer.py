@@ -38,7 +38,9 @@ class StateInitializer:
             self.projection()
             self.matV = self.matC
 
-        if len(global_data.incar.band_window) == global_data.incar.band_calc_num:
+        if global_data.incar.proj_iter is None:
+            global_data.incar.proj_iter = True
+        if len(global_data.incar.band_window) == global_data.incar.band_calc_num or (not global_data.incar.proj_iter):
             global_data.m_set.initial(self.matV)
             return
         

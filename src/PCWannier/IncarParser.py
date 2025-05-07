@@ -82,20 +82,20 @@ class IncarParser:
                         if i == 0:
                             projections_dict['atom'] = parts[i].strip()
                         elif i == 1:
-                            if '(' in parts[i].strip() and ')' in parts[i].strip():
-                                coefficient, term = parts[i].split('(')
+                            if '[' in parts[i].strip() and ']' in parts[i].strip():
+                                coefficient, term = parts[i].split('[')
                                 coefficient = coefficient.strip()
-                                term = term.split(')')[0].strip()
+                                term = term.split(']')[0].strip()
                                 projections_dict['position'] = [float(evaluate_math_expression(v.strip())) for v in term.split(',')]
                             else:
                                 raise ValueError(f"Invalid positon in projections: '{parts[i].strip()}'")
                         elif i == 2:
                             projections_dict['xaxis_angluar'] = float(evaluate_math_expression(parts[i].strip()))
                         else:
-                            if '(' in parts[i].strip() and ')' in parts[i].strip():
-                                coefficient, term = parts[i].split('(')
+                            if '[' in parts[i].strip() and ']' in parts[i].strip():
+                                coefficient, term = parts[i].split('[')
                                 coefficient = coefficient.strip()
-                                term = term.split(')')[0].strip().split(',')
+                                term = term.split(']')[0].strip().split(',')
                                 state_list.append([int(term[0].strip()), int(term[1].strip()), float(evaluate_math_expression(term[2].strip()))])
                             else:
                                 raise ValueError(f"Invalid states in projections: '{parts[i].strip()}'")

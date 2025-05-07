@@ -1,9 +1,12 @@
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
 from .Log import Logger
 from .IO import IO
+from .Interpolator import Interpolator
 from .Utils import global_data
 from .Utils import WannierTools, FieldData
 from .Timer import Timer, timer
@@ -37,6 +40,8 @@ class PCWannier:
         self._initialize_states()
         self._optimize_gradient()
         self._generate_output()
+
+        self._handle_interpolation(args.interp)
 
     def _parse_input(self, args):
         parser = IncarParser(args.input)
@@ -111,6 +116,19 @@ class PCWannier:
             
         self.gen_band()
 
+    def _handle_interpolation(self, interp_path: str):
+        if interp_path is None:
+            return
+        if os.path.exists(interp_path):
+            Logger.info(f"Found existing interpolation file at {interp_path}, loading...")
+            mesh_point = IO.load_mesh_points(interp_path)
+            vals = []
+            for wannier in self.wanniers:
+                interp = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, wannier)
+                res = interp.batch_evaluate(mesh_point)
+                vals.append(res)
+            IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp.txt", mesh_point, vals)
+
     @timer("Generate Wannier - ")
     def gen_wannier(self, r: list=[0, 0]):
         r_ = [0, 0]
@@ -141,7 +159,7 @@ class PCWannier:
         for i in range(shape[0]):
             for j in range(shape[1]):
                 phase_[i, j] = global_data.state_collection.get_extention_phase(i, j)
-        wannier = [global_data.state_collection.get_zero_extension_field() for _ in range(shape[2])]
+        self.wanniers = [global_data.state_collection.get_zero_extension_field() for _ in range(shape[2])]
         for n in range(shape[3]):
             for i in range(shape[0]):
                 for j in range(shape[1]):
@@ -150,15 +168,15 @@ class PCWannier:
                     if global_data.incar.dataset_type.lower() == 'comsol':
                         sign = -1
                     phase = phase_[i, j] * np.exp(1j * np.dot(-1 * sign * np.array([kx, ky]), r_))
-                    wannier[n] += phase * ubloch[i, j, n]
-            wannier[n] /= np.sqrt(shape[0] * shape[1])
-            norm = WannierTools.integrate_over_mesh(FieldData('wannier', global_data.state_collection.extention_mesh, np.abs(wannier[n]) ** 2 * global_data.state_collection.extention_epsilon))
+                    self.wanniers[n] += phase * ubloch[i, j, n]
+            self.wanniers[n] /= np.sqrt(shape[0] * shape[1])
+            norm = WannierTools.integrate_over_mesh(FieldData('wannier', global_data.state_collection.extention_mesh, np.abs(self.wanniers[n]) ** 2 * global_data.state_collection.extention_epsilon))
             Logger.info(f"Check wannier function norm = {norm}")
             if not np.isclose(np.abs(norm), 1.0, atol=1e-3):
                 warn = f"Normalization ({np.abs(norm)}) not equal to 1 in Wannier State - {n}, err = {np.abs(1 - np.abs(norm))}"
                 Logger.warning(warn)
             if global_data.incar.wannier_figures.lower() != "false":
-                fd = FieldData('wannier', global_data.state_collection.extention_mesh, wannier[n])
+                fd = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[n])
                 fd.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}.png")
     
     @timer("Generate hoppings - ")

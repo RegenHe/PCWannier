@@ -302,6 +302,14 @@ class StateCollection:
         if 'N' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - N")
             self.normalization = IO.load_cell_matrix(global_data.incar.N_file, shape=(len(self.field[0][0]),))
+            self.normalization = np.transpose(np.array([p for p in self.normalization[:]]), (1, 2, 0))
+            self.is_normalized = True
+            for i in range(len(self.field)):
+                for j in range(len(self.field[0])):
+                    for n in range(len(self.field[0][0])):
+                        if self.normalization[i][j][n] == 0.0:
+                            raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
+                        self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
             return
         
         self.normalization = [[[None for _ in range(len(self.field[0][0]))] for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
@@ -342,7 +350,7 @@ class StateCollection:
                     self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
         
         if not global_data.incar.N_file.lower == "false":
-            IO.save_to_txt(global_data.incar.N_file, self.normalization, (len(self.field[0][0])))
+            IO.save_to_txt(global_data.incar.N_file, np.transpose(self.normalization, (2, 0, 1)), (len(self.field[0][0])))
         
     def turn_to_Bloch(self) -> None:
         if self.field is None:

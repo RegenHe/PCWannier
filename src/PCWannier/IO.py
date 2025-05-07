@@ -103,8 +103,10 @@ class IO:
         except Exception as e:
             Logger.error(f"Failed to load mesh points from '{filename}': {e}")
             raise
-    def save_points_with_complex_values(filename: str, points: np.ndarray, values: np.ndarray):
-        if points.shape[0] != values.shape[0]:
+
+    def save_points_with_values(filename: str, points: np.ndarray, values: np.ndarray):
+        values = np.array(values)
+        if points.shape[0] != values[0].shape[0]:
             Logger.error("Number of points and number of value rows must match.")
             raise ValueError("Number of points and number of value rows must match.")
 
@@ -113,7 +115,7 @@ class IO:
                 x, y = points[i]
                 val_strs = []
 
-                for v in values[i]:
+                for v in values[:, i]:
                     if isinstance(v, complex):
                         val_strs.append(f"{v.real:.10f}{v.imag:+.10f}j")
                     else:
@@ -121,3 +123,4 @@ class IO:
 
                 row = f"{x:.10f},{y:.10f}," + ",".join(val_strs)
                 f.write(row + "\n")
+        Logger.info(f"Data successfully saved to {filename}")

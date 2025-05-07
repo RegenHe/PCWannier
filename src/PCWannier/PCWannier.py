@@ -17,8 +17,8 @@ class PCWannier:
     def __init__(self):
         self.wanniers: list = []
 
+    @timer("PCWannier run - ")
     def run(self, args):
-        time = Timer("PCWannier run - ")
         self.logger = Logger(args.log)
 
         Logger.info('=========  PCWannier v0.1.0  =========')
@@ -103,7 +103,7 @@ class PCWannier:
         if not global_data.incar.M_in:
             global_data.m_set.save_as(global_data.incar.M_file)
             
-        global_data.state_initializer.save_as(global_data.incar.V_file)
+        global_data.state_initializer.save_as(global_data.incar.V_file, global_data.incar.A_file)
         global_data.gradient.save_as(global_data.incar.U_file)
         
         if global_data.incar.hopping_file.lower() != "false":

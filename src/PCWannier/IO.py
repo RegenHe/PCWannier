@@ -12,35 +12,42 @@ class IO:
         with open(filename, "r") as f:
             content = f.read()
 
-        content = re.sub(r'#.*$', '', content)
+        content = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
 
-        cells = re.split(r"(?=CELL[\[\(])", content.strip())
+        pattern = re.compile(
+            r"CELL\s*[\(\[]\s*([0-9,\s]*)\s*[\)\]]\s*:\s*\n((?:.*?\n)*?)(?=CELL\s*[\(\[]|\Z)", re.MULTILINE)
 
-        for cell in cells:
-            lines = cell.strip().splitlines()
-            if not lines:
+        for match in pattern.finditer(content):
+            index_str = match.group(1).strip()
+            lines = match.group(2).strip().splitlines()
+
+            if not index_str:
                 continue
-            header = lines[0]
 
-            indices = list(map(int, re.findall(r"\d+", header)))
-
-            if len(indices) > len(shape):
-                raise ValueError(f"Parsed dimensions {len(indices)} are greater than expected shape dimensions {len(shape)}.")
+            try:
+                indices = [int(i.strip()) for i in index_str.split(',') if i.strip() != '']
+            except ValueError:
+                raise ValueError(f"Invalid index format in CELL: {index_str}")
             
-            indices = indices[:len(shape)]
+            if len(indices) > len(shape):
+                raise ValueError(f"Index {indices} exceeds shape dimensions {shape}")
+            
+            while len(indices) < len(shape):
+                indices.append(0)
 
-            indices = [i - 1 for i in indices]  
+            for dim, val in zip(shape, indices):
+                if val < 0 or val >= dim:
+                    raise IndexError(f"Index {indices} out of bounds for shape {shape}")
 
             matrix = []
-            for line in lines[1:]:
+            for line in lines:
                 if not line.strip():
                     continue
-                entries = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s*[-+]\s*\d*\.?\d+(?:[eE][-+]?\d+)?j', line)
-                row = [complex(eval(e.replace(' ', ''))) for e in entries]
-                matrix.append(row)
+                entries = [complex(eval(e.strip().replace(' ', '')))
+                        for e in line.split(',') if e.strip()]
+                matrix.append(entries)
 
-            idx = tuple(indices)
-            data[idx] = np.array(matrix, dtype=complex)
+            data[tuple(indices)] = np.array(matrix, dtype=complex)
 
         return data
 
@@ -84,3 +91,33 @@ class IO:
         except Exception as e:
             Logger.error(f"An error occurred while saving the band structure: {e}")
             raise
+    
+    @staticmethod
+    def load_mesh_points(filename: str) -> np.ndarray:
+        try:
+            points = np.loadtxt(filename, delimiter=',')
+            if points.ndim != 2 or points.shape[1] != 2:
+                Logger.error("Invalid mesh file format: each line must contain exactly two comma-separated values (x, y).")
+                raise ValueError("Invalid file format.")
+            return points
+        except Exception as e:
+            Logger.error(f"Failed to load mesh points from '{filename}': {e}")
+            raise
+    def save_points_with_complex_values(filename: str, points: np.ndarray, values: np.ndarray):
+        if points.shape[0] != values.shape[0]:
+            Logger.error("Number of points and number of value rows must match.")
+            raise ValueError("Number of points and number of value rows must match.")
+
+        with open(filename, 'w') as f:
+            for i in range(points.shape[0]):
+                x, y = points[i]
+                val_strs = []
+
+                for v in values[i]:
+                    if isinstance(v, complex):
+                        val_strs.append(f"{v.real:.10f}{v.imag:+.10f}j")
+                    else:
+                        val_strs.append(f"{v:.10f}")
+
+                row = f"{x:.10f},{y:.10f}," + ",".join(val_strs)
+                f.write(row + "\n")

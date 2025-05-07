@@ -12,6 +12,7 @@ from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
+from .IO import IO
 from .Log import Logger
 from .Timer import Timer, timer
 from .GlobalData import global_data
@@ -298,6 +299,11 @@ class StateCollection:
             Logger.error(err_msg)
             raise ValueError(err_msg)
         
+        if 'N' in global_data.incar.use_cached_data:
+            Logger.info(f"using cache data - N")
+            self.normalization = IO.load_cell_matrix(global_data.incar.N_file, shape=(len(self.field[0][0]),))
+            return
+        
         self.normalization = [[[None for _ in range(len(self.field[0][0]))] for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
         
         futures = []
@@ -325,7 +331,7 @@ class StateCollection:
         while not result_queue.empty():
             i, j, n, result = result_queue.get()
             self.normalization[i][j][n] = result
-            Logger.info(f"Normalization for field ({i}, {j}, {n}) => {result}")
+            # Logger.info(f"Normalization for field ({i}, {j}, {n}) => {result}")
         
         self.is_normalized = True
         for i in range(len(self.field)):
@@ -334,6 +340,9 @@ class StateCollection:
                     if self.normalization[i][j][n] == 0.0:
                         raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
                     self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
+        
+        if not global_data.incar.N_file.lower == "false":
+            IO.save_to_txt(global_data.incar.N_file, self.normalization, (len(self.field[0][0])))
         
     def turn_to_Bloch(self) -> None:
         if self.field is None:
@@ -491,9 +500,11 @@ class IncarData:
         self.dataset_file: str = None
         self.dataset_order: list = None
         self.dielectric_file: str = None
+        self.N_file: str = None
         self.U_file: str = None
         self.V_file: str = None
         self.M_file: str = None
+        self.A_file: str = None
         self.E_is_real: bool = None
         self.E_file: str = None
         self.band_file: str = None

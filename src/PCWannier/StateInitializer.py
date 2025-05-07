@@ -31,9 +31,17 @@ class StateInitializer:
     @timer("State Initialize iter - ")
     def iter(self, err_diff: float, max_iter: int):
         Logger.info('Starting state initialization iteration')
-        if 'V' in global_data.incar.use_cached_data:
+        if 'V' in global_data.incar.use_cached_data and 'A' in global_data.incar.use_cached_data:
+            Logger.info(f"using cache data - A")
+            self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
             Logger.info(f"using cache data - V")
             self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+        elif 'V' in global_data.incar.use_cached_data:
+            Logger.info(f"using cache data - V")
+            self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+        elif 'A' in global_data.incar.use_cached_data:
+            Logger.info(f"using cache data - A")
+            self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
         else:
             self.projection()
             self.matV = self.matC
@@ -172,8 +180,11 @@ class StateInitializer:
         
         return res / (shape[0] * shape[1])
     
-    def save_as(self, filename):
-        IO.save_to_txt(filename, self.matV, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+    def save_as(self, filenameV: str, filenameA: str):
+        if not filenameV.lower() == "false":
+            IO.save_to_txt(filenameV, self.matV, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+        if not filenameA.lower() == "false":
+            IO.save_to_txt(filenameA, self.matA, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
 
 class StateBases:
     @staticmethod

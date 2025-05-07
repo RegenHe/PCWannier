@@ -9,6 +9,7 @@ def parse_args():
     parser.add_argument('-t', '--threads', type=int, default=1, help='Number of threads to use')
     parser.add_argument('-l', '--log', default="log.txt", help='Log file')
     parser.add_argument('-b', '--base', action='store_true', help='Plot Base Functions')
+    parser.add_argument('--interp', type=str, default=None, help='Path to interpolation data file')
     return parser.parse_args()
 
 def main():

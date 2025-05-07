@@ -26,77 +26,89 @@ class PCWannier:
         global_data.threads = args.threads
         Logger.info(f"Running with {args.threads} threads")
 
+        self._parse_input(args)
+
+        if args.base:
+            StateInitializer.StateBases.plot_all()
+            return
+        
+        self._load_data()
+        self._prepare_state_collection()
+        self._initialize_states()
+        self._optimize_gradient()
+        self._generate_output()
+
+    def _parse_input(self, args):
         parser = IncarParser(args.input)
         wtools = WannierTools()
         wtools.set_incar(parser.parse_file())
         wtools.preprocess()
         Logger.info(global_data.incar)
 
-        if args.base:
-            StateInitializer.StateBases.plot_all()
-            return
-        
+    def _load_data(self):
         if global_data.incar.dataset_type.lower() == "comsol":
-            mesh = MeshData.load_comsol_mesh(global_data.incar.mesh_file)
-            raw_data = MeshData.load_comsol_data(global_data.incar.dataset_file)
-            epsilon = MeshData.load_comsol_data(global_data.incar.dielectric_file)
+            self.mesh = MeshData.load_comsol_mesh(global_data.incar.mesh_file)
+            self.raw_data = MeshData.load_comsol_data(global_data.incar.dataset_file)
+            self.epsilon = MeshData.load_comsol_data(global_data.incar.dielectric_file)
             if global_data.incar.E_file.lower() != 'false':
-                E_raw_data = MeshData.load_comsol_data(global_data.incar.E_file)
-                    
+                self.E_raw_data = MeshData.load_comsol_data(global_data.incar.E_file)
         else:
-            error_msg = f"Don't support {global_data.incar.dataset_type.lower()} type dataset"
-            Logger.error(error_msg)
-            raise ValueError(error_msg)
+            self._unsupported_dataset()
 
-        idxs, dists = MeshData.match_data_to_mesh(mesh, raw_data)
-        raw_data.value_matrix = raw_data.value_matrix[idxs]
-
-        idxs, dists = MeshData.match_data_to_mesh(mesh, epsilon)
-
-        MeshData.distribute_data(mesh, raw_data)
-        global_data.state_collection.epsilon = epsilon.value_matrix[idxs].flatten()
-
+    def _unsupported_dataset(self):
+        dtype = global_data.incar.dataset_type
+        Logger.error(f"Don't support {dtype} type dataset")
+        raise ValueError(f"Don't support {dtype} type dataset")
+    
+    def _prepare_state_collection(self):
+        idxs, _ = MeshData.match_data_to_mesh(self.mesh, self.raw_data)
+        self.raw_data.value_matrix = self.raw_data.value_matrix[idxs]
+        
+        idxs, _ = MeshData.match_data_to_mesh(self.mesh, self.epsilon)
+        MeshData.distribute_data(self.mesh, self.raw_data)
+        
+        global_data.state_collection.epsilon = self.epsilon.value_matrix[idxs].flatten()
         global_data.state_collection.normalize()
-
         global_data.state_collection.turn_to_Bloch()
+        self._handle_energy_data()
 
-        if global_data.incar.E_is_real:
-            sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
-            shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
-            t_ = E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
-            desired_order = ["k1", "k2", "E"]
-            indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
-            global_data.state_collection.E = np.real(np.transpose(t_, axes=(indices[0], indices[1], indices[2])))
-        else:
-            sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
-            shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
-            t_ = E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
-            desired_order = ["k1", "k2", "E"]
-            indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
-            global_data.state_collection.E = np.transpose(t_, axes=(indices[0], indices[1], indices[2]))
+    def _handle_energy_data(self):
+        sizes = {
+            "k1": len(global_data.incar.k_points[0]),
+            "k2": len(global_data.incar.k_points[1]),
+            "E": len(global_data.incar.band_window)
+        }
+        shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
+        t_ = self.E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
+        indices = [global_data.incar.dataset_order.index(dim) for dim in ["k1", "k2", "E"]]
+        transposed = np.transpose(t_, axes=indices)
+        global_data.state_collection.E = np.real(transposed) if global_data.incar.E_is_real else transposed
 
         global_data.state_collection.extention(global_data.incar.extension)
 
+    def _initialize_states(self):
         global_data.push_m_set(MSet.MSet())
         global_data.m_set.init_M0(global_data.state_collection)
-
+        
         global_data.push_state_initializer(StateInitializer.StateInitializer())
         global_data.state_initializer.iter(global_data.incar.err_diff, global_data.incar.max_iter)
 
+    def _optimize_gradient(self):
         global_data.push_gradient(Gradient.Gradient())
         global_data.gradient.iter(global_data.incar.err_diff, global_data.incar.max_iter)
 
+    def _generate_output(self):
         self.gen_wannier()
-
+        
         if not global_data.incar.M_in:
             global_data.m_set.save_as(global_data.incar.M_file)
-        
+            
         global_data.state_initializer.save_as(global_data.incar.V_file)
         global_data.gradient.save_as(global_data.incar.U_file)
-
+        
         if global_data.incar.hopping_file.lower() != "false":
             self.save_hoppings(global_data.incar.hopping_file)
-
+            
         self.gen_band()
 
     @timer("Generate Wannier - ")

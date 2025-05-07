@@ -1,6 +1,12 @@
 import numpy as np
+import math
 from .Utils import IncarData
 
+def evaluate_math_expression(expr: str) -> float:
+    try:
+        return eval(expr, {"__builtins__": None}, vars(math))
+    except Exception as e:
+        raise ValueError(f"Invalid expression: '{expr}'. Error: {e}")
 
 class IncarParser:
     def __init__(self, filename: str):
@@ -17,12 +23,12 @@ class IncarParser:
         elif key in ["extension",]:
             return [int(x) for x in value.split(',')]
         elif key == "lattice_const":
-            return float(value.strip())
+            return float(evaluate_math_expression(value.strip()))
         elif key in ["real_lattice_vectors", "reciprocal_lattice_vectors", "composition_of_b"]:
             parts = value.split(',')
             vectors = []
             for part in parts:
-                vec = [float(x) for x in part.strip().split()]
+                vec = [float(evaluate_math_expression(x)) for x in part.strip().split()]
                 vectors.append(vec)
             return vectors
         elif key in ["k_points"]:
@@ -80,17 +86,17 @@ class IncarParser:
                                 coefficient, term = parts[i].split('(')
                                 coefficient = coefficient.strip()
                                 term = term.split(')')[0].strip()
-                                projections_dict['position'] = [float(v.strip()) for v in term.split(',')]
+                                projections_dict['position'] = [float(evaluate_math_expression(v.strip())) for v in term.split(',')]
                             else:
                                 raise ValueError(f"Invalid positon in projections: '{parts[i].strip()}'")
                         elif i == 2:
-                            projections_dict['xaxis_angluar'] = float(parts[i].strip())
+                            projections_dict['xaxis_angluar'] = float(evaluate_math_expression(parts[i].strip()))
                         else:
                             if '(' in parts[i].strip() and ')' in parts[i].strip():
                                 coefficient, term = parts[i].split('(')
                                 coefficient = coefficient.strip()
                                 term = term.split(')')[0].strip().split(',')
-                                state_list.append([int(term[0].strip()), int(term[1].strip()), float(term[2].strip())])
+                                state_list.append([int(term[0].strip()), int(term[1].strip()), float(evaluate_math_expression(term[2].strip()))])
                             else:
                                 raise ValueError(f"Invalid states in projections: '{parts[i].strip()}'")
 
@@ -115,7 +121,7 @@ class IncarParser:
                         if i == 0:
                             k_path_dict['name'] = parts[i].strip()
                         elif i == 1:
-                            k_path_dict['point'] = [float(p) for p in parts[i].strip().split(',')]
+                            k_path_dict['point'] = [float(evaluate_math_expression(p)) for p in parts[i].strip().split(',')]
                         elif i == 2:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)

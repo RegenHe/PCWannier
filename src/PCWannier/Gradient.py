@@ -87,6 +87,10 @@ class Gradient:
                 self.G[i][j] = 4 * self.G[i][j]
                 self.dW[i][j] = self.epsilon * self.G[i][j]
                 if isUpdate:
+                    if not np.isclose(np.abs(np.trace(self.U[i][j] @ self.U[i][j].conj().T)), shape[2], rtol=1e-8):
+                        Logger.warning(f"||U[{i}][{j}]|| = {np.abs(np.trace(self.U[i][j] @ self.U[i][j].conj().T))}, updating it")
+                        u, s, vh = np.linalg.svd(self.U[i][j])
+                        self.U[i][j] = u @ vh
                     self.U[i][j] = self.U[i][j] @ scipy.linalg.expm(self.dW[i][j])
 
 

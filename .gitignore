@@ -94,5 +94,6 @@ dmypy.json
 *.svg
 
 data/
+out/
 
 **/log.txt

@@ -41,7 +41,7 @@ class PCWannier:
         self._optimize_gradient()
         self._generate_output()
 
-        self._handle_interpolation(args.interp)
+        self._handle_interpolation(args.interp, args.interp_out)
 
     def _parse_input(self, args):
         parser = IncarParser(args.input)
@@ -116,7 +116,7 @@ class PCWannier:
             
         self.gen_band()
 
-    def _handle_interpolation(self, interp_path: str):
+    def _handle_interpolation(self, interp_path: str, interp_out: str):
         if interp_path is None:
             return
         if os.path.exists(interp_path):
@@ -127,7 +127,12 @@ class PCWannier:
                 interp = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, wannier)
                 res = interp.batch_evaluate(mesh_point)
                 vals.append(res)
-            IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp.txt", mesh_point, vals)
+            if interp_out is None:
+                IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp.txt", mesh_point, vals)
+            else:
+                if not os.path.exists(os.path.dirname(interp_path)):
+                    os.makedirs(os.path.dirname(interp_path))
+                IO.save_points_with_values(interp_out, mesh_point, vals)
 
     @timer("Generate Wannier - ")
     def gen_wannier(self, r: list=[0, 0]):

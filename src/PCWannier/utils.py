@@ -127,8 +127,8 @@ class Mesh:
             for j in range(n[1]):
                 if i == 0 and j == 0:
                     continue
-                offset_x = global_data.incar.real_lattice_vectors[0][0] * i + global_data.incar.real_lattice_vectors[1][0] * j
-                offset_y = global_data.incar.real_lattice_vectors[0][1] * i + global_data.incar.real_lattice_vectors[1][1] * j
+                offset_x = (global_data.incar.real_lattice_vectors[0][0] * i + global_data.incar.real_lattice_vectors[1][0] * j) * global_data.incar.lattice_const
+                offset_y = (global_data.incar.real_lattice_vectors[0][1] * i + global_data.incar.real_lattice_vectors[1][1] * j) * global_data.incar.lattice_const
 
                 new_elements = original_elements + np.max(self.elements) + 1
                 # new_vertices = original_vertices + np.array([offset_x + 1e-3 * i, offset_y + 1e-3 * j])
@@ -144,8 +144,8 @@ class Mesh:
 
                 index_map, space_to_original_mapping = self.rebuild_index(space_to_original_mapping)
         
-        offset_x = global_data.incar.real_lattice_vectors[0][0] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][0] * np.floor((n[1] - 1) / 2)
-        offset_y = global_data.incar.real_lattice_vectors[0][1] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][1] * np.floor((n[1] - 1) / 2)
+        offset_x = (global_data.incar.real_lattice_vectors[0][0] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][0] * np.floor((n[1] - 1) / 2)) * global_data.incar.lattice_const
+        offset_y = (global_data.incar.real_lattice_vectors[0][1] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][1] * np.floor((n[1] - 1) / 2)) * global_data.incar.lattice_const
         self.vertices = self.vertices - np.array([offset_x, offset_y])
         return space_to_original_mapping
 

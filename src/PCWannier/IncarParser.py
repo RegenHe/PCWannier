@@ -1,6 +1,5 @@
 import numpy as np
 import math
-from .Utils import IncarData
 
 def evaluate_math_expression(expr: str) -> float:
     try:
@@ -8,7 +7,98 @@ def evaluate_math_expression(expr: str) -> float:
     except Exception as e:
         raise ValueError(f"Invalid expression: '{expr}'. Error: {e}")
 
+
+class IncarData:
+    def __init__(self):
+        self.name: str = None
+        self.lattice_const: float = None
+        self.real_lattice_vectors: list = None
+        self.reciprocal_lattice_vectors: list = None
+        self.k_points: list = None
+        self.dataset_type: str = None
+        self.dataset_file: str = None
+        self.dataset_order: list = None
+        self.dielectric_file: str = None
+        self.N_file: str = None
+        self.U_file: str = None
+        self.V_file: str = None
+        self.M_file: str = None
+        self.A_file: str = None
+        self.E_is_real: bool = None
+        self.E_file: str = None
+        self.band_file: str = None
+        self.hopping_file: str = None
+        self.wannier_file: str = None
+        self.wannier_figures: str = None
+
+        self.mesh_file: str = None
+
+        self.b_vectors: list = None
+        self.composition_of_b: list = None
+        self.wb: list = None
+
+        self.band_window: list = None
+        self.proj_iter: bool = None
+        self.projections: list = None
+        self.M_in: str = None
+
+        self.err_diff: float = None
+        self.max_iter: float = None
+
+        self.extension: list = None
+
+        self.band_calc_num: int = None
+        self.hopping_state: list = None
+
+        self.neighbor: list = None
+        self.k_path: list = None
+        self.band_figure: str = None
+
+        self.use_cached_data: list = None
+
+        self.DOS = None
+        self.DOS_eps = None
+
+    def __repr__(self):
+        class_name = self.__class__.__name__
+        lines = []
+        for key in sorted(self.__dict__):
+            value = getattr(self, key)
+            lines.append(f"  {key}={value!r},")
+        body = "\n".join(lines)
+        return f"{class_name} =>\n{body}"
+    
+    
+
+
 class IncarParser:
+    DEFAULTS = {
+    "name": "Wannier",
+    "reciprocal_lattice_vectors": np.array([[0, 0], [0, 0]]),
+    "dataset_type":  "comsol",
+    "dataset_order": ["k1", "k2", "E"],
+    "N_file" :  "./N.txt",
+    "U_file": "./U.txt",
+    "V_file": "./V.txt",
+    "M_file": "./M.txt",
+    "A_file": "./A.txt",
+    "E_is_real": True,
+    "band_file": "./band.txt",
+    "hopping_file": "./hopping.txt",
+    "wannier_file": "./wannier.txt",
+    "wannier_figures": "./wanniers",
+    "proj_iter": True,
+    "M_in": False,
+    "err_diff": 1e-6,
+    "max_iter": 2000,
+    "band_figure": "./band.png",
+
+    "use_cached_data": ["False"],
+    "DOS": 2,
+    "DOS_eps": 0.01,
+    "DOS_num": 200,
+    }
+
     def __init__(self, filename: str):
         self.filename = filename
 
@@ -184,4 +274,11 @@ class IncarParser:
 
                     parsed_value = self.parse_value(key, value)
                     setattr(incar_data, key, parsed_value)
+                    
+        for key, default_val in self.DEFAULTS.items():
+            if getattr(incar_data, key, None) is None:
+                setattr(incar_data, key, default_val)
         return incar_data
+    
+
+

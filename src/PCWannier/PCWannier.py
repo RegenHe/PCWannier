@@ -11,10 +11,12 @@ from .Utils import global_data
 from .Utils import WannierTools, FieldData
 from .Timer import Timer, timer
 from .IncarParser import IncarParser
-import PCWannier.MeshData as MeshData
-import PCWannier.MSet as MSet
-import PCWannier.StateInitializer as StateInitializer
-import PCWannier.Gradient as Gradient
+
+from . import MeshData
+from . import MSet
+from . import StateInitializer
+from . import Gradient
+
 
 class PCWannier:
     def __init__(self):

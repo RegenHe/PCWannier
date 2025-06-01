@@ -18,6 +18,8 @@ from .Timer import Timer, timer
 from .GlobalData import global_data
 from .CallableWrapper import CallableWrapper
 
+from .IncarParser import IncarData
+
 class Mesh:
     def __init__(self, vertices: np.ndarray, elements: np.ndarray, edge: np.ndarray=None) -> None:
         if vertices is None:
@@ -497,80 +499,6 @@ class StateCollection:
     def __repr__(self) -> str:
         return f"StateCollection(point_matrix={self.mesh}, field_number={len(self.field)})"
 
-class IncarData:
-    def __init__(self):
-        self.name: str = None
-        self.lattice_const: float = None
-        self.real_lattice_vectors: list = None
-        self.reciprocal_lattice_vectors: list = None
-        self.k_points: list = None
-        self.dataset_type: str = None
-        self.dataset_file: str = None
-        self.dataset_order: list = None
-        self.dielectric_file: str = None
-        self.N_file: str = None
-        self.U_file: str = None
-        self.V_file: str = None
-        self.M_file: str = None
-        self.A_file: str = None
-        self.E_is_real: bool = None
-        self.E_file: str = None
-        self.band_file: str = None
-        self.hopping_file: str = None
-        self.wannier_file: str = None
-        self.wannier_figures: str = None
-
-        self.mesh_file: str = None
-
-        self.b_vectors: list = None
-        self.composition_of_b: list = None
-        self.wb: list = None
-
-        self.band_window: list = None
-        self.proj_iter: bool = None
-        self.projections: list = None
-        self.M_in: str = None
-
-        self.err_diff: float = None
-        self.max_iter: float = None
-
-        self.extension: list = None
-
-        self.band_calc_num: int = None
-        self.hopping_state: list = None
-
-        self.neighbor: list = None
-        self.k_path: list = None
-        self.band_figure: str = None
-
-        self.use_cached_data: list = None
-
-        self.DOS = None
-        self.DOS_eps = None
-
-    def __repr__(self):
-        return (
-            f"IncarData =>\n"
-            f"  name={self.name},\n"
-            f"  lattice_const={self.lattice_const},\n"
-            f"  real_lattice_vectors={self.real_lattice_vectors},\n"
-            f"  reciprocal_lattice_vectors={self.reciprocal_lattice_vectors},\n"
-            f"  k_points={self.k_points},\n"
-            f"  dataset_type={self.dataset_type},\n"
-            f"  dataset_file={self.dataset_file},\n"
-            f"  dataset_order={self.dataset_order},\n"
-            f"  dielectric_file={self.dielectric_file},\n"
-            f"  U_file={self.U_file},\n"
-            f"  hopping_file={self.hopping_file},\n"
-            f"  wannier_file={self.wannier_file},\n"
-            f"  wannier_figures={self.wannier_figures},\n"
-            f"  b_vectors={self.b_vectors},\n"
-            f"  composition_of_b={self.composition_of_b},\n"
-            f"  wb={self.wb},\n"
-            f"  band_window={self.band_window},\n"
-            f"  mesh_file={self.mesh_file},\n"
-            f"  projections={self.projections}\n"
-        )
 
 
 class WannierTools:

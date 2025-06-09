@@ -1,6 +1,8 @@
 import numpy as np
 import math
 
+from .Log import Logger
+
 def evaluate_math_expression(expr: str) -> float:
     try:
         return eval(expr, {"__builtins__": None}, vars(math))
@@ -58,6 +60,12 @@ class IncarData:
 
         self.DOS = None
         self.DOS_eps = None
+        self.DOS_num = None
+
+        self.topo_output: str = None
+        self.k_num: list = None
+        self.hybrid_Wilson_loop: bool = None
+        self.Chern_number: bool = None
 
     def __repr__(self):
         class_name = self.__class__.__name__
@@ -68,49 +76,57 @@ class IncarData:
         body = "\n".join(lines)
         return f"{class_name} =>\n{body}"
     
-    
-
+    def validate(self):
+        missing = [k for k, v in vars(self).items() if v is None]
+        if missing:
+            err_msg = f"Missing required IncarData fields: {', '.join(missing)}"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
 
 class IncarParser:
     DEFAULTS = {
-    "name": "Wannier",
-    "reciprocal_lattice_vectors": np.array([[0, 0], [0, 0]]),
-    "dataset_type":  "comsol",
-    "dataset_order": ["k1", "k2", "E"],
-    "N_file" :  "./N.txt",
-    "U_file": "./U.txt",
-    "V_file": "./V.txt",
-    "M_file": "./M.txt",
-    "A_file": "./A.txt",
-    "E_is_real": True,
-    "band_file": "./band.txt",
-    "hopping_file": "./hopping.txt",
-    "wannier_file": "./wannier.txt",
-    "wannier_figures": "./wanniers",
-    "proj_iter": True,
-    "M_in": False,
-    "err_diff": 1e-6,
-    "max_iter": 2000,
-    "band_figure": "./band.png",
+        "name": "Wannier",
+        "reciprocal_lattice_vectors": np.array([[0, 0], [0, 0]]),
+        "dataset_type":  "comsol",
+        "dataset_order": ["k1", "k2", "E"],
+        "N_file" :  "./N.txt",
+        "U_file": "./U.txt",
+        "V_file": "./V.txt",
+        "M_file": "./M.txt",
+        "A_file": "./A.txt",
+        "E_is_real": True,
+        "band_file": "./band.txt",
+        "hopping_file": "./hopping.txt",
+        "wannier_file": "./wannier.txt",
+        "wannier_figures": "./wanniers",
+        "proj_iter": True,
+        "M_in": False,
+        "err_diff": 1e-6,
+        "max_iter": 2000,
+        "band_figure": "./band.png",
 
-    "use_cached_data": ["False"],
-    "DOS": 2,
-    "DOS_eps": 0.01,
-    "DOS_num": 200,
-    }
+        "use_cached_data": ["False"],
+        "DOS": 2,
+        "DOS_eps": 0.01,
+        "DOS_num": 200,
+        "topo_output": "./topo",
+        "k_num": [100, 100],
+        "hybrid_Wilson_loop": False,
+        "Chern_number": False,
+        }
 
     def __init__(self, filename: str):
         self.filename = filename
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output"]:
             return value
         elif key in ["err_diff", "DOS_eps"]:
             return float(value.strip())
         elif key in ["max_iter", "DOS", "DOS_num"]:
             return int(value.strip())
-        elif key in ["extension",]:
+        elif key in ["extension", "k_num"]:
             return [int(x) for x in value.split(',')]
         elif key == "lattice_const":
             return float(evaluate_math_expression(value.strip()))
@@ -216,7 +232,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter"]:
+        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number"]:
             if value.strip().lower() == "true":
                 return True
             else:
@@ -279,6 +295,3 @@ class IncarParser:
             if getattr(incar_data, key, None) is None:
                 setattr(incar_data, key, default_val)
         return incar_data
-    
-
-

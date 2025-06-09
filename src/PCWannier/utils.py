@@ -536,6 +536,8 @@ class WannierTools:
         for p in global_data.incar.projections:
             global_data.incar.band_calc_num += len(p['states'])
 
+        global_data.incar.validate()
+
     def set_incar(self, incar_data: IncarData) -> None:
         global_data.incar = incar_data
 

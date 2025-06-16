@@ -46,7 +46,7 @@ class PCWannier:
 
         self._topology_calculation()
 
-        self._handle_interpolation(args.interp, args.interp_out)
+        self._handle_interpolation(args.interp, args.interp_wannier, args.interp_epsilon)
 
     def _parse_input(self, args):
         parser = IncarParser(args.input)
@@ -131,14 +131,16 @@ class PCWannier:
             self.Topo = Topo.Topo()
             self.Topo.construct_parallel_transport(self.TBA.eigvecs[:, :, :, g[0]:(g[-1] + 1)])
             if global_data.incar.hybrid_Wilson_loop:
-                self.Topo.save_hybrid_Wilson_loop(os.path.join(global_data.incar.topo_output, f"Hybrid_Wilson_Loop-{gid}-d-0.png"), self.TBA.eigvecs[:, :, g[0]:(g[-1] + 1), g[0]:(g[-1] + 1)], direction=0)
-                self.Topo.save_hybrid_Wilson_loop(os.path.join(global_data.incar.topo_output, f"Hybrid_Wilson_Loop-{gid}-d-1.png"), self.TBA.eigvecs[:, :, g[0]:(g[-1] + 1), g[0]:(g[-1] + 1)], direction=1)
+                Z2_0 = self.Topo.save_hybrid_Wilson_loop(os.path.join(global_data.incar.topo_output, f"Hybrid_Wilson_Loop-{gid}-d-0.png"), self.TBA.eigvecs[:, :, g[0]:(g[-1] + 1), g[0]:(g[-1] + 1)], direction=0)
+                Z2_1 = self.Topo.save_hybrid_Wilson_loop(os.path.join(global_data.incar.topo_output, f"Hybrid_Wilson_Loop-{gid}-d-1.png"), self.TBA.eigvecs[:, :, g[0]:(g[-1] + 1), g[0]:(g[-1] + 1)], direction=1)
+                Logger.info(f"Direction 0: Z2 for group {gid}-bands {g} = {Z2_0}")
+                Logger.info(f"Direction 0: Z2 for group {gid}-bands {g} = {Z2_1}")
             
             if global_data.incar.Chern_number:
                 C = self.Topo.Chern_number(self.TBA.eigvecs[:, :, :, g[0]:(g[-1] + 1)], os.path.join(global_data.incar.topo_output, f"Chern_Number-{gid}.png"))
                 Logger.info(f"Chern number for group {gid}-bands {g} = {C}")
 
-    def _handle_interpolation(self, interp_path: str, interp_out: str):
+    def _handle_interpolation(self, interp_path: str, interp_wannier: str, interp_epsilon: str):
         if interp_path is None:
             return
         if os.path.exists(interp_path):
@@ -149,12 +151,22 @@ class PCWannier:
                 interp = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, wannier)
                 res = interp.batch_evaluate(mesh_point)
                 vals.append(res)
-            if interp_out is None:
-                IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp.txt", mesh_point, vals)
+            if interp_wannier is None:
+                IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp-wannier.txt", mesh_point, vals)
             else:
                 if not os.path.exists(os.path.dirname(interp_path)):
                     os.makedirs(os.path.dirname(interp_path))
-                IO.save_points_with_values(interp_out, mesh_point, vals)
+                IO.save_points_with_values(interp_wannier, mesh_point, vals)
+
+            vals = []
+            interp = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, global_data.state_collection.extention_epsilon)
+            vals.append(interp.batch_evaluate(mesh_point))
+            if interp_epsilon is None:
+                IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp-epsilon.txt", mesh_point, vals)
+            else:
+                if not os.path.exists(os.path.dirname(interp_path)):
+                    os.makedirs(os.path.dirname(interp_path))
+                IO.save_points_with_values(interp_epsilon, mesh_point, vals)
 
     @timer("Generate Wannier - ")
     def gen_wannier(self, r: list=[0, 0]):

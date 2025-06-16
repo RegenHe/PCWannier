@@ -52,25 +52,35 @@ class Topo:
             x_centers[j] = (1 / (2 * np.pi)) * theta
 
         x_centers = x_centers - np.floor(x_centers.min(axis=0))
-        return x_centers, k_param
+
+        half = k_param.size // 2
+        Ncross = 0
+        for b in range(x_centers.shape[1]):
+            s = x_centers[:half + 1, b] % 1 - 0.5
+            Ncross += np.sum(np.abs(np.diff(np.signbit(s))))
+
+        return x_centers, k_param, Ncross % 2
     
     def save_hybrid_Wilson_loop(self, filename: str, eigvecs: np.ndarray, direction: int=0):
-        x_centers, k_param = self.hybrid_Wilson_loop(eigvecs, direction)
+        x_centers, k_param, Z2 = self.hybrid_Wilson_loop(eigvecs, direction)
 
         fig, ax = plt.subplots()
         for band in range(x_centers.shape[1]):
             ax.plot(k_param, x_centers[:, band] % 1)
-
+        
+        ax.axvline(x=0.5, color='black', linestyle='--', linewidth=0.8, alpha=0.8)
+        ax.axhline(y=0.5, color='black', linestyle='--', linewidth=0.8, alpha=0.8)
         ax.set_xlabel(r"$k (2\pi / a)$")
         ax.set_ylabel(r"$x$")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
-        ax.set_title("Wilson loop (direction = {})".format(direction))
+        ax.set_title(f"Wilson loop (direction = {direction}, Z2 = {Z2})")
         if not os.path.exists(os.path.dirname(filename)):
             os.makedirs(os.path.dirname(filename))
         fig.savefig(filename, bbox_inches='tight', dpi=300)
         Logger.info(f"figure successfully saved to {filename}")
         
+        return Z2
 
     def Chern_number(self, eigvecs: np.ndarray, filename: str):
         n_k1, n_k2, dim, _ = eigvecs.shape

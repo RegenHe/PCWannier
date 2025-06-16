@@ -59,6 +59,9 @@ class Gradient:
             if err < err_diff:
                 Logger.info(f"Convergence criterion met, err_diff = {np.abs(lastOmega - np.sum(self.omega))}, total iterations: {n + 1}")
                 break
+            if err < self.epsilon * 1e-1:
+                self.epsilon *= 0.1
+                Logger.info(f"err_diff = {err}, set epsilon to {self.epsilon}")
             lastOmega = np.sum(self.omega)
         if err > err_diff:
             Logger.warning(f"Convergence criteria not met, iteration limit reached, err_diff = {err}, total iterations: {n + 1}")

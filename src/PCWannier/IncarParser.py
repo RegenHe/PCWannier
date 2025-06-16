@@ -44,6 +44,7 @@ class IncarData:
         self.projections: list = None
         self.M_in: str = None
 
+        self.epsilon: float = None
         self.err_diff: float = None
         self.max_iter: float = None
 
@@ -101,6 +102,7 @@ class IncarParser:
         "wannier_figures": "./wanniers",
         "proj_iter": True,
         "M_in": False,
+        "epsilon": 0.01,
         "err_diff": 1e-6,
         "max_iter": 2000,
         "band_figure": "./band.png",
@@ -122,7 +124,7 @@ class IncarParser:
         value = value.strip()
         if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output"]:
             return value
-        elif key in ["err_diff", "DOS_eps"]:
+        elif key in ["epsilon", "err_diff", "DOS_eps"]:
             return float(value.strip())
         elif key in ["max_iter", "DOS", "DOS_num"]:
             return int(value.strip())

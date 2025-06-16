@@ -10,7 +10,8 @@ def parse_args():
     parser.add_argument('-l', '--log', default="log.txt", help='Log file')
     parser.add_argument('-b', '--base', action='store_true', help='Plot Base Functions')
     parser.add_argument('--interp', type=str, default=None, help='Path to interpolation data file')
-    parser.add_argument('--interp-out', type=str, default=None, help='Path to interpolation data file output')
+    parser.add_argument('--interp-wannier', type=str, default=None, help='Path to interpolation wannier file')
+    parser.add_argument('--interp-epsilon', type=str, default=None, help='Path to interpolation epsilon file')
     return parser.parse_args()
 
 def main():

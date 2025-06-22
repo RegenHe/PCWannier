@@ -179,6 +179,30 @@ def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarra
             unique_dists.append(dists[i])
 
     return unique_idx, unique_dists
+def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
+    if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
+        Logger.warning("Mesh and data dimensions do not match.")
+
+    tree = cKDTree(data.point_matrix)
+    dists, idxs = tree.query(mesh.vertices, k=1)
+
+    dist_sum = {}
+    dist_count = {}
+    order = []
+
+    for dist, idx in zip(dists, idxs):
+        if idx not in dist_sum:
+            order.append(idx)
+            dist_sum[idx] = dist
+            dist_count[idx] = 1
+        else:
+            dist_sum[idx] += dist
+            dist_count[idx] += 1
+
+    unique_idx   = np.array(order)
+    unique_dists = np.array([dist_sum[i] / dist_count[i] for i in order])
+
+    return unique_idx, unique_dists
 
 def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
     if global_data.incar is None:

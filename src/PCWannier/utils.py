@@ -260,6 +260,9 @@ class StateCollection:
         self.epsilon: np.array = None
         self.normalization: float = 0.0
 
+        self.transform: np.ndarray = None
+        self.raw_field: list = None
+
         self.is_normalized = False
         self.is_bloch = False
 
@@ -410,6 +413,38 @@ class StateCollection:
         if self.extention_epsilon is None:
             self.extention_epsilon = np.array([self.epsilon[k] for k in self.space_to_original_mapping])
         return self.extention_epsilon
+    
+    def set_transform(self, transform: np.ndarray) -> None:
+        if self.field is None:
+            err_msg = "Field data is not initialized"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
+        
+        if transform.shape != (len(self.field), len(self.field[0]), len(self.field[0][0]), len(self.field[0][0])):
+            err_msg = f"Transform shape {transform.shape} does not match field shape {len(self.field)}, {len(self.field[0])}, {len(self.field[0][0])}"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
+        
+        if self.raw_field is None:
+            self.raw_field = copy.deepcopy(self.field)
+
+            for i in range(len(self.field)):
+                for j in range(len(self.field[0])):
+                    old_modes = self.raw_field[i][j]
+                    T = transform[i, j]
+                    new_modes = []
+                    for q in range(len(self.field[0][0])):
+                        psi_q = None
+                        for p in range(len(self.field[0][0])):
+                            coeff = T[p, q]
+                            if abs(coeff) < 1e-14:
+                                continue
+                            term = old_modes[p] * coeff
+                            psi_q = term if psi_q is None else psi_q + term
+                        new_modes.append(psi_q)
+                    self.field[i][j] = new_modes
+        self.transform = transform
+
         
     def get_zero_field(self):
         return [0.0 + 0.0j] * self.mesh.vertices.shape[0]

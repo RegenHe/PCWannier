@@ -26,6 +26,7 @@ class IncarData:
         self.V_file: str = None
         self.M_file: str = None
         self.A_file: str = None
+        self.O_file: str = None
         self.E_is_real: bool = None
         self.E_file: str = None
         self.band_file: str = None
@@ -68,6 +69,8 @@ class IncarData:
         self.hybrid_Wilson_loop: bool = None
         self.Chern_number: bool = None
 
+        self.symmetry: bool = None
+
     def __repr__(self):
         class_name = self.__class__.__name__
         lines = []
@@ -95,6 +98,7 @@ class IncarParser:
         "V_file": "./V.txt",
         "M_file": "./M.txt",
         "A_file": "./A.txt",
+        "O_file": "./O.txt",
         "E_is_real": True,
         "band_file": "./band.txt",
         "hopping_file": "./hopping.txt",
@@ -115,6 +119,8 @@ class IncarParser:
         "k_num": [100, 100],
         "hybrid_Wilson_loop": False,
         "Chern_number": False,
+
+        "symmetry": False,
         }
 
     def __init__(self, filename: str):
@@ -234,7 +240,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number"]:
+        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry"]:
             if value.strip().lower() == "true":
                 return True
             else:

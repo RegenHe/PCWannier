@@ -1,5 +1,15 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .IncarParser import IncarData
+    from .Utils import StateCollection
+    from .MSet import MSet
+    from .StateInitializer import StateInitializer
+    from .Gradient import Gradient
+
 class GlobalData:
-    _instance = None
+    _instance: GlobalData = None
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -9,17 +19,17 @@ class GlobalData:
     def __init__(self) -> None:
         self.threads = 1
 
-        self.incar = None
-        self.state_collection = None
-        self.m_set = None
-        self.state_initializer = None
-        self.gradient = None
+        self.incar: IncarData = None
+        self.state_collection: StateCollection = None
+        self.m_set: MSet = None
+        self.state_initializer: StateInitializer = None
+        self.gradient: Gradient = None
 
-        self.incar_list: list = []
-        self.state_collection_list: list = []
-        self.m_set_list: list = []
-        self.state_initializer_list: list = []
-        self.gradient_list: list = []
+        self.incar_list: list[IncarData] = []
+        self.state_collection_list: list[StateCollection] = []
+        self.m_set_list: list[MSet] = []
+        self.state_initializer_list: list[StateInitializer] = []
+        self.gradient_list: list[Gradient] = []
         
 
     def push_incar(self, incar=None):

@@ -12,6 +12,8 @@ from .Utils import WannierTools, FieldData
 from .Timer import Timer, timer
 from .IncarParser import IncarParser
 
+from .Symmetry import Symmetry, Orthogonalizer
+
 from . import MeshData
 from . import MSet
 from . import StateInitializer
@@ -93,6 +95,13 @@ class PCWannier:
         indices = [global_data.incar.dataset_order.index(dim) for dim in ["k1", "k2", "E"]]
         transposed = np.transpose(t_, axes=indices)
         global_data.state_collection.E = np.real(transposed) if global_data.incar.E_is_real else transposed
+
+        if global_data.incar.symmetry:
+            Logger.info("Try to orthogonalize eigenvalues")
+            self.orthogonalizer = Orthogonalizer()
+            Transform = self.orthogonalizer.build_orthogonalize_matrix(global_data.state_collection)
+            self.orthogonalizer.save_as(global_data.incar.O_file)
+            global_data.state_collection.set_transform(Transform)
 
         global_data.state_collection.extention(global_data.incar.extension)
 

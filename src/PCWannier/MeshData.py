@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.spatial import cKDTree
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import warnings
 
 from .Log import Logger
@@ -159,50 +159,49 @@ def load_comsol_data(filename: str) -> RawData:
     
     return RawData(point_matrix, value_matrix)
 
-def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
-    if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
-        Logger.warning("Mesh and data dimensions do not match.")
+# def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
+#     if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
+#         Logger.warning("Mesh and data dimensions do not match.")
 
-    # tree = cKDTree(mesh.vertices)
-    # dists, idxs = tree.query(data.point_matrix, k=1)
-    tree = cKDTree(data.point_matrix)
-    dists, idxs = tree.query(mesh.vertices, k=1)
+#     # tree = cKDTree(mesh.vertices)
+#     # dists, idxs = tree.query(data.point_matrix, k=1)
+    # tree = cKDTree(data.point_matrix)
+    # dists, idxs = tree.query(mesh.vertices, k=1)
 
-    seen = set()
-    unique_idx = []
-    unique_dists = []
+#     seen = set()
+#     unique_idx = []
+#     unique_dists = []
     
-    for i, idx in enumerate(idxs):
-        if idx not in seen:
-            seen.add(idx)
-            unique_idx.append(idx)
-            unique_dists.append(dists[i])
+#     for i, idx in enumerate(idxs):
+#         if idx not in seen:
+#             seen.add(idx)
+#             unique_idx.append(idx)
+#             unique_dists.append(dists[i])
 
-    return unique_idx, unique_dists
-def match_data_to_mesh(mesh: Mesh, data: RawData) -> Tuple[np.ndarray, np.ndarray]:
+#     return unique_idx, unique_dists
+def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
     if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
         Logger.warning("Mesh and data dimensions do not match.")
+    data.value_matrix
+    tree = cKDTree(mesh.vertices)
+    dists, mesh_idxs = tree.query(data.point_matrix, k=1)
 
-    tree = cKDTree(data.point_matrix)
-    dists, idxs = tree.query(mesh.vertices, k=1)
+    buckets = [[] for _ in range(len(mesh.vertices))]
+    for data_i, m_idx in enumerate(mesh_idxs):
+        buckets[m_idx].append(data_i)
 
-    dist_sum = {}
-    dist_count = {}
-    order = []
+    comp_vals = (data.value_matrix[:] if data.value_matrix.ndim == 1 else data.value_matrix[:, value_col])
 
-    for dist, idx in zip(dists, idxs):
-        if idx not in dist_sum:
-            order.append(idx)
-            dist_sum[idx] = dist
-            dist_count[idx] = 1
-        else:
-            dist_sum[idx] += dist
-            dist_count[idx] += 1
+    mesh_to_data_idx = np.full(len(mesh.vertices), -1, dtype=int)
+    mesh_dists = np.full(len(mesh.vertices), np.inf, dtype=float)
 
-    unique_idx   = np.array(order)
-    unique_dists = np.array([dist_sum[i] / dist_count[i] for i in order])
+    for m_idx, lst in enumerate(buckets):
+        if lst:
+            best_data_i = max(lst, key=lambda i: comp_vals[i])
+            mesh_to_data_idx[m_idx] = best_data_i
+            mesh_dists[m_idx] = np.linalg.norm(mesh.vertices[m_idx] - data.point_matrix[best_data_i])
 
-    return unique_idx, unique_dists
+    return mesh_to_data_idx, mesh_dists
 
 def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
     if global_data.incar is None:

@@ -12,7 +12,7 @@ from .Utils import WannierTools, FieldData
 from .Timer import Timer, timer
 from .IncarParser import IncarParser
 
-from .Symmetry import Symmetry, Orthogonalizer
+from .Symmetry import Symmetry, Orthogonalizer, RotationOverlap
 
 from . import MeshData
 from . import MSet
@@ -62,6 +62,7 @@ class PCWannier:
             self.mesh = MeshData.load_comsol_mesh(global_data.incar.mesh_file)
             self.raw_data = MeshData.load_comsol_data(global_data.incar.dataset_file)
             self.epsilon = MeshData.load_comsol_data(global_data.incar.dielectric_file)
+            self.epsilon.value_matrix = self.epsilon.value_matrix.flatten()
             if global_data.incar.E_file.lower() != 'false':
                 self.E_raw_data = MeshData.load_comsol_data(global_data.incar.E_file)
         else:
@@ -96,14 +97,21 @@ class PCWannier:
         transposed = np.transpose(t_, axes=indices)
         global_data.state_collection.E = np.real(transposed) if global_data.incar.E_is_real else transposed
 
-        if global_data.incar.symmetry:
-            Logger.info("Try to orthogonalize eigenvalues")
-            self.orthogonalizer = Orthogonalizer()
-            Transform = self.orthogonalizer.build_orthogonalize_matrix(global_data.state_collection)
-            self.orthogonalizer.save_as(global_data.incar.O_file)
-            global_data.state_collection.set_transform(Transform)
+        # if global_data.incar.symmetry:
+        #     self._symmetry()
 
         global_data.state_collection.extention(global_data.incar.extension)
+
+    def _symmetry(self):
+        Logger.info("Try to orthogonalize eigenvalues")
+        self.orthogonalizer = Orthogonalizer()
+        Transform = self.orthogonalizer.build_orthogonalization_matrix(global_data.state_collection)
+        self.orthogonalizer.save_as(global_data.incar.O_file)
+        global_data.state_collection.set_transform(Transform)
+
+        self.symmetry = Symmetry(global_data.incar.real_lattice_vectors, )
+
+        self.rotation_overlap = RotationOverlap(global_data.incar.real_lattice_vectors, global_data.state_collection)
 
     def _initialize_states(self):
         global_data.push_m_set(MSet.MSet())

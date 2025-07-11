@@ -246,8 +246,8 @@ class FieldData:
         min_y, max_y = np.min(self.mesh.vertices[:, 1]), np.max(self.mesh.vertices[:, 1])
         
         margin = 0.1
-        ax.set_xlim(min_x - margin, max_x + margin)
-        ax.set_ylim(min_y - margin, max_y + margin)
+        ax.set_xlim(min_x - margin * (max_x - min_x), max_x + margin * (max_x - min_x))
+        ax.set_ylim(min_y - margin * (max_y - min_y), max_y + margin * (max_y - min_y))
         plt.savefig(filename, dpi=300, bbox_inches='tight')
         Logger.info(f"figure successfully saved to {filename}")
 
@@ -384,6 +384,12 @@ class StateCollection:
         if global_data.incar.dataset_type.lower() == 'comsol':
             sign = -1
         return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
+    
+    @staticmethod
+    def get_phase_k_r(k: np.ndarray, r: np.ndarray):
+        if global_data.incar.dataset_type.lower() == 'comsol':
+            sign = -1
+        return np.exp(1j * sign * np.dot(r, k))
     
     def get_extention_phase(self, i: int, j: int):
         if global_data.incar.dataset_type.lower() == 'comsol':
@@ -556,7 +562,7 @@ class WannierTools:
                 global_data.incar.b_vectors.append((global_data.incar.composition_of_b[i][0] * global_data.incar.reciprocal_lattice_vectors[0] / len(global_data.incar.k_points[0]) * 2 * np.pi / global_data.incar.lattice_const
                                             + global_data.incar.composition_of_b[i][1] * global_data.incar.reciprocal_lattice_vectors[1] / len(global_data.incar.k_points[1]) * 2 * np.pi / global_data.incar.lattice_const).tolist())
                 
-            global_data.incar.b_vectors = np.array(global_data.incar.b_vectors)
+            global_data.incar.b_vectors = np.array(global_data.incar.b_vectors) * global_data.incar.lattice_const
             mat_a = np.eye(2).reshape(-1, 1)
             mat_b = np.zeros((2 ** 2, len(global_data.incar.composition_of_b)))
             for i in range(2):
@@ -564,8 +570,8 @@ class WannierTools:
                     for k in range(len(global_data.incar.composition_of_b)):
                         mat_b[i * 2 + j][k] = global_data.incar.b_vectors[k][i] * global_data.incar.b_vectors[k][j]
             
-            global_data.incar.wb = np.linalg.pinv(mat_b) @ mat_a
-            global_data.incar.wb = [item for sublist in global_data.incar.wb for item in sublist]
+            global_data.incar.wb = (np.linalg.pinv(mat_b) @ mat_a).flatten()
+            global_data.incar.frac_wb = global_data.incar.wb / global_data.incar.lattice_const ** 2
         
         global_data.incar.band_calc_num = 0
         for p in global_data.incar.projections:

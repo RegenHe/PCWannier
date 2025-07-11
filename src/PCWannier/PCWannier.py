@@ -35,13 +35,14 @@ class PCWannier:
         Logger.info(f"Running with {args.threads} threads")
 
         self._parse_input(args)
+        
+        self._load_data()
+        self._prepare_state_collection()
 
         if args.base:
             StateInitializer.StateBases.plot_all()
             return
-        
-        self._load_data()
-        self._prepare_state_collection()
+
         self._initialize_states()
         self._optimize_gradient()
         self._generate_output()

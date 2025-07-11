@@ -101,7 +101,8 @@ class StateInitializer:
         for p in global_data.incar.projections:
             for state in p['states']:
                 f = lambda r, phi: StateBases.Radial(state[0], state[1])(r, state[2]) * StateBases.Angular(state[1])(phi)
-                h = global_data.state_collection.extention_mesh.rfunc(f, p['position'], p['xaxis_angluar'])
+                cart_position = (p['frac_position'][0] * np.array(global_data.incar.real_lattice_vectors[0]) + p['frac_position'][1] * np.array(global_data.incar.real_lattice_vectors[1]) + np.array(global_data.incar.origin)) * global_data.incar.lattice_const
+                h = global_data.state_collection.extention_mesh.rfunc(f, cart_position, p['xaxis_angluar'])
                 # f = StateBases.temp(state[1], 0)
                 # h = global_data.state_collection.extention_mesh.rfunc(f, p['position'], p['xaxis_angluar'])
                 g.append(h / np.sqrt(WannierTools.integrate_over_mesh(FieldData('', global_data.state_collection.extention_mesh, global_data.state_collection.extention_epsilon * np.abs(h) ** 2))))
@@ -150,7 +151,7 @@ class StateInitializer:
                 for b in range(shape[2]):
                     mM = global_data.m_set.get_M0(i, j, b)
                     n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                    self.matZ[i][j] += global_data.incar.wb[b] * mM @ (self.matV[n_k1][n_k2] @ np.conj(self.matV[n_k1][n_k2]).T) @ np.conj(mM).T
+                    self.matZ[i][j] += global_data.incar.frac_wb[b] * mM @ (self.matV[n_k1][n_k2] @ np.conj(self.matV[n_k1][n_k2]).T) @ np.conj(mM).T
                 if self.last_matZ[i][j] is None:
                     self.last_matZ[i][j] = self.matZ[i][j]
                 else:
@@ -172,7 +173,7 @@ class StateInitializer:
     def get_omega_I(self):
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         res = 0
-        s_N_wb = shape[3] * np.sum(global_data.incar.wb)
+        s_N_wb = shape[3] * np.sum(global_data.incar.frac_wb)
 
         for i in range(shape[0]):
             for j in range(shape[1]):
@@ -291,46 +292,13 @@ class StateBases:
         directory = os.path.dirname(filename + '/')
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
-        max_n = 4
 
-        x = np.linspace(-40 * global_data.incar.lattice_const, 40 * global_data.incar.lattice_const, 400)
-        y = np.linspace(-40 * global_data.incar.lattice_const, 40 * global_data.incar.lattice_const, 400)
-        X, Y = np.meshgrid(x, y, indexing='xy')
-        for n in range(max_n + 1):
-            for l in range(n):
-                if l == 0:
-                    r = np.sqrt(np.power(X, 2) + np.power(Y, 2))
-                    phi = np.atan2(X, Y)
-                    f = lambda r, phi: StateBases.Radial(n, l)(r) * StateBases.Angular(l)(phi)
-                    Z = f(r, phi)
-                    fig, ax = plt.subplots(figsize=(6, 6))
-                    cs = plt.contourf(X, Y, Z, 256, cmap="bwr")
-                    plt.clim(-np.max(np.abs(Z)), np.max(np.abs(Z)))
-                    plt.axis('equal')
-                    plt.title(f'({n}, {l})')
-                    plt.tight_layout()
-                    plt.savefig(f"{os.path.dirname(filename)}/base-({n}-{l})", dpi=300, bbox_inches='tight')
-                    Logger.info(f"figure successfully saved to {os.path.dirname(filename)}/base-({n}-{l})")
-                else:
-                    fig, ax = plt.subplots(figsize=(12, 6))
-                    r = np.sqrt(np.power(X, 2) + np.power(Y, 2))
-                    phi = np.atan2(X, Y)
-                    f = lambda r, phi: StateBases.Radial(n, l)(r) * StateBases.Angular(l)(phi)
-                    Z = f(r, phi)
-                    plt.subplot(1, 2, 1)
-                    plt.contourf(X, Y, Z, 256, cmap="bwr")
-                    plt.clim(-np.max(np.abs(Z)), np.max(np.abs(Z)))
-                    plt.axis('equal')
-                    plt.title(f'({n}, {l})')
-                    plt.tight_layout()
-
-                    f = lambda r, phi: StateBases.Radial(n, -l)(r) * StateBases.Angular(-l)(phi)
-                    Z = f(r, phi)
-                    plt.subplot(1, 2, 2)
-                    plt.contourf(X, Y, Z, 256, cmap="bwr")
-                    plt.clim(-np.max(np.abs(Z)), np.max(np.abs(Z)))
-                    plt.axis('equal')
-                    plt.title(f'({n}, {-l})')
-                    plt.tight_layout()
-                    plt.savefig(f"{os.path.dirname(filename)}/base-({n}-{l})", dpi=300, bbox_inches='tight')
-                    Logger.info(f"figure successfully saved to {os.path.dirname(filename)}/base-({n}-{l})")
+        idx = 0
+        for p in global_data.incar.projections:
+            for state in p['states']:
+                f = lambda r, phi: StateBases.Radial(state[0], state[1])(r, state[2]) * StateBases.Angular(state[1])(phi)
+                cart_position = (p['frac_position'][0] * np.array(global_data.incar.real_lattice_vectors[0]) + p['frac_position'][1] * np.array(global_data.incar.real_lattice_vectors[1]) + np.array(global_data.incar.origin)) * global_data.incar.lattice_const
+                h = global_data.state_collection.extention_mesh.rfunc(f, cart_position, p['xaxis_angluar'])
+                field = FieldData('', global_data.state_collection.extention_mesh, h)
+                field.save_fig(f"{os.path.dirname(filename)}/base-{idx}")
+                idx += 1

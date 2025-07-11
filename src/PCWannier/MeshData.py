@@ -190,7 +190,7 @@ def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = 
     for data_i, m_idx in enumerate(mesh_idxs):
         buckets[m_idx].append(data_i)
 
-    comp_vals = (data.value_matrix[:] if data.value_matrix.ndim == 1 else data.value_matrix[:, value_col])
+    comp_vals = (data.value_matrix[:] if data.value_matrix.ndim == 1 else data.value_matrix[:, value_col if value_col is not None else 0])
 
     mesh_to_data_idx = np.full(len(mesh.vertices), -1, dtype=int)
     mesh_dists = np.full(len(mesh.vertices), np.inf, dtype=float)

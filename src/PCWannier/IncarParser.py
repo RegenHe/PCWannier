@@ -39,7 +39,9 @@ class IncarData:
         self.b_vectors: list = None
         self.composition_of_b: list = None
         self.wb: list = None
+        self.frac_wb: list = None
 
+        self.origin: list = None
         self.band_window: list = None
         self.proj_iter: bool = None
         self.projections: list = None
@@ -105,6 +107,7 @@ class IncarParser:
         "wannier_file": "./wannier.txt",
         "wannier_figures": "./wanniers",
         "proj_iter": True,
+        "origin": [0, 0],
         "M_in": False,
         "epsilon": 0.01,
         "err_diff": 1e-6,
@@ -136,6 +139,8 @@ class IncarParser:
             return int(value.strip())
         elif key in ["extension", "k_num"]:
             return [int(x) for x in value.split(',')]
+        elif key in ["origin"]:
+            return [float(x) for x in value.split(',')]
         elif key == "lattice_const":
             return float(evaluate_math_expression(value.strip()))
         elif key in ["real_lattice_vectors", "reciprocal_lattice_vectors", "composition_of_b"]:
@@ -200,7 +205,7 @@ class IncarParser:
                                 coefficient, term = parts[i].split('[')
                                 coefficient = coefficient.strip()
                                 term = term.split(']')[0].strip()
-                                projections_dict['position'] = [float(evaluate_math_expression(v.strip())) for v in term.split(',')]
+                                projections_dict['frac_position'] = [float(evaluate_math_expression(v.strip())) for v in term.split(',')]
                             else:
                                 raise ValueError(f"Invalid positon in projections: '{parts[i].strip()}'")
                         elif i == 2:

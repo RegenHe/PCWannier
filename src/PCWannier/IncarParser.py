@@ -39,7 +39,6 @@ class IncarData:
         self.b_vectors: list = None
         self.composition_of_b: list = None
         self.wb: list = None
-        self.frac_wb: list = None
 
         self.origin: list = None
         self.band_window: list = None

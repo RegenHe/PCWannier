@@ -571,7 +571,6 @@ class WannierTools:
                         mat_b[i * 2 + j][k] = global_data.incar.b_vectors[k][i] * global_data.incar.b_vectors[k][j]
             
             global_data.incar.wb = (np.linalg.pinv(mat_b) @ mat_a).flatten()
-            global_data.incar.frac_wb = global_data.incar.wb / global_data.incar.lattice_const ** 2
         
         global_data.incar.band_calc_num = 0
         for p in global_data.incar.projections:

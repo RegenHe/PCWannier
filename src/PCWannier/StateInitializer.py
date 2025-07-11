@@ -151,7 +151,7 @@ class StateInitializer:
                 for b in range(shape[2]):
                     mM = global_data.m_set.get_M0(i, j, b)
                     n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                    self.matZ[i][j] += global_data.incar.frac_wb[b] * mM @ (self.matV[n_k1][n_k2] @ np.conj(self.matV[n_k1][n_k2]).T) @ np.conj(mM).T
+                    self.matZ[i][j] += global_data.incar.wb[b] * mM @ (self.matV[n_k1][n_k2] @ np.conj(self.matV[n_k1][n_k2]).T) @ np.conj(mM).T
                 if self.last_matZ[i][j] is None:
                     self.last_matZ[i][j] = self.matZ[i][j]
                 else:
@@ -173,7 +173,7 @@ class StateInitializer:
     def get_omega_I(self):
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         res = 0
-        s_N_wb = shape[3] * np.sum(global_data.incar.frac_wb)
+        s_N_wb = shape[3] * np.sum(global_data.incar.wb)
 
         for i in range(shape[0]):
             for j in range(shape[1]):

@@ -86,7 +86,7 @@ class Gradient:
                         for n in range(shape[2]):
                             mR[m, n] = mM[m, n] * np.conj(mM[n, n])
                             mT[m, n] = mM[m, n] / mM[n, n] * (np.imag(np.log(mM[n, n])) + np.dot(global_data.incar.b_vectors[b, :], self.rn[:, n]))
-                    self.G[i][j] += global_data.incar.frac_wb[b] * (self.operator_A(mR) - self.operator_S(mT))
+                    self.G[i][j] += global_data.incar.wb[b] * (self.operator_A(mR) - self.operator_S(mT))
                 self.G[i][j] = 4 * self.G[i][j]
                 self.dW[i][j] = self.epsilon * self.G[i][j]
                 if isUpdate:
@@ -105,7 +105,7 @@ class Gradient:
                 for b in range(shape[3]):
                     mM = global_data.m_set.get(i, j, b)
                     for n in range(shape[2]):
-                        self.rn[:, n] -= global_data.incar.frac_wb[b] * global_data.incar.b_vectors[b, :] * np.imag(np.log(mM[n, n]))
+                        self.rn[:, n] -= global_data.incar.wb[b] * global_data.incar.b_vectors[b, :] * np.imag(np.log(mM[n, n]))
         self.rn = self.rn / (shape[0] * shape[1])
 
     def update(self):
@@ -127,9 +127,9 @@ class Gradient:
                             if m != n:
                                 temp_OD += np.abs(mM[m, n]) ** 2
                         temp_D += (-np.imag(np.log(mM[m, m])) - np.dot(global_data.incar.b_vectors[b, :], self.rn[:, m])) ** 2
-                    self.omega[0] += temp_I * global_data.incar.frac_wb[b]
-                    self.omega[1] += temp_OD * global_data.incar.frac_wb[b]
-                    self.omega[2] += temp_D * global_data.incar.frac_wb[b]
+                    self.omega[0] += temp_I * global_data.incar.wb[b]
+                    self.omega[1] += temp_OD * global_data.incar.wb[b]
+                    self.omega[2] += temp_D * global_data.incar.wb[b]
         self.omega = np.real(self.omega) / (shape[0] * shape[1])
     
     def save_as(self, filename):

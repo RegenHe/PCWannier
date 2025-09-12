@@ -102,6 +102,7 @@ class Topo:
 
         fig, ax = plt.subplots()
         img = ax.imshow(F.T, origin="lower", extent=[-0.5, 0.5, -0.5, 0.5])
+        cbar = fig.colorbar(img, ax=ax)
         ax.set_xlim(-0.5, 0.5)
         ax.set_ylim(-0.5, 0.5)
         ax.set_xlabel(r"$k_1 (2\pi / a)$")

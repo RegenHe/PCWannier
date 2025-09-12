@@ -44,6 +44,7 @@ class IncarData:
         self.band_window: list = None
         self.proj_iter: bool = None
         self.projections: list = None
+        self.w_center: list = None
         self.M_in: str = None
 
         self.epsilon: float = None
@@ -106,6 +107,7 @@ class IncarParser:
         "wannier_file": "./wannier.txt",
         "wannier_figures": "./wanniers",
         "proj_iter": True,
+        "w_center": False,
         "origin": [0, 0],
         "M_in": False,
         "epsilon": 0.01,
@@ -114,9 +116,10 @@ class IncarParser:
         "band_figure": "./band.png",
 
         "use_cached_data": ["False"],
-        "DOS": 2,
+        "DOS": 0,
         "DOS_eps": 0.01,
         "DOS_num": 200,
+        "DOS_Brillouin_mesh": [100, 100],
         "topo_output": "./topo",
         "k_num": [100, 100],
         "hybrid_Wilson_loop": False,
@@ -136,9 +139,9 @@ class IncarParser:
             return float(value.strip())
         elif key in ["max_iter", "DOS", "DOS_num"]:
             return int(value.strip())
-        elif key in ["extension", "k_num"]:
+        elif key in ["extension", "k_num", "DOS_Brillouin_mesh"]:
             return [int(x) for x in value.split(',')]
-        elif key in ["origin"]:
+        elif key in ["origin", "w_center"]:
             return [float(x) for x in value.split(',')]
         elif key == "lattice_const":
             return float(evaluate_math_expression(value.strip()))

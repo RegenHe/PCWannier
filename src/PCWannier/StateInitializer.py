@@ -19,13 +19,15 @@ from .Utils import FieldData, StateCollection, WannierTools
 
 class StateInitializer:
     def __init__(self):
-        self.matC = None
-        self.matV = None
-        self.matZ = None
-        self.last_matZ = None
-        self.matA = None
+        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
+        self.matC = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
+        self.matZ = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
+        self.last_matZ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
+        self.lambda_ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
 
-        self.lambda_ = None
+        self.matA = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
+        # matS = [[None for _ in range(shape[1])]for _ in range(shape[0])]
+        self.matV = None
         self.alpha = 0.5
 
     @timer("State Initialize iter - ")
@@ -42,6 +44,11 @@ class StateInitializer:
         elif 'A' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - A")
             self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+            for i in range(len(global_data.incar.k_points[0])):
+                for j in range(len(global_data.incar.k_points[1])):
+                    mU, mS, mVh = np.linalg.svd(self.matA[i][j])
+                    self.matC[i][j] = mU @ np.eye(len(global_data.incar.band_window), global_data.incar.band_calc_num) @ mVh
+            self.matV = self.matC
         else:
             self.projection()
             self.matV = self.matC

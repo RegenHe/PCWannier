@@ -107,6 +107,7 @@ class Gradient:
                     for n in range(shape[2]):
                         self.rn[:, n] -= global_data.incar.wb[b] * global_data.incar.b_vectors[b, :] * np.imag(np.log(mM[n, n]))
         self.rn = self.rn / (shape[0] * shape[1])
+        return self.rn
 
     def update(self):
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num, int(len(global_data.incar.composition_of_b))]
@@ -131,6 +132,21 @@ class Gradient:
                     self.omega[1] += temp_OD * global_data.incar.wb[b]
                     self.omega[2] += temp_D * global_data.incar.wb[b]
         self.omega = np.real(self.omega) / (shape[0] * shape[1])
+
+    def set_center(self, center):
+        self.generateRn()
+        phase = np.zeros((len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])), dtype=object)
+        for i in range(len(global_data.incar.k_points[0])):
+            for j in range(len(global_data.incar.k_points[1])):
+                r = (self.rn.T - center) @ np.array(global_data.incar.real_lattice_vectors) * global_data.incar.lattice_const
+                k = WannierTools.get_kx_ky([i, j])
+                sign = 1
+                if global_data.incar.dataset_type.lower() == 'comsol':
+                    sign = -1
+                phase[i, j] = np.diag(np.exp(-1j * sign * np.dot(k, r.T)))
+                self.U[i][j] = phase[i, j] @ self.U[i][j]
+        global_data.m_set.update(self.U)
+        return phase
     
     def save_as(self, filename):
         IO.save_to_txt(filename, self.U, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))

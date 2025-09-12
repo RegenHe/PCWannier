@@ -12,7 +12,7 @@ from .Utils import WannierTools, FieldData
 from .Timer import Timer, timer
 from .IncarParser import IncarParser
 
-from .Symmetry import Symmetry, Orthogonalizer, RotationOverlap
+from .Symmetry import Symmetry, Orthogonalizer, RotationOverlap, SymmetryAdapter
 
 from . import MeshData
 from . import MSet
@@ -98,9 +98,6 @@ class PCWannier:
         transposed = np.transpose(t_, axes=indices)
         global_data.state_collection.E = np.real(transposed) if global_data.incar.E_is_real else transposed
 
-        # if global_data.incar.symmetry:
-        #     self._symmetry()
-
         global_data.state_collection.extention(global_data.incar.extension)
 
     def _symmetry(self):
@@ -110,9 +107,23 @@ class PCWannier:
         self.orthogonalizer.save_as(global_data.incar.O_file)
         global_data.state_collection.set_transform(Transform)
 
-        self.symmetry = Symmetry(global_data.incar.real_lattice_vectors, )
+        seen = {}
+        number = []
+        pos = []
+
+        for i, proj in enumerate(global_data.incar.projections):
+            number.append(seen.setdefault(proj['atom'], i))
+            pos.append(proj['frac_position'])
+
+        self.symmetry = Symmetry(np.array(global_data.incar.real_lattice_vectors), np.array(pos), number)
 
         self.rotation_overlap = RotationOverlap(global_data.incar.real_lattice_vectors, global_data.state_collection)
+
+        self.symmetry_adapter = SymmetryAdapter(self.symmetry, self.rotation_overlap)
+        self.symmetry_adapter.initial_symmetrization(global_data.state_initializer.matV)
+        # R, v = self.symmetry.get_Rv(1)
+        # res = self.rotation_overlap.build_d_matrix(R, v)
+        # print(f"Rotation overlap matrix: {res}")
 
     def _initialize_states(self):
         global_data.push_m_set(MSet.MSet())
@@ -120,10 +131,23 @@ class PCWannier:
         
         global_data.push_state_initializer(StateInitializer.StateInitializer())
         global_data.state_initializer.iter(global_data.incar.err_diff, global_data.incar.max_iter)
+        
+        if global_data.incar.symmetry:
+            self._symmetry()
 
     def _optimize_gradient(self):
         global_data.push_gradient(Gradient.Gradient())
         global_data.gradient.iter(global_data.incar.err_diff, global_data.incar.max_iter)
+        r = global_data.gradient.generateRn()
+        Logger.info(f"Gradient optimization completed, r = {r}")
+        if global_data.incar.w_center is not False:
+            Logger.info(f"Set Wannier center to {global_data.incar.w_center}")
+            for i in range(10):
+                self.c_phase = global_data.gradient.set_center(global_data.incar.w_center)
+            # global_data.gradient.iter(global_data.incar.err_diff, global_data.incar.max_iter)
+            r = global_data.gradient.generateRn()
+            Logger.info(f"Gradient optimization completed, r = {r}")
+        
 
     def _generate_output(self):
         self.gen_wannier()

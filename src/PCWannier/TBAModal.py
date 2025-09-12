@@ -120,7 +120,7 @@ class TBAModal:
                 for i, e in enumerate(E_list):
                     G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
                     DOS[0, i] += np.sum(np.real(-1 / np.pi * np.imag(np.diag(G))))
-            self.plot_band_and_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure)
+            self.plot_hs_band_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure, dos_title='PDOS')
             Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
         elif global_data.incar.DOS == 2:
             E_list = np.linspace(np.min(E), np.max(E), global_data.incar.DOS_num)
@@ -140,6 +140,40 @@ class TBAModal:
                 for i, e in enumerate(E_list):
                     G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
                     DOS[:, i] += np.real(-1 / np.pi * np.imag(np.diag(G)))
+            self.plot_hs_band_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure, dos_title='PDOS')
+            Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
+        elif global_data.incar.DOS == 3:
+            E_list = np.linspace(np.min(E), np.max(E), global_data.incar.DOS_num)
+            DOS = np.zeros((1, global_data.incar.DOS_num), dtype=complex)
+            for k_ in k_list:
+                Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+                kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
+                ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
+                k = [kx, ky]
+                for i in range(len(global_data.incar.neighbor)):
+                    r_ = [0, 0]
+                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
+                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
+                    Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
+                Hi = Hi + np.conj(Hi).T
+                H = H0 + Hi
+            for i in range(global_data.incar.DOS_Brillouin_mesh[0]):
+                for j in range(global_data.incar.DOS_Brillouin_mesh[1]):
+                    Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+                    k0 = WannierTools.get_kx_ky([0, 0])
+                    kx = k0[0] + i * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[0] + j * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[1]
+                    ky = k0[1] + i * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[0] + j * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[1]
+                    k = [kx, ky]
+                    for i in range(len(global_data.incar.neighbor)):
+                        r_ = [0, 0]
+                        r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
+                        r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
+                        Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
+                    Hi = Hi + np.conj(Hi).T
+                    H = H0 + Hi
+                    for i, e in enumerate(E_list):
+                        G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
+                        DOS[0, i] += np.sum(np.real(-1 / np.pi * np.imag(np.diag(G))))
             self.plot_hs_band_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure)
             Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
 
@@ -151,6 +185,7 @@ class TBAModal:
                         dos_components: list,
                         dos_labels: list = None,
                         dos_colors: list = None,
+                        dos_title: str = "DOS",
                         alpha: float = 0.3,
                         figsize=(8, 6),
                         save_path: str = None):
@@ -165,7 +200,7 @@ class TBAModal:
 
         ax_band = fig.add_subplot(gs[0])
         for band in range(bands.shape[1]):
-            ax_band.plot(k_path, bands[:, band], color='blue')
+            ax_band.plot(k_path, np.real(bands[:, band]), color='blue')
 
         for pos in [p[1] for p in high_sym_points]:
             ax_band.axvline(x=pos, color='black', linestyle='--', linewidth=0.5)
@@ -177,9 +212,9 @@ class TBAModal:
 
         ax_dos = fig.add_subplot(gs[1], sharey=ax_band)
         for i, dos in enumerate(dos_components):
-            ax_dos.plot(dos, dos_energy, color=dos_colors[i], label=dos_labels[i])
-            ax_dos.fill_betweenx(dos_energy, 0, dos, color=dos_colors[i], alpha=alpha)
-        ax_dos.set_xlabel('DOS')
+            ax_dos.plot(dos, np.real(dos_energy), color=dos_colors[i], label=dos_labels[i])
+            ax_dos.fill_betweenx(np.real(dos_energy), 0, dos, color=dos_colors[i], alpha=alpha)
+        ax_dos.set_xlabel(dos_title)
         ax_dos.tick_params(labelleft=False)
         ax_dos.grid(True)
         ax_dos.legend(loc='upper right', fontsize='small')

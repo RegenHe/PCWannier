@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import numba as nb
 import matplotlib.pyplot as plt
 from matplotlib.tri import Triangulation
 from scipy.spatial import cKDTree
@@ -41,6 +42,16 @@ class Mesh:
         else:
             self.edge: np.ndarray = np.array(edge)
         # self.edge_index: np.ndarray = np.unique(self.edge.flatten())
+
+        self.tri_weights = None
+        self._precompute_tri_weights()
+
+    def _precompute_tri_weights(self):
+        elems, verts = self.elements, self.vertices
+        v0, v1, v2 = verts[elems[:,0]], verts[elems[:,1]], verts[elems[:,2]]
+        w = np.abs((v1[:,0]-v0[:,0])*(v2[:,1]-v0[:,1]) - (v2[:,0]-v0[:,0])*(v1[:,1]-v0[:,1])) / 6.0
+        self.tri_weights = w
+
 
     def func(self, f, offset=[0, 0]):
         return [f(p[0] - offset[0], p[1] - offset[1]) for p in self.vertices]
@@ -149,6 +160,9 @@ class Mesh:
         offset_x = (global_data.incar.real_lattice_vectors[0][0] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][0] * np.floor((n[1] - 1) / 2)) * global_data.incar.lattice_const
         offset_y = (global_data.incar.real_lattice_vectors[0][1] * np.floor((n[0] - 1) / 2) + global_data.incar.real_lattice_vectors[1][1] * np.floor((n[1] - 1) / 2)) * global_data.incar.lattice_const
         self.vertices = self.vertices - np.array([offset_x, offset_y])
+        
+        self._precompute_tri_weights()
+
         return space_to_original_mapping
 
     def match(self, new_vertices, vertices) -> Tuple[np.ndarray, np.ndarray]:
@@ -319,31 +333,30 @@ class StateCollection:
         
         self.normalization = [[[None for _ in range(len(self.field[0][0]))] for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
         
-        futures = []
-        result_queue = Manager().Queue()
-        def process_batch(i, j, n_range, result_queue):
-            for n in n_range:
-                fd = FieldData(self.name, self.mesh, np.abs(self.field[i][j][n]) ** 2 * self.epsilon)
-                result_queue.put((i, j, n, WannierTools.integrate_over_mesh(fd)))
+        for i in range(len(self.field)):
+            for j in range(len(self.field[i])):
+                Nv = self.mesh.vertices.shape[0]
+                arr = np.asarray(self.field[i][j])
 
-        with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
-            for i in range(len(self.field)):
-                for j in range(len(self.field[i])):
-                    futures.append(
-                        executor.submit(
-                            CallableWrapper(process_batch), i, j, range(len(self.field[i][j])), result_queue
-                            ))
-            
-            wait(futures, return_when='ALL_COMPLETED')
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as e:
-                    raise e
+                if arr.ndim == 1:
+                    arr = arr[None, :]
+                elif arr.ndim == 2 and arr.shape[1] != Nv:
+                    arr = arr.T
 
-        while not result_queue.empty():
-            i, j, n, result = result_queue.get()
-            self.normalization[i][j][n] = result
+                eps = np.asarray(self.epsilon)
+                if eps.shape != arr.shape:
+                    if eps.ndim == 2 and eps.T.shape == arr.shape:
+                        eps = eps.T
+                    elif eps.ndim == 1 and eps.shape[0] == Nv:
+                        eps = np.broadcast_to(eps[None, :], arr.shape)
+                    else:
+                        raise ValueError(f"epsilon shape {eps.shape} != field shape {arr.shape}")
+
+                F = (np.abs(arr)**2 * eps).T
+
+                fd = FieldData(self.name, self.mesh, F.astype(np.complex128, copy=False))
+                vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                self.normalization[i][j][:vals.shape[0]] = vals
             # Logger.info(f"Normalization for field ({i}, {j}, {n}) => {result}")
         
         self.is_normalized = True
@@ -607,15 +620,58 @@ class WannierTools:
         jacobian = np.array([[vertices[1, 0] - vertices[0, 0], vertices[2, 0] - vertices[0, 0]], [vertices[1, 1] - vertices[0, 1], vertices[2, 1] - vertices[0, 1]]])
         return np.sum(data_on_triangle) * np.abs(np.linalg.det(jacobian)) / 6.0
     
+    
     @staticmethod
-    def integrate_over_mesh(data: FieldData) -> complex:
-        total_integral = 0.0 + 0.0j
-        for idx in range(len(data.mesh.elements)):
-            element = data.mesh.elements[idx]
-            vertices = data.mesh.vertices[element, :]
-            data_on_triangle = data.field[element]
-            total_integral += WannierTools.integrate_over_triangle(vertices, data_on_triangle)
-        return total_integral
+    @nb.njit(parallel=True, fastmath=True, cache=True)
+    def _integrate_batch_numba(F, elems, w):
+        Nt = elems.shape[0]
+        K = F.shape[1]
+        out_r = np.zeros(K, dtype=np.float64)
+        out_i = np.zeros(K, dtype=np.float64)
+        for k in nb.prange(K):
+            sr = 0.0
+            si = 0.0
+            for t in range(Nt):
+                i0, i1, i2 = elems[t, 0], elems[t, 1], elems[t, 2]
+                wt = w[t]
+                s = F[i0, k] + F[i1, k] + F[i2, k]
+                sr += wt * s.real
+                si += wt * s.imag
+            out_r[k] = sr
+            out_i[k] = si
+        return out_r + 1j*out_i
+
+    @staticmethod
+    def integrate_over_mesh(data: FieldData, *, chunk_size=None) -> complex | np.ndarray:
+        elems, w = np.asarray(data.mesh.elements, dtype=np.intp), np.asarray(data.mesh.tri_weights, dtype=np.float64)
+        Nv = data.mesh.vertices.shape[0]
+        f = np.asarray(data.field)
+
+        if f.ndim == 1:
+            F = f.reshape(Nv, 1)
+        elif f.ndim == 2:
+            F = f if f.shape[0] == Nv else f.T
+        else:
+            raise ValueError("data.field must be (Nv, ) or (Nv, K)")
+
+        F = F.astype(np.complex128, copy=False)
+
+        if not hasattr(WannierTools._integrate_batch_numba, "_warmed"):
+            _ = WannierTools._integrate_batch_numba(F[:, :1], elems, w)
+            WannierTools._integrate_batch_numba._warmed = True
+
+        if chunk_size is not None and F.shape[1] > chunk_size:
+            K = F.shape[1]
+            out = np.empty(K, dtype=np.complex128)
+            s = 0
+            while s < K:
+                e = min(s + chunk_size, K)
+                out[s:e] = WannierTools._integrate_batch_numba(F[:, s:e], elems, w)
+                s = e
+        else:
+            out = WannierTools._integrate_batch_numba(F, elems, w)
+
+        return out[0] if f.ndim == 1 else out
 
 
 if __name__ == "__main__":

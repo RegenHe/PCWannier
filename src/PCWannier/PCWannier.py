@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import numba as nb
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
@@ -32,6 +33,7 @@ class PCWannier:
         Logger.info('=========  PCWannier v0.1.0  =========')
 
         global_data.threads = args.threads
+        nb.set_num_threads(global_data.threads)
         Logger.info(f"Running with {args.threads} threads")
 
         self._parse_input(args)

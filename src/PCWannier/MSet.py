@@ -3,6 +3,8 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor, wait
 from multiprocessing import Manager
 
+from threadpoolctl import threadpool_limits
+
 import copy
 
 from .Log import Logger
@@ -34,44 +36,37 @@ class MSet:
             return
         global_data.state_collection.turn_to_Bloch()
         self.mM0 = np.array([[[np.zeros((shape[3], shape[3]), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
+        
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                Nv = state_collection.mesh.vertices.shape[0]
 
-        futures = []
-        result_queue = Manager().Queue()
+                left_arr = np.asarray(global_data.state_collection.field[i][j])
+                if left_arr.ndim == 1:
+                    left_arr = left_arr[None, :]
+                elif left_arr.shape[1] != Nv:
+                    left_arr = left_arr.T
+                Nm = left_arr.shape[0]
 
-        def process_batch(i, j, m_range, n_range, b_range, result_queue):
-            try:
-                for m in m_range:
-                    for n in n_range:
-                        for b in b_range:
-                            l_psi = global_data.state_collection.field[i][j][m]
-                            n_k1_idx, n_k2_idx, k_ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                            if k_ is not None:
-                                phase1 = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx)
-                                phase2 = global_data.state_collection.get_phase(k_[0], k_[1])
-                                r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n] * phase1 * np.conj(phase2)
-                            else:
-                                r_psi = global_data.state_collection.field[n_k1_idx][n_k2_idx][n]
-                            fd = FieldData("M0", state_collection.mesh, np.conj(l_psi) * state_collection.epsilon * r_psi)
-                            result_queue.put((i, j, m, n, b, WannierTools.integrate_over_mesh(fd)))
-            except Exception as e:
-                    raise e
+                for b in range(shape[2]):
+                    n_k1_idx, n_k2_idx, k_ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+                    right_arr = np.asarray(global_data.state_collection.field[n_k1_idx][n_k2_idx])
+                    if right_arr.ndim == 1:
+                        right_arr = right_arr[None, :]
+                    elif right_arr.shape[1] != Nv:
+                        right_arr = right_arr.T
 
-        with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
-            for i in range(shape[0]):
-                for j in range(shape[1]):
-                    futures.append(
-                            executor.submit(
-                                CallableWrapper(process_batch), i, j, range(shape[3]), range(shape[3]), range(shape[2]), result_queue
-                                ))
-            wait(futures, return_when='ALL_COMPLETED')
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as e:
-                    raise e
-        while not result_queue.empty():
-            i, j, m, n, b, result = result_queue.get()
-            self.mM0[i, j, b][m, n] = result
+                    if k_ is not None:
+                        phase1 = global_data.state_collection.get_phase(n_k1_idx, n_k2_idx)
+                        phase2 = global_data.state_collection.get_phase(k_[0], k_[1])
+                        right_arr = right_arr * (phase1 * np.conj(phase2))[None, :]
+
+                    for m in range(Nm):
+                        base = np.conj(left_arr[m]) * state_collection.epsilon
+                        F = (right_arr * base[None, :]).T.astype(np.complex128, copy=False)
+                        fd = FieldData("M0", state_collection.mesh, F)
+                        vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                        self.mM0[i, j, b][m, :vals.shape[0]] = vals
         Logger.info("M0 initialized")
 
         self.mMInitial = np.array([[[np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])

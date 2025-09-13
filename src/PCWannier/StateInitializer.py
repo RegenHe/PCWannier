@@ -104,46 +104,52 @@ class StateInitializer:
             Logger.error(err_msg)
             raise
 
-        g = []
+        H_list = []
         for p in global_data.incar.projections:
             for state in p['states']:
                 f = lambda r, phi: StateBases.Radial(state[0], state[1])(r, state[2]) * StateBases.Angular(state[1])(phi)
-                cart_position = (p['frac_position'][0] * np.array(global_data.incar.real_lattice_vectors[0]) + p['frac_position'][1] * np.array(global_data.incar.real_lattice_vectors[1]) + np.array(global_data.incar.origin)) * global_data.incar.lattice_const
+                cart_position = (p['frac_position'][0] * np.array(global_data.incar.real_lattice_vectors[0]) +
+                                p['frac_position'][1] * np.array(global_data.incar.real_lattice_vectors[1]) +
+                                np.array(global_data.incar.origin)) * global_data.incar.lattice_const
                 h = global_data.state_collection.extention_mesh.rfunc(f, cart_position, p['xaxis_angluar'])
-                # f = StateBases.temp(state[1], 0)
-                # h = global_data.state_collection.extention_mesh.rfunc(f, p['position'], p['xaxis_angluar'])
-                g.append(h / np.sqrt(WannierTools.integrate_over_mesh(FieldData('', global_data.state_collection.extention_mesh, global_data.state_collection.extention_epsilon * np.abs(h) ** 2))))
-                # fd = FieldData('', global_data.state_collection.extention_mesh, g[-1])
-                # fd.plot()
+                H_list.append(np.asarray(h, dtype=np.complex128))
 
-        futures = []
-        result_queue = Manager().Queue()
+        H = np.column_stack(H_list)
 
-        def process_batch(i, j, m_range, n_range, g, result_queue):
-            phase = global_data.state_collection.get_extention_phase(i, j)
-            for m in m_range:
-                field = global_data.state_collection.get_extention_field(i, j, m)
-                for n in n_range:
-                    int_field = global_data.state_collection.extention_epsilon * np.conj(phase * field) * g[n]
-                    result_queue.put((i, j, m, n, WannierTools.integrate_over_mesh(FieldData('', global_data.state_collection.extention_mesh, int_field))))
+        eps = global_data.state_collection.extention_epsilon
+        abs2 = np.abs(H)**2
+        if np.isscalar(eps):
+            F = (abs2 * float(eps)).astype(np.complex128, copy=False)
+        else:
+            eps_arr = np.asarray(eps, dtype=np.complex128)
+            F = (abs2 * eps_arr[:, None]).astype(np.complex128, copy=False)
 
-        with ProcessPoolExecutor(max_workers=global_data.threads) as executor:
-            for i in range(shape[0]):
-                for j in range(shape[1]):
-                    futures.append(
-                                executor.submit(
-                                    CallableWrapper(process_batch), i, j, range(shape[2]), range(shape[3]), g, result_queue
-                                    ))
-            wait(futures, return_when='ALL_COMPLETED')
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as e:
-                    raise e
-        while not result_queue.empty():
-            i, j, m, n, result = result_queue.get()
-            self.matA[i][j][m, n] = result
-        
+        fd = FieldData('', global_data.state_collection.extention_mesh, F)
+        norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+        norms = np.where(norms == 0, 1.0, norms)
+
+        G = H / np.sqrt(norms)[None, :]
+
+        g = [G[:, k] for k in range(G.shape[1])]
+
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                phase = global_data.state_collection.get_extention_phase(i, j)
+                Nv = global_data.state_collection.extention_mesh.vertices.shape[0]
+
+                G = np.column_stack(g).astype(np.complex128, copy=False)
+                if G.shape[0] != Nv:
+                    G = G.T
+
+                for m in range(shape[2]):
+                    field = global_data.state_collection.get_extention_field(i, j, m)
+                    base = global_data.state_collection.extention_epsilon * np.conj(phase * field)
+
+                    F = (base[:, None] * G)
+                    fd = FieldData('', global_data.state_collection.extention_mesh, F)
+                    vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                    self.matA[i][j][m, :vals.shape[0]] = vals
+                
         for i in range(shape[0]):
             for j in range(shape[1]):
                 mU, mS, mVh = np.linalg.svd(self.matA[i][j])

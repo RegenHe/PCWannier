@@ -1,5 +1,9 @@
-matplotlib==3.10.1
-numpy==2.2.4
-scipy==1.15.2
-setuptools==75.8.1
-threadpoolctl==3.6.0
+matplotlib
+numpy
+scipy
+setuptools
+threadpoolctl
+spglib
+spgrep
+cloudpickle
+numba

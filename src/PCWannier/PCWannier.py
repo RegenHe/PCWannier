@@ -86,6 +86,16 @@ class PCWannier:
         global_data.state_collection.epsilon = self.epsilon.value_matrix[idxs].flatten()
         global_data.state_collection.normalize()
         global_data.state_collection.turn_to_Bloch()
+
+        _, need_orth = global_data.state_collection.check_orthogonality()
+        if need_orth:
+            Logger.warning("Need to orthogonalize states")
+            global_data.state_collection.orthogonalize()
+        _, need_orth = global_data.state_collection.check_orthogonality()
+        if need_orth:
+            Logger.error("Orthogonalization failed")
+            raise ValueError("Orthogonalization failed")
+
         self._handle_energy_data()
 
     def _handle_energy_data(self):

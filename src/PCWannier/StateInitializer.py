@@ -59,7 +59,7 @@ class StateInitializer:
             global_data.m_set.initial(self.matV)
             return
         
-        last_omega_I = 1e6
+        last_omega_I = +np.inf
         for i in range(max_iter):
             self.update_Z()
             self.sort_Z()
@@ -71,9 +71,10 @@ class StateInitializer:
             if abs(omega - last_omega_I) < err_diff:
                 Logger.info(f"Convergence criterion met, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
                 break
+
             last_omega_I = omega
-        if abs(omega - last_omega_I) > err_diff:
-            Logger.warning(f"Convergence criteria not met, iteration limit reached, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
+        if (omega - last_omega_I) > err_diff:
+            Logger.warning(f"Convergence criteria not met, err_diff = {abs(omega - last_omega_I)}, total iterations: {i + 1}")
         
         if self.matA is None:
             self.projection()

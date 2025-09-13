@@ -76,10 +76,20 @@ class MSet:
     
     def get_M0(self, i: int, j: int, b: int):
         if b < len(global_data.incar.composition_of_b) // 2:
-            return self.mM0[i, j, b]
+            M = self.mM0[i, j, b]
         else:
             n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-            return np.conj(self.mM0[n_k1, n_k2, b - len(global_data.incar.composition_of_b) // 2]).T
+            M = np.conj(self.mM0[n_k1, n_k2, b - len(global_data.incar.composition_of_b) // 2]).T
+        
+        T = global_data.state_collection.get_transform()
+        T_k = T[i][j]
+
+        n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
+        T_k_b = T[n_k1][n_k2]
+        
+        M_transformed = T_k @ M @ T_k_b
+
+        return M_transformed
     
     def get(self, i: int, j: int, b: int):
         if b < len(global_data.incar.composition_of_b) // 2:
@@ -94,7 +104,7 @@ class MSet:
             for j in range(shape[1]):
                 for b in range(shape[2]):
                     n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                    self.mMInitial[i, j, b] = np.conj(V[i][j]).T @ self.mM0[i, j, b] @ V[n_k1][n_k2]
+                    self.mMInitial[i, j, b] = np.conj(V[i][j]).T @ self.get_M0(i, j, b) @ V[n_k1][n_k2]
 
     def update(self, U):
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.composition_of_b) // 2]

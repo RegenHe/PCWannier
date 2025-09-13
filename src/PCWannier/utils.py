@@ -57,7 +57,7 @@ class Mesh:
         return [f(p[0] - offset[0], p[1] - offset[1]) for p in self.vertices]
     
     def rfunc(self, f, offset=[0, 0], ang=0):
-        return [f(np.sqrt((p[0] - offset[0]) ** 2 + (p[1] - offset[1]) ** 2), np.atan2(p[0] - offset[0], p[1] - offset[1]) - np.radians(ang)) for p in self.vertices]
+        return [f(np.sqrt((p[0] - offset[0]) ** 2 + (p[1] - offset[1]) ** 2), np.atan2(p[0] - offset[0], p[1] - offset[1]) + np.radians(ang)) for p in self.vertices]
         
 
     def __repr__(self) -> str:
@@ -279,6 +279,7 @@ class StateCollection:
 
         self.is_normalized = False
         self.is_bloch = False
+        self.is_orthogonalized = False
 
         self.extention_mesh = None
         self.space_to_original_mapping = None
@@ -332,32 +333,32 @@ class StateCollection:
             return
         
         self.normalization = [[[None for _ in range(len(self.field[0][0]))] for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
+
+        Nv = self.mesh.vertices.shape[0]
+        arr0 = np.asarray(self.field[0][0])
+        if arr0.ndim == 1:
+            arr0 = arr0[None, :]
+        elif arr0.ndim == 2 and arr0.shape[1] != Nv:
+            arr0 = arr0.T
+
+        eps = np.asarray(self.epsilon)
+        if eps.shape != arr0.shape:
+            if eps.ndim == 2 and eps.T.shape == arr0.shape:
+                eps = eps.T
+            elif eps.ndim == 1 and eps.shape[0] == Nv:
+                eps = np.broadcast_to(eps[None, :], arr0.shape)
+            else:
+                raise ValueError(f"epsilon shape {eps.shape} != field shape {arr0.shape}")
         
         for i in range(len(self.field)):
             for j in range(len(self.field[i])):
-                Nv = self.mesh.vertices.shape[0]
                 arr = np.asarray(self.field[i][j])
-
-                if arr.ndim == 1:
-                    arr = arr[None, :]
-                elif arr.ndim == 2 and arr.shape[1] != Nv:
-                    arr = arr.T
-
-                eps = np.asarray(self.epsilon)
-                if eps.shape != arr.shape:
-                    if eps.ndim == 2 and eps.T.shape == arr.shape:
-                        eps = eps.T
-                    elif eps.ndim == 1 and eps.shape[0] == Nv:
-                        eps = np.broadcast_to(eps[None, :], arr.shape)
-                    else:
-                        raise ValueError(f"epsilon shape {eps.shape} != field shape {arr.shape}")
 
                 F = (np.abs(arr)**2 * eps).T
 
                 fd = FieldData(self.name, self.mesh, F.astype(np.complex128, copy=False))
                 vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
                 self.normalization[i][j][:vals.shape[0]] = vals
-            # Logger.info(f"Normalization for field ({i}, {j}, {n}) => {result}")
         
         self.is_normalized = True
         for i in range(len(self.field)):
@@ -369,6 +370,160 @@ class StateCollection:
         
         if not global_data.incar.N_file.lower == "false":
             IO.save_to_txt(global_data.incar.N_file, np.transpose(self.normalization, (2, 0, 1)), (len(self.field[0][0])))
+
+    @timer("Orthogonalize - ")
+    def orthogonalize(self, tol_rel: float = 1e-6, atol_abs: float = 1e-12) -> None:
+        Logger.info("Orthogonalizing states...")
+        if self.field is None:
+            err_msg = "Field data is not initialized"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
+        
+        if not self.is_normalized:
+            self.normalize()
+
+        Nkx, Nky = len(self.field), len(self.field[0])
+
+        if 'O' in global_data.incar.use_cached_data:
+            Logger.info("using cache data - O")
+            self.transform = IO.load_cell_matrix(global_data.incar.O_file, shape=(Nkx, Nky))
+            self.is_orthogonalized = True
+            return self.transform
+
+        
+        Nv = self.mesh.vertices.shape[0]
+        arr0 = np.asarray(self.field[0][0])
+        if arr0.ndim == 1:
+            arr0 = arr0[None, :]
+        elif arr0.ndim == 2 and arr0.shape[1] != Nv:
+            arr0 = arr0.T
+
+        eps = np.asarray(self.epsilon)
+
+        self.transform = [[None for _ in range(Nky)] for _ in range(Nkx)]
+        for i in range(Nkx):
+            for j in range(Nky):
+                Nwin = len(self.field[i][j])
+                Nv = self.mesh.vertices.shape[0]
+                W = np.asarray(self.field[i][j])
+                if W.ndim == 1:
+                    W = W[None, :]
+                elif W.ndim == 2 and W.shape[1] != Nv:
+                    W = W.T
+                if W.shape[1] != Nv:
+                    raise ValueError(f"field shape {W.shape} incompatible with Nv={Nv}")
+
+                S = np.empty((Nwin, Nwin), dtype=np.complex128)
+                for a in range(Nwin):
+                    wa = self.field[i][j][a]
+
+                    right = np.conj(wa) * eps
+                    F = (right[:, None] * W.T).astype(np.complex128, copy=False)
+                    fd = FieldData("S", self.mesh, F)
+                    vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                    S[a, a:] = vals[a:]
+                    S[a:, a] = vals[a:].conjugate()
+
+                S = 0.5*(S + S.conj().T)
+                w, V = np.linalg.eigh(S)
+                lam = w.real
+                lam_max = np.max(lam)
+                tau = max(tol_rel*lam_max, atol_abs)
+                invsqrt = 1.0/np.sqrt(np.maximum(lam, tau))
+                T_corr = V @ np.diag(invsqrt) @ V.conj().T
+                T_corr = 0.5*(T_corr + T_corr.conj().T)
+                # block orth then total orth maybe better
+                T_full = T_corr
+
+                self.transform[i][j] = T_full
+        self.is_orthogonalized = True
+        if not global_data.incar.O_file.lower == "false":
+            IO.save_to_txt(global_data.incar.O_file, self.transform, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+
+
+    @timer("Orthogonality Check - ")
+    def check_orthogonality(self) -> Tuple[np.ndarray, bool]:
+        """
+        report: 
+            [0] herm_res     = ||S - S^†||_F
+            [1] diag_max_err = max_i |S_{ii} - 1|
+            [2] offdiag_max  = max_{i≠j} |S_{ij}|
+            [3] frob_res     = ||S_H - I||_F,  S_H = (S + S^†)/2
+            [4] lambda_min   = min eig(S_H)
+            [5] cond         = cond(S_H) = lam_max / lam_min
+        """
+        if self.field is None:
+            err_msg = "Field data is not initialized"
+            Logger.error(err_msg)
+            raise ValueError(err_msg)
+        
+        Nv = self.mesh.vertices.shape[0]
+        arr0 = np.asarray(self.field[0][0])
+        if arr0.ndim == 1:
+            arr0 = arr0[None, :]
+        elif arr0.ndim == 2 and arr0.shape[1] != Nv:
+            arr0 = arr0.T
+
+        eps = np.asarray(self.epsilon)
+        Nkx, Nky = len(self.field), len(self.field[0])
+        report = np.zeros((Nkx, Nky, 6), dtype=np.float64)
+        need_orth = False
+                    
+        for i in range(Nkx):
+            for j in range(Nky):
+                Nwin = len(self.field[i][j])
+                Nv = self.mesh.vertices.shape[0]
+                W = np.asarray(self.field[i][j])
+                if W.ndim == 1:
+                    W = W[None, :]
+                elif W.ndim == 2 and W.shape[1] != Nv:
+                    W = W.T
+                if W.shape[1] != Nv:
+                    raise ValueError(f"field shape {W.shape} incompatible with Nv={Nv}")
+
+                S = np.empty((Nwin, Nwin), dtype=np.complex128)
+                for a in range(Nwin):
+                    wa = self.field[i][j][a]
+
+                    right = np.conj(wa) * eps
+                    F = (right[:, None] * W.T).astype(np.complex128, copy=False)
+                    fd = FieldData("S", self.mesh, F)
+                    vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                    S[a, a:] = vals[a:]
+                    S[a:, a] = vals[a:].conjugate()
+                
+                if self.is_orthogonalized:
+                    S = self.transform[i][j].conj().T @ S @ self.transform[i][j]
+
+                herm_res = float(np.linalg.norm(S - S.conj().T, ord='fro'))
+                diag = np.real(np.diag(S))
+                diag_max_err = float(np.max(np.abs(diag - 1.0))) if Nwin > 0 else 0.0
+                offdiag = S - np.diag(np.diag(S))
+                offdiag_max = float(np.max(np.abs(offdiag))) if Nwin > 1 else 0.0
+                
+                S_H = 0.5 * (S + S.conj().T)
+                frob_res = float(np.linalg.norm(S_H - np.eye(Nwin), ord='fro'))
+
+                evals = np.linalg.eigvalsh(S_H)
+                lam_min = float(np.min(evals))
+                lam_max = float(np.max(evals))
+
+                lam_min_safe = max(lam_min, 1e-16)
+                cond = float(lam_max / lam_min_safe) if lam_max > 0 else np.inf
+
+                report[i, j, 0] = herm_res
+                report[i, j, 1] = diag_max_err
+                report[i, j, 2] = offdiag_max
+                report[i, j, 3] = frob_res
+                report[i, j, 4] = lam_min
+                report[i, j, 5] = cond
+
+                if herm_res > 1e-8 or diag_max_err > 1e-3 or offdiag_max > 1e-3 or lam_min < -1e-6:
+                    need_orth = True
+                    Logger.warning(f"[OrthChk] k=({i},{j}): herm={herm_res:.3e}, "
+                                f"diag_max_err={diag_max_err:.3e}, offdiag_max={offdiag_max:.3e}, "
+                                f"frob={frob_res:.3e}, lam_min={lam_min:.3e}, cond={cond:.2e}")
+        return report, need_orth
         
     def turn_to_Bloch(self) -> None:
         if self.field is None:
@@ -386,6 +541,12 @@ class StateCollection:
                 for n in range(len(self.field[0][0])):
                     phase = self.get_phase(i, j)
                     self.field[i][j][n] = np.conj(phase) * self.field[i][j][n]
+    
+    def get_transform(self) -> np.ndarray:
+        if self.is_orthogonalized and self.transform is not None:
+            return self.transform
+        else:
+            return np.eye(len(self.field[0][0]))
     
     def get_phase(self, i: int, j: int):
         if global_data.incar.dataset_type.lower() == 'comsol':

@@ -73,6 +73,13 @@ class IncarData:
 
         self.symmetry: bool = None
 
+        self.eff_k: list = None
+        self.eff_order: int = None
+        self.eff_file: str = None
+
+        self.decompose: bool = None
+        self.decompose_file: str = None
+
     def __repr__(self):
         class_name = self.__class__.__name__
         lines = []
@@ -126,6 +133,11 @@ class IncarParser:
         "Chern_number": False,
 
         "symmetry": False,
+
+        "eff_order": 2,
+        "eff_file": "./H_eff.txt",
+        "decompose": False,
+        "decompose_file": "./decompose.txt"
         }
 
     def __init__(self, filename: str):
@@ -133,15 +145,15 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file"]:
             return value
         elif key in ["epsilon", "err_diff", "DOS_eps"]:
             return float(value.strip())
-        elif key in ["max_iter", "DOS", "DOS_num"]:
+        elif key in ["max_iter", "DOS", "DOS_num", "eff_order"]:
             return int(value.strip())
         elif key in ["extension", "k_num", "DOS_Brillouin_mesh"]:
             return [int(x) for x in value.split(',')]
-        elif key in ["origin", "w_center"]:
+        elif key in ["origin", "w_center", "eff_k"]:
             return [float(x) for x in value.split(',')]
         elif key == "lattice_const":
             return float(evaluate_math_expression(value.strip()))
@@ -247,7 +259,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry"]:
+        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose"]:
             if value.strip().lower() == "true":
                 return True
             else:

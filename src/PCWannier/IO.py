@@ -124,3 +124,55 @@ class IO:
                 row = f"{x:.10f},{y:.10f}," + ",".join(val_strs)
                 f.write(row + "\n")
         Logger.info(f"Data successfully saved to {filename}")
+
+    @staticmethod
+    def save_dict(filename: str, d: dict):
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                for k, v in d.items():
+                    f.write(f"{k}\n")
+                    if isinstance(v, np.ndarray):
+                        arr = v
+                        if arr.ndim == 0:
+                            f.write(IO._fmt_c(arr.item()) + "\n")
+                        elif arr.ndim == 1:
+                            f.write(IO._fmt_c(arr) + "\n")
+                        else:
+                            for i in range(arr.shape[0]):
+                                f.write(IO._fmt_c(arr[i]) + "\n")
+
+                    elif isinstance(v, (list, tuple)):
+                        if len(v) > 0 and isinstance(v[0], (list, tuple, np.ndarray)):
+                            for row in v:
+                                row = np.asarray(row)
+                                f.write(IO._fmt_c(row) + "\n")
+                        else:
+                            f.write(IO._fmt_c(v) + "\n")
+
+                    else:
+                        f.write(f"{repr(v)}\n")
+
+                    f.write("\n")
+        except Exception as e:
+            Logger.error(f"Error saving dict to {filename}: {e}")
+            raise
+        else:
+            Logger.info(f"Dict saved to {filename}")
+
+
+    @staticmethod
+    def _fmt_c(x, tol=1e-12):
+        if isinstance(x, (list, tuple, np.ndarray)):
+            arr = np.asarray(x)
+            if arr.ndim > 1:
+                arr = arr.reshape(-1)
+            return ", ".join(IO._fmt_c(t, tol) for t in arr)
+        try:
+            xr = float(np.real(x))
+            xi = float(np.imag(x))
+            if abs(xi) < tol:
+                return f"{xr:.10f}"
+            sign = '+' if xi >= 0 else ''
+            return f"{xr:.10f}{sign}{xi:.10f}j"
+        except Exception:
+            return repr(x)

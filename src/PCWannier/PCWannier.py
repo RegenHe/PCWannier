@@ -37,6 +37,9 @@ class PCWannier:
         Logger.info(f"Running with {args.threads} threads")
 
         self._parse_input(args)
+
+        if args.cache:
+            global_data.incar.use_cached_data = ['U', 'V', 'M', 'O', 'A']
         
         self._load_data()
         self._prepare_state_collection()
@@ -91,10 +94,12 @@ class PCWannier:
         if need_orth:
             Logger.warning("Need to orthogonalize states")
             global_data.state_collection.orthogonalize()
-        _, need_orth = global_data.state_collection.check_orthogonality()
-        if need_orth:
-            Logger.error("Orthogonalization failed")
-            raise ValueError("Orthogonalization failed")
+
+            _, need_orth = global_data.state_collection.check_orthogonality()
+            if need_orth:
+                Logger.error("Orthogonalization failed")
+                raise ValueError("Orthogonalization failed")
+        Logger.info("orthogonality check passed")
 
         self._handle_energy_data()
 
@@ -176,6 +181,11 @@ class PCWannier:
             self.TBA.save_hoppings(global_data.incar.hopping_file)
 
         self.TBA.gen_hs_bands()
+
+        if global_data.incar.eff_k is not None:
+            Logger.info(f"Calculate effective Hamiltonian at k = {global_data.incar.eff_k}")
+            H_eff = self.TBA.effective_Hamiltonian()
+            # IO.save_matrix(os.path.splitext(global_data.incar.hopping_file)[0] + f"-H_eff-{global_data.incar.eff_k[0]}-{global_data.incar.eff_k[1]}.txt", H_eff)
     
     def _topology_calculation(self):
         self.TBA.gen_band()

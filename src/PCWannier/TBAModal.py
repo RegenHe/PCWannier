@@ -1,6 +1,9 @@
 import os
 
+from itertools import product
+
 import numpy as np
+from math import factorial
 import scipy
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -258,25 +261,158 @@ class TBAModal:
             Logger.info(f"group {gid}: bands {g}")
 
     @staticmethod
-    def group_bands(E: np.ndarray, delta_rel=1e-2, delta_abs=None):
-        E_glb_min = E.min()
-        E_glb_max = E.max()
-        span = E_glb_max - E_glb_min
+    def group_bands(E: np.ndarray, delta_rel=1e-3, delta_abs=None):
+        E = np.asarray(E)
+        if E.ndim < 2:
+            raise ValueError("E must have at least 2 dims: (..., Nb)")
 
-        delta = delta_rel * span
+        Nk = int(np.prod(E.shape[:-1]))
+        Nb = int(E.shape[-1])
+        Ek = E.reshape(Nk, Nb)
+
+        span = float(Ek.max() - Ek.min())
+        delta = float(delta_rel) * span
         if delta_abs is not None:
-            delta = max(delta, delta_abs) 
-        E_min = E.min(axis=(0, 1))
-        E_max = E.max(axis=(0, 1))
+            delta = max(delta, float(delta_abs))
+    
+        mindiff = np.full((Nb, Nb), np.inf, dtype=float)
 
-        overlap = (E_max[:, None] >= E_min[None, :] - delta) & (E_min[:, None] <= E_max[None, :] + delta)
+        denom = max(Nb * Nb, 1)
+        k_block = max(1, int(64e6 // (8 * denom)))
 
-        graph = scipy.sparse.csr_matrix(overlap)
-        n_comp, labels = scipy.sparse.csgraph.connected_components(graph)
+        for s in range(0, Nk, k_block):
+            t = min(s + k_block, Nk)
+            X = Ek[s:t]
+            local_min = np.min(np.abs(X[:, :, None] - X[:, None, :]), axis=0)
+            np.minimum(mindiff, local_min, out=mindiff)
+
+        adjacency = (mindiff <= delta)
+        np.fill_diagonal(adjacency, True)
+        adjacency |= adjacency.T
+
+        graph = scipy.sparse.csr_matrix(adjacency)
+        n_comp, labels = scipy.sparse.csgraph.connected_components(graph, directed=False)
 
         groups = [[] for _ in range(n_comp)]
-        for band, lab in enumerate(labels):
-            groups[lab].append(band)
+        for b, lab in enumerate(labels):
+            groups[lab].append(b)
 
-        groups = [sorted(g) for g in groups]
+        groups = [sorted(g) for g in groups if g]
+        groups.sort(key=lambda g: g[0])
         return groups
+    
+    @timer("Generate Effective Hamiltonian - ")
+    def effective_Hamiltonian(self):
+        H0 = self.gen_hopping()
+        if getattr(self, 'hoppings', None) is None or len(self.hoppings) == 0:
+            self.hoppings = []
+            for R in global_data.incar.neighbor:
+                self.hoppings.append(self.gen_hopping(R))
+        self.H_eff = {}
+
+        Rlist = np.asarray(global_data.incar.neighbor, dtype=float)
+        Tlist = np.stack(self.hoppings, axis=0).astype(complex)
+        axes = self._axis_names(Rlist.shape[1])
+
+        phase = np.exp(1j * 2*np.pi * (global_data.incar.neighbor @ np.asarray(global_data.incar.eff_k)))
+        WT = phase[:, None, None] * Tlist
+        WTd = np.conjugate(WT).transpose(0, 2, 1)
+
+        self.H_eff['1'] = WT.sum(axis=0) + WTd.sum(axis=0) + self.gen_hopping()
+
+        for n in range(1, global_data.incar.eff_order + 1):
+            monoms = self._monomials_of_order(Rlist.shape[1], n)
+            pref_power = (1j) ** n
+            for m in monoms:
+                prodRm = np.ones(Rlist.shape[0], dtype=float)
+                denom = 1
+                for a, e in enumerate(m):
+                    if e:
+                        prodRm *= Rlist[:, a] ** e
+                        denom  *= factorial(e)
+                term = (np.tensordot(prodRm, WT,  axes=(0, 0)) + (-1 if (n % 2 == 1) else 1) * np.tensordot(prodRm, WTd, axes=(0, 0))) * pref_power / denom
+                key = self._key_from_m(axes, m)
+                self.H_eff[key] = term
+        
+        Logger.info(f"Effective Hamiltonian terms: {list(self.H_eff.keys())}")
+        IO.save_dict(global_data.incar.eff_file, self.H_eff)
+
+        if global_data.incar.decompose:
+            decomp = self.decompose_effH_to_SU_N(self.H_eff)
+            IO.save_dict(global_data.incar.decompose_file, decomp)
+            Logger.info(f"Decomposed effective Hamiltonian terms saved to {global_data.incar.decompose_file}")
+
+        return self.H_eff
+
+    def _axis_names(self, dim):
+        base = ['x','y','z']
+        if dim <= 3:
+            return base[:dim]
+        return base + [f'k{i}' for i in range(dim-3)]
+
+    def _monomials_of_order(self, dim, n):
+        if n == 0:
+            return [tuple([0]*dim)]
+        out = []
+        for m in product(range(n+1), repeat=dim):
+            if sum(m) == n:
+                out.append(m)
+        return out
+
+    def _key_from_m(self, axes, m):
+        n = sum(m)
+        if n == 0:
+            return '1'
+        var = ''.join(
+            (axes[a] if e == 1 else axes[a]+str(e)) 
+            for a, e in enumerate(m) if e > 0
+        )
+        denom = 1
+        for e in m: denom *= factorial(e)
+        coeff = factorial(n) // denom
+        return (str(coeff) + var) if coeff > 1 else var
+    
+    @staticmethod
+    def SU_N_generators(N: int):
+        L = []
+        for j in range(N):
+            for k in range(j + 1, N):
+                S = np.zeros((N, N), complex); S[j, k] = S[k, j] = 1.0
+                A = np.zeros((N, N), complex); A[j, k] = -1j; A[k, j] = +1j
+                L.append(S); L.append(A)
+        for l in range(1, N):
+            H = np.zeros((N, N), complex)
+            H[range(l), range(l)] = 1.0
+            H[l, l] = -float(l)
+            H *= np.sqrt(2.0 / (l * (l + 1.0)))
+            L.append(H)
+        return np.eye(N, dtype=complex), L
+    
+    @staticmethod
+    def SU_N_decompose(H: np.ndarray, L: list[np.ndarray]):
+        N = H.shape[0]
+        c0 = np.trace(H) / N
+        c = 0.5 * np.array([np.trace(L @ H) for L in L], dtype=complex)
+        if np.allclose(H, H.conj().T):
+            c = c.real
+        return c0, c
+
+    @staticmethod
+    def decompose_effH_to_SU_N(H_eff: dict):
+        if not H_eff:
+            return {}, {}
+
+        any_key = next(iter(H_eff))
+        N = H_eff[any_key].shape[0]
+
+        I, L = TBAModal.SU_N_generators(N)
+        decom = {1: I}
+        for a, La in enumerate(L, start=2):
+            decom[a] = La
+
+        for key, M in H_eff.items():
+            c0, c = TBAModal.SU_N_decompose(M, L)
+            coeffs = np.concatenate(([c0], np.asarray(c)))
+            decom[key] = [coeffs[i] for i in range(len(coeffs))]
+
+        return decom

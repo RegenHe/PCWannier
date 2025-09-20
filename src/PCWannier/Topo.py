@@ -101,7 +101,7 @@ class Topo:
         self.Chern = flux_sum / (2 * np.pi)
 
         fig, ax = plt.subplots()
-        img = ax.imshow(F.T, origin="lower", extent=[-0.5, 0.5, -0.5, 0.5])
+        img = ax.imshow(F.T / (2 * np.pi) * (n_k1 * n_k2), origin="lower", extent=[-0.5, 0.5, -0.5, 0.5])
         cbar = fig.colorbar(img, ax=ax)
         ax.set_xlim(-0.5, 0.5)
         ax.set_ylim(-0.5, 0.5)

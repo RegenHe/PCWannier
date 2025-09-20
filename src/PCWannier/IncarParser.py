@@ -108,6 +108,7 @@ class IncarParser:
         "M_file": "./M.txt",
         "A_file": "./A.txt",
         "O_file": "./O.txt",
+        "disable_orth": True,
         "E_is_real": True,
         "band_file": "./band.txt",
         "hopping_file": "./hopping.txt",
@@ -135,6 +136,7 @@ class IncarParser:
         "symmetry": False,
 
         "eff_order": 2,
+        "eff_k": False,
         "eff_file": "./H_eff.txt",
         "decompose": False,
         "decompose_file": "./decompose.txt"
@@ -259,7 +261,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose"]:
+        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth"]:
             if value.strip().lower() == "true":
                 return True
             else:

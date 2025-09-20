@@ -30,9 +30,16 @@ class TBAModal:
 
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         hopping = np.zeros((shape[3], shape[3]), dtype=complex)
+
+        if global_data.incar.disable_orth:
+            Logger.info("Disable orthogonalization as requested")
+            T = global_data.state_collection.get_transform(True)
+        else:
+            T = global_data.state_collection.get_transform()
+
         for i in range(shape[0]):
             for j in range(shape[1]):
-                mU = global_data.state_initializer.matV[i][j] @ global_data.gradient.U[i][j]
+                mU = T[i][j] @ global_data.state_initializer.matV[i][j] @ global_data.gradient.U[i][j]
                 if global_data.incar.dataset_type.lower() == 'comsol':
                     sign = -1
                 kx, ky = WannierTools.get_kx_ky([i, j])
@@ -198,8 +205,8 @@ class TBAModal:
             cmap = plt.get_cmap("tab10")
             dos_colors = [cmap(i) for i in range(len(dos_components))]
 
-        fig = plt.figure(figsize=figsize)
-        gs = GridSpec(1, 2, width_ratios=[4, 1], wspace=0.05)
+        fig = plt.figure(figsize=figsize, constrained_layout=True)
+        gs = fig.add_gridspec(1, 2, width_ratios=[4, 1], wspace=0.05)
 
         ax_band = fig.add_subplot(gs[0])
         for band in range(bands.shape[1]):
@@ -215,17 +222,15 @@ class TBAModal:
 
         ax_dos = fig.add_subplot(gs[1], sharey=ax_band)
         for i, dos in enumerate(dos_components):
-            ax_dos.plot(dos, np.real(dos_energy), color=dos_colors[i], label=dos_labels[i])
-            ax_dos.fill_betweenx(np.real(dos_energy), 0, dos, color=dos_colors[i], alpha=alpha)
+            ax_dos.plot(np.real(dos), np.real(dos_energy), color=dos_colors[i], label=dos_labels[i])
+            ax_dos.fill_betweenx(np.real(dos_energy), 0, np.real(dos), color=dos_colors[i], alpha=alpha)
         ax_dos.set_xlabel(dos_title)
         ax_dos.tick_params(labelleft=False)
         ax_dos.grid(True)
         ax_dos.legend(loc='upper right', fontsize='small')
 
-        plt.tight_layout()
-
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            fig.savefig(save_path, dpi=300)
 
     @timer("Generate Band Structure - ")
     def gen_band(self):
@@ -318,7 +323,7 @@ class TBAModal:
         WT = phase[:, None, None] * Tlist
         WTd = np.conjugate(WT).transpose(0, 2, 1)
 
-        self.H_eff['1'] = WT.sum(axis=0) + WTd.sum(axis=0) + self.gen_hopping()
+        self.H_eff['1'] = WT.sum(axis=0) + WTd.sum(axis=0) + H0
 
         for n in range(1, global_data.incar.eff_order + 1):
             monoms = self._monomials_of_order(Rlist.shape[1], n)

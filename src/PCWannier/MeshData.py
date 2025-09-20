@@ -197,7 +197,9 @@ def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = 
 
     for m_idx, lst in enumerate(buckets):
         if lst:
+            avg_val = float(np.mean(comp_vals[lst]))
             best_data_i = max(lst, key=lambda i: comp_vals[i])
+            comp_vals[best_data_i] = avg_val
             mesh_to_data_idx[m_idx] = best_data_i
             mesh_dists[m_idx] = np.linalg.norm(mesh.vertices[m_idx] - data.point_matrix[best_data_i])
 

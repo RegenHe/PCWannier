@@ -91,6 +91,7 @@ class PCWannier:
         global_data.state_collection.turn_to_Bloch()
 
         _, need_orth = global_data.state_collection.check_orthogonality()
+        
         if need_orth:
             Logger.warning("Need to orthogonalize states")
             global_data.state_collection.orthogonalize()
@@ -182,10 +183,9 @@ class PCWannier:
 
         self.TBA.gen_hs_bands()
 
-        if global_data.incar.eff_k is not None:
+        if global_data.incar.eff_k is not False:
             Logger.info(f"Calculate effective Hamiltonian at k = {global_data.incar.eff_k}")
-            H_eff = self.TBA.effective_Hamiltonian()
-            # IO.save_matrix(os.path.splitext(global_data.incar.hopping_file)[0] + f"-H_eff-{global_data.incar.eff_k[0]}-{global_data.incar.eff_k[1]}.txt", H_eff)
+            self.TBA.effective_Hamiltonian()
     
     def _topology_calculation(self):
         self.TBA.gen_band()
@@ -239,47 +239,52 @@ class PCWannier:
         r_[1] = (r[0] * global_data.incar.real_lattice_vectors[0][1] + r[1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
         Logger.info(f"Generating Wannier Functions - r = ({r[0]}, {r[1]})")
 
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
+        Nkx = len(global_data.incar.k_points[0])
+        Nky = len(global_data.incar.k_points[1])
+        Nwin = len(global_data.incar.band_window)
+        Ncalc = global_data.incar.band_calc_num
+        Nv = global_data.state_collection.extention_mesh.vertices.shape[0]
 
-        extention_field = np.array([[[None for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])])
-        for n in range(shape[2]):
-            for i in range(shape[0]):
-                for j in range(shape[1]):
-                    extention_field[i, j, n] = global_data.state_collection.get_extention_field(i, j, n)
-        ubloch = np.array([[[None for _ in range(shape[3])] for _ in range(shape[1])] for _ in range(shape[0])])
-        for n in range(shape[3]):
-            for i in range(shape[0]):
-                for j in range(shape[1]):
-                    t_ = global_data.state_collection.get_zero_extension_field()
-                    mV = global_data.state_initializer.matV[i][j]
-                    mU = global_data.gradient.U[i][j]
-                    for m in range(shape[2]):
-                        t_ += (mV @ mU)[m, n] * extention_field[i, j, m]
-                    ubloch[i, j, n] = t_
-        del extention_field
+        Wsum = np.zeros((Nv, Ncalc), dtype=np.complex128)
+        if global_data.incar.disable_orth:
+            Logger.info("Disable orthogonalization as requested")
+            T = global_data.state_collection.get_transform(True)
+        else:
+            T = global_data.state_collection.get_transform()
 
-        phase_ = np.array([[None for _ in range(shape[1])] for _ in range(shape[0])])
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                phase_[i, j] = global_data.state_collection.get_extention_phase(i, j)
-        self.wanniers = [global_data.state_collection.get_zero_extension_field() for _ in range(shape[2])]
-        for n in range(shape[3]):
-            for i in range(shape[0]):
-                for j in range(shape[1]):
-                    kx, ky = WannierTools.get_kx_ky([i, j])
-                    sign = 1
-                    if global_data.incar.dataset_type.lower() == 'comsol':
-                        sign = -1
-                    phase = phase_[i, j] * np.exp(1j * np.dot(-1 * sign * np.array([kx, ky]), r_))
-                    self.wanniers[n] += phase * ubloch[i, j, n]
-            self.wanniers[n] /= np.sqrt(shape[0] * shape[1])
-            norm = WannierTools.integrate_over_mesh(FieldData('wannier', global_data.state_collection.extention_mesh, np.abs(self.wanniers[n]) ** 2 * global_data.state_collection.extention_epsilon))
+        for i in range(Nkx):
+            for j in range(Nky):
+                phase_vec = global_data.state_collection.get_extention_phase(i, j)
+                kx, ky = WannierTools.get_kx_ky([i, j])
+                sign = -1 if global_data.incar.dataset_type.lower() == 'comsol' else 1
+                phase_scalar = np.exp(1j * (-(sign) * (kx * r_[0] + ky * r_[1])))
+                P = phase_vec * phase_scalar
+
+                fields_ij = [global_data.state_collection.get_extention_field(i, j, m) for m in range(Nwin)]
+                E = np.column_stack(fields_ij).astype(np.complex128, copy=False)
+                C = (T[i][j] @ global_data.state_initializer.matV[i][j] @ global_data.gradient.U[i][j])
+
+                U_ij = E @ C
+
+                Wsum += U_ij * P[:, None]
+
+        Wsum /= np.sqrt(Nkx * Nky)
+
+        self.wanniers = [Wsum[:, n] for n in range(Ncalc)]
+
+        Fnorm = (np.abs(Wsum) ** 2) * global_data.state_collection.extention_epsilon[:, None]
+        fd = FieldData('wannier', global_data.state_collection.extention_mesh, Fnorm.astype(np.complex128, copy=False))
+        norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+
+        for n in range(Ncalc):
+            norm = norms[n]
             Logger.info(f"Check wannier function norm = {norm}")
             if not np.isclose(np.abs(norm), 1.0, atol=1e-3):
-                warn = f"Normalization ({np.abs(norm)}) not equal to 1 in Wannier State - {n}, err = {np.abs(1 - np.abs(norm))}"
+                warn = (f"Normalization ({np.abs(norm)}) not equal to 1 in Wannier State - {n}, "
+                        f"err = {np.abs(1 - np.abs(norm))}")
                 Logger.warning(warn)
             if global_data.incar.wannier_figures.lower() != "false":
-                fd = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[n])
-                fd.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}.png")
+                fdn = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[n])
+                fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}.png")
 
     

@@ -542,11 +542,11 @@ class StateCollection:
                     phase = self.get_phase(i, j)
                     self.field[i][j][n] = np.conj(phase) * self.field[i][j][n]
     
-    def get_transform(self) -> np.ndarray:
-        if self.is_orthogonalized and self.transform is not None:
+    def get_transform(self, zero=False) -> np.ndarray:
+        if self.is_orthogonalized and self.transform is not None and not zero:
             return self.transform
         else:
-            return np.eye(len(self.field[0][0]))
+            return [[np.eye(len(self.field[0][0])) for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
     
     def get_phase(self, i: int, j: int):
         if global_data.incar.dataset_type.lower() == 'comsol':

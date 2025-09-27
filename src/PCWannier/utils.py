@@ -225,13 +225,19 @@ class FieldData:
     def __repr__(self) -> str:
         return f"FieldData(point_matrix={self.mesh}, value_matrix={self.field})"
     
-    def plot(self) -> None:
+    def plot(self, real=True) -> None:
         fig, ax = plt.subplots()
         triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
 
-        plt.tricontourf(triang, np.real(self.field), levels=255, cmap='bwr')
+        if real:
+            plt.tricontourf(triang, np.real(self.field), levels=255, cmap='bwr')
+        else:
+            plt.tricontourf(triang, np.imag(self.field), levels=255, cmap='bwr')
         plt.clim(-max(np.abs(self.field)), max(np.abs(self.field)))
-        plt.colorbar(label='Real Part')
+        if real:
+            plt.colorbar(label='Real Part')
+        else:
+            plt.colorbar(label='Imaginary Part')
         ax.set_aspect('equal')
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
@@ -242,7 +248,7 @@ class FieldData:
         ax.set_xlim(min_x - margin, max_x + margin)
         ax.set_ylim(min_y - margin, max_y + margin)
         plt.show()
-    def save_fig(self, filename):
+    def save_fig(self, filename, real=True):
         directory = os.path.dirname(filename)
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
@@ -250,9 +256,15 @@ class FieldData:
         fig, ax = plt.subplots()
         triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
 
-        plt.tricontourf(triang, np.real(self.field), levels=255, cmap='bwr')
+        if real:
+            plt.tricontourf(triang, np.real(self.field), levels=255, cmap='bwr')
+        else:
+            plt.tricontourf(triang, np.imag(self.field), levels=255, cmap='bwr')
         plt.clim(-max(np.abs(self.field)), max(np.abs(self.field)))
-        plt.colorbar(label='Real Part')
+        if real:
+            plt.colorbar(label='Real Part')
+        else:
+            plt.colorbar(label='Imaginary Part')
         ax.set_aspect('equal')
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
@@ -263,6 +275,7 @@ class FieldData:
         ax.set_xlim(min_x - margin * (max_x - min_x), max_x + margin * (max_x - min_x))
         ax.set_ylim(min_y - margin * (max_y - min_y), max_y + margin * (max_y - min_y))
         plt.savefig(filename, dpi=300, bbox_inches='tight')
+        plt.close(fig)
         Logger.info(f"figure successfully saved to {filename}")
 
 
@@ -353,11 +366,15 @@ class StateCollection:
         for i in range(len(self.field)):
             for j in range(len(self.field[i])):
                 arr = np.asarray(self.field[i][j])
-
                 F = (np.abs(arr)**2 * eps).T
 
                 fd = FieldData(self.name, self.mesh, F.astype(np.complex128, copy=False))
                 vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+
+                # A = FieldData("A", self.mesh, np.conj(arr * eps).astype(np.complex128, copy=False))
+                # B = FieldData("B", self.mesh, arr.astype(np.complex128, copy=False))
+
+                # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
                 self.normalization[i][j][:vals.shape[0]] = vals
         
         self.is_normalized = True
@@ -389,7 +406,6 @@ class StateCollection:
             self.transform = IO.load_cell_matrix(global_data.incar.O_file, shape=(Nkx, Nky))
             self.is_orthogonalized = True
             return self.transform
-
         
         Nv = self.mesh.vertices.shape[0]
         arr0 = np.asarray(self.field[0][0])
@@ -421,8 +437,13 @@ class StateCollection:
                     F = (right[:, None] * W.T).astype(np.complex128, copy=False)
                     fd = FieldData("S", self.mesh, F)
                     vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+
+                    # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
+                    # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
+                    # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
                     S[a, a:] = vals[a:]
                     S[a:, a] = vals[a:].conjugate()
+                    # S[a, a] = np.real(S[a, a])
 
                 S = 0.5*(S + S.conj().T)
                 w, V = np.linalg.eigh(S)
@@ -489,8 +510,13 @@ class StateCollection:
                     F = (right[:, None] * W.T).astype(np.complex128, copy=False)
                     fd = FieldData("S", self.mesh, F)
                     vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+
+                    # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
+                    # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
+                    # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
                     S[a, a:] = vals[a:]
                     S[a:, a] = vals[a:].conjugate()
+                    # S[a, a] = np.real(S[a, a])
                 
                 if self.is_orthogonalized:
                     S = self.transform[i][j].conj().T @ S @ self.transform[i][j]
@@ -783,7 +809,7 @@ class WannierTools:
     
     
     @staticmethod
-    @nb.njit(parallel=True, fastmath=True, cache=True)
+    @nb.njit(parallel=True, cache=True, fastmath=False)
     def _integrate_batch_numba(F, elems, w):
         Nt = elems.shape[0]
         K = F.shape[1]
@@ -801,38 +827,129 @@ class WannierTools:
             out_r[k] = sr
             out_i[k] = si
         return out_r + 1j*out_i
+    
+
+    @nb.njit(parallel=True, cache=True, fastmath=False)
+    def _integrate_prod_numba(A, B, elems, w, hermitian=False, block=1<<14):
+        Nt = elems.shape[0]
+        K  = A.shape[1]
+        out_r = np.zeros(K, np.float64)
+        out_i = np.zeros(K, np.float64)
+
+        for k in range(K):
+            nb_blocks = (Nt + block - 1) // block
+            part_r = np.zeros(nb_blocks, np.float64)
+            part_i = np.zeros(nb_blocks, np.float64)
+
+            for b in nb.prange(nb_blocks):
+                start = b * block
+                end   = min(start + block, Nt)
+
+                sr = 0.0; cr = 0.0
+                si = 0.0; ci = 0.0
+
+                for t in range(start, end):
+                    i0 = elems[t,0]; i1 = elems[t,1]; i2 = elems[t,2]
+                    a0 = A[i0,k]; a1 = A[i1,k]; a2 = A[i2,k]
+                    b0 = B[i0,k]; b1 = B[i1,k]; b2 = B[i2,k]
+                    if hermitian:
+                        a0 = np.conj(a0); a1 = np.conj(a1); a2 = np.conj(a2)
+
+                    z = 2.0*(a0*b0 + a1*b1 + a2*b2) + (a0*b1 + a1*b0 + a0*b2 + a2*b0 + a1*b2 + a2*b1)
+                    s = 0.25 * w[t]
+
+                    yr = s * z.real - cr
+                    tmp = sr + yr
+                    cr = (tmp - sr) - yr
+                    sr = tmp
+
+                    yi = s * z.imag - ci
+                    tmp = si + yi
+                    ci = (tmp - si) - yi
+                    si = tmp
+
+                part_r[b] = sr
+                part_i[b] = si
+
+            sr = 0.0; cr = 0.0
+            for b in range(nb_blocks):
+                y = part_r[b] - cr
+                tmp = sr + y
+                cr = (tmp - sr) - y
+                sr = tmp
+
+            si = 0.0; ci = 0.0
+            for b in range(nb_blocks):
+                y = part_i[b] - ci
+                tmp = si + y
+                ci = (tmp - si) - y
+                si = tmp
+
+            out_r[k] = sr
+            out_i[k] = si
+
+        return out_r + 1j*out_i
 
     @staticmethod
-    def integrate_over_mesh(data: FieldData, *, chunk_size=None) -> complex | np.ndarray:
-        elems, w = np.asarray(data.mesh.elements, dtype=np.intp), np.asarray(data.mesh.tri_weights, dtype=np.float64)
-        Nv = data.mesh.vertices.shape[0]
-        f = np.asarray(data.field)
+    def integrate_over_mesh(
+        data: FieldData, *,
+        other=None,
+        hermitian=False,
+        real_only=False,
+        chunk_size=None
+    ) -> complex | np.ndarray:
+        mesh  = data.mesh
+        elems = np.asarray(mesh.elements, dtype=np.intp)
+        w = np.asarray(mesh.tri_weights, dtype=np.float64)
+        Nv = mesh.vertices.shape[0]
 
-        if f.ndim == 1:
-            F = f.reshape(Nv, 1)
-        elif f.ndim == 2:
-            F = f if f.shape[0] == Nv else f.T
+        def _to_NV_K(arr):
+            arr = np.asarray(arr)
+            if arr.ndim == 1:
+                out = arr.reshape(Nv, 1)
+            elif arr.ndim == 2:
+                out = arr if arr.shape[0] == Nv else arr.T
+            else:
+                raise ValueError("field must be (Nv,) or (Nv,K)")
+            return out.astype(np.complex128, copy=False)
+
+        A = _to_NV_K(data.field)
+
+        if other is None:
+            kernel = WannierTools._integrate_batch_numba
+            if not hasattr(kernel, "_warmed"):
+                _ = kernel(A[:, :1], elems, w)
+                kernel._warmed = True
         else:
-            raise ValueError("data.field must be (Nv, ) or (Nv, K)")
+            B = _to_NV_K(other.field)
+            if A.shape[1] != B.shape[1]:
+                raise ValueError("The number of columns in A and B must be the same")
+            kernel = WannierTools._integrate_prod_numba
+            if not hasattr(kernel, "_warmed"):
+                _ = kernel(A[:, :1], B[:, :1], elems, w, hermitian)
+                kernel._warmed = True
 
-        F = F.astype(np.complex128, copy=False)
-
-        if not hasattr(WannierTools._integrate_batch_numba, "_warmed"):
-            _ = WannierTools._integrate_batch_numba(F[:, :1], elems, w)
-            WannierTools._integrate_batch_numba._warmed = True
-
-        if chunk_size is not None and F.shape[1] > chunk_size:
-            K = F.shape[1]
+        K = A.shape[1]
+        if chunk_size is not None and K > chunk_size:
             out = np.empty(K, dtype=np.complex128)
             s = 0
             while s < K:
                 e = min(s + chunk_size, K)
-                out[s:e] = WannierTools._integrate_batch_numba(F[:, s:e], elems, w)
+                if other is None:
+                    out[s:e] = WannierTools._integrate_batch_numba(A[:, s:e], elems, w)
+                else:
+                    out[s:e] = WannierTools._integrate_prod_numba(A[:, s:e], B[:, s:e], elems, w, hermitian)
                 s = e
         else:
-            out = WannierTools._integrate_batch_numba(F, elems, w)
+            if other is None:
+                out = WannierTools._integrate_batch_numba(A, elems, w)
+            else:
+                out = WannierTools._integrate_prod_numba(A, B, elems, w, hermitian)
+        
+        if real_only:
+            out = out.real
 
-        return out[0] if f.ndim == 1 else out
+        return out[0] if (A.shape[1] == 1) else out
 
 
 if __name__ == "__main__":

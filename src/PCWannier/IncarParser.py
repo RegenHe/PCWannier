@@ -200,6 +200,68 @@ class IncarParser:
         elif key == "dataset_order":
             return [x.strip() for x in value.split(',')]
         elif key == "projections":
+            def _complex(s: str):
+                s = s.strip()
+                s_mod = s.replace("i", "j")
+                if s_mod == "j":
+                    s_mod = "1j"
+                elif s_mod == "-j":
+                    s_mod = "-1j"
+                try:
+                    return complex(s_mod)
+                except Exception:
+                    return complex(evaluate_math_expression(s))
+
+            def _extract_brace_blocks(token: str):
+                blocks, depth, start = [], 0, None
+                for i, ch in enumerate(token):
+                    if ch == "{":
+                        if depth == 0:
+                            start = i + 1
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0 and start is not None:
+                            blocks.append(token[start:i].strip())
+                            start = None
+                return blocks
+
+            def _extract_bracket_groups(s: str):
+                groups, depth, start = [], 0, None
+                for i, ch in enumerate(s):
+                    if ch == "[":
+                        if depth == 0:
+                            start = i + 1
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0 and start is not None:
+                            groups.append(s[start:i].strip())
+                            start = None
+                return groups
+
+            def _parse_linear_combo(token: str):
+                blocks = _extract_brace_blocks(token)
+                if len(blocks) != 2:
+                    raise ValueError(f"Invalid linear-combo block: '{token}'")
+                state_groups = _extract_bracket_groups(blocks[0])
+                if not state_groups:
+                    raise ValueError(f"Empty states in linear-combo: '{token}'")
+                lc_states = []
+                for g in state_groups:
+                    term = [t.strip() for t in g.split(",")]
+                    if len(term) != 3:
+                        raise ValueError(f"State must be [n,l,z]: '[{g}]'")
+                    n = int(term[0]); l = int(term[1]); z = float(evaluate_math_expression(term[2]))
+                    lc_states.append([n, l, z])
+                coeff_strs = [c.strip() for c in blocks[1].split(",") if c.strip()]
+                if not coeff_strs:
+                    raise ValueError(f"Empty coeffs in linear-combo: '{token}'")
+                lc_coeffs = [_complex(c) for c in coeff_strs]
+                if len(lc_coeffs) != len(lc_states):
+                    raise ValueError(f"#coeffs != #states in linear-combo: '{token}'")
+                return {"lc_states": lc_states, "lc_coeffs": lc_coeffs}
+            
             projections = []
             value = value.strip().strip('end').strip()
             lines = value.splitlines()
@@ -217,23 +279,29 @@ class IncarParser:
                         if i == 0:
                             projections_dict['atom'] = parts[i].strip()
                         elif i == 1:
-                            if '[' in parts[i].strip() and ']' in parts[i].strip():
-                                coefficient, term = parts[i].split('[')
-                                coefficient = coefficient.strip()
-                                term = term.split(']')[0].strip()
-                                projections_dict['frac_position'] = [float(evaluate_math_expression(v.strip())) for v in term.split(',')]
-                            else:
+                            groups = _extract_bracket_groups(parts[i].strip())
+                            if len(groups) != 1:
                                 raise ValueError(f"Invalid positon in projections: '{parts[i].strip()}'")
+                            term = groups[0]
+                            projections_dict['frac_position'] = [float(evaluate_math_expression(v.strip())) for v in term.split(',')]
                         elif i == 2:
                             projections_dict['xaxis_angluar'] = float(evaluate_math_expression(parts[i].strip()))
                         else:
-                            if '[' in parts[i].strip() and ']' in parts[i].strip():
-                                coefficient, term = parts[i].split('[')
-                                coefficient = coefficient.strip()
-                                term = term.split(']')[0].strip().split(',')
-                                state_list.append([int(term[0].strip()), int(term[1].strip()), float(evaluate_math_expression(term[2].strip()))])
+                            token = parts[i].strip()
+                            if token.startswith('{'):
+                                state_list.append(_parse_linear_combo(token))
+                            elif token.startswith('['):
+                                groups = _extract_bracket_groups(token)
+                                if len(groups) != 1:
+                                    raise ValueError(f"Invalid state block: '{token}'")
+                                g = groups[0]
+                                vals = [t.strip() for t in g.split(',')]
+                                if len(vals) != 3:
+                                    raise ValueError(f"State must be [n,l,z]: '[{g}]'")
+                                n = int(vals[0]); l = int(vals[1]); z = float(evaluate_math_expression(vals[2]))
+                                state_list.append([n, l, z])
                             else:
-                                raise ValueError(f"Invalid states in projections: '{parts[i].strip()}'")
+                                raise ValueError(f"Invalid states in projections: '{token}'")
 
                     projections_dict['states'] = state_list
                     projections.append(projections_dict)

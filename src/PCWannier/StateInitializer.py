@@ -108,10 +108,24 @@ class StateInitializer:
         H_list = []
         for p in global_data.incar.projections:
             for state in p['states']:
-                f = lambda r, phi: StateBases.Radial(state[0], state[1])(r, state[2]) * StateBases.Angular(state[1])(phi)
+                if isinstance(state, dict) and 'lc_states' in state:
+                    lc_states = state['lc_states']
+                    lc_coeffs = state['lc_coeffs']
+
+                    def f(r, phi, _lc_states=lc_states, _lc_coeffs=lc_coeffs):
+                        s = 0.0 + 0.0j
+                        for (n, l, z), c in zip(_lc_states, _lc_coeffs):
+                            s += c * StateBases.Radial(n, l)(r, z) * StateBases.Angular(l)(phi)
+                        return s
+                else:
+                    n, l, z = state
+                    def f(r, phi, _n=n, _l=l, _z=z):
+                        return StateBases.Radial(_n, _l)(r, _z) * StateBases.Angular(_l)(phi)
+
                 cart_position = (p['frac_position'][0] * np.array(global_data.incar.real_lattice_vectors[0]) +
                                 p['frac_position'][1] * np.array(global_data.incar.real_lattice_vectors[1]) +
                                 np.array(global_data.incar.origin)) * global_data.incar.lattice_const
+
                 h = global_data.state_collection.extention_mesh.rfunc(f, cart_position, p['xaxis_angluar'])
                 H_list.append(np.asarray(h, dtype=np.complex128))
 
@@ -144,11 +158,16 @@ class StateInitializer:
 
                 for m in range(shape[2]):
                     field = global_data.state_collection.get_extention_field(i, j, m)
+                    
                     base = global_data.state_collection.extention_epsilon * np.conj(phase * field)
 
                     F = (base[:, None] * G)
                     fd = FieldData('', global_data.state_collection.extention_mesh, F)
                     vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                    # base = global_data.state_collection.extention_epsilon * phase * field
+                    # A = FieldData("A", global_data.state_collection.extention_mesh, np.broadcast_to(np.conj(base[None, :]), (shape[3], Nv)).astype(np.complex128, copy=False))
+                    # B = FieldData("B", global_data.state_collection.extention_mesh, (G.T).astype(np.complex128, copy=False))
+                    # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
                     self.matA[i][j][m, :vals.shape[0]] = vals
                 
         for i in range(shape[0]):

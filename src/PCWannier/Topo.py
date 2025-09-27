@@ -78,6 +78,7 @@ class Topo:
         if not os.path.exists(os.path.dirname(filename)):
             os.makedirs(os.path.dirname(filename))
         fig.savefig(filename, bbox_inches='tight', dpi=300)
+        plt.close(fig)
         Logger.info(f"figure successfully saved to {filename}")
         
         return Z2
@@ -112,5 +113,6 @@ class Topo:
         if not os.path.exists(os.path.dirname(filename)):
             os.makedirs(os.path.dirname(filename))
         fig.savefig(filename, bbox_inches='tight', dpi=300)
+        plt.close(fig)
         Logger.info(f"figure successfully saved to {filename}")
         return self.Chern

@@ -203,6 +203,10 @@ class PCWannier:
             if global_data.incar.Chern_number:
                 C = self.Topo.Chern_number(self.TBA.eigvecs[:, :, :, g[0]:(g[-1] + 1)], os.path.join(global_data.incar.topo_output, f"Chern_Number-{gid}.png"))
                 Logger.info(f"Chern number for group {gid}-bands {g} = {C}")
+        self.Topo.construct_parallel_transport(self.TBA.eigvecs)
+        if global_data.incar.Chern_number:
+            C = self.Topo.Chern_number(self.TBA.eigvecs, os.path.join(global_data.incar.topo_output, f"Chern_Number-all.png"))
+            Logger.info(f"Chern number for all bands = {C}")
 
     def _handle_interpolation(self, interp_path: str, interp_wannier: str, interp_epsilon: str):
         if interp_path is None:
@@ -285,6 +289,8 @@ class PCWannier:
                 Logger.warning(warn)
             if global_data.incar.wannier_figures.lower() != "false":
                 fdn = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[n])
-                fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}.png")
+                fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-real.png", real=True)
+                fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-imag.png", real=False)
+            
 
     

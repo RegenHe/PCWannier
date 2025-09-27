@@ -111,6 +111,7 @@ class TBAModal:
             plt.ylabel("E", fontsize=12)
             plt.tight_layout()
             plt.savefig(global_data.incar.band_figure, dpi=300, bbox_inches='tight')
+            plt.close(fig)
             Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
         elif global_data.incar.DOS == 1:
             E_list = np.linspace(np.min(E), np.max(E), global_data.incar.DOS_num)
@@ -231,6 +232,7 @@ class TBAModal:
 
         if save_path:
             fig.savefig(save_path, dpi=300)
+            plt.close(fig)
 
     @timer("Generate Band Structure - ")
     def gen_band(self):

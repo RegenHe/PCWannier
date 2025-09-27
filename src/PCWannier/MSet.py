@@ -46,7 +46,7 @@ class MSet:
                     left_arr = left_arr[None, :]
                 elif left_arr.shape[1] != Nv:
                     left_arr = left_arr.T
-                Nm = left_arr.shape[0]
+                Nwin = left_arr.shape[0]
 
                 for b in range(shape[2]):
                     n_k1_idx, n_k2_idx, k_ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
@@ -61,11 +61,14 @@ class MSet:
                         phase2 = global_data.state_collection.get_phase(k_[0], k_[1])
                         right_arr = right_arr * (phase1 * np.conj(phase2))[None, :]
 
-                    for m in range(Nm):
+                    for m in range(Nwin):
                         base = np.conj(left_arr[m]) * state_collection.epsilon
                         F = (right_arr * base[None, :]).T.astype(np.complex128, copy=False)
                         fd = FieldData("M0", state_collection.mesh, F)
                         vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                        # A = FieldData("A", state_collection.mesh, np.broadcast_to(np.conj(left_arr[m][None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
+                        # B = FieldData("B", state_collection.mesh, (right_arr.T * state_collection.epsilon[:, None]).astype(np.complex128, copy=False))
+                        # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
                         self.mM0[i, j, b][m, :vals.shape[0]] = vals
         Logger.info("M0 initialized")
 

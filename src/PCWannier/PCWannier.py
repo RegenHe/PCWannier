@@ -1,5 +1,7 @@
 import os
 
+from copy import copy
+
 import numpy as np
 import numba as nb
 import matplotlib.pyplot as plt
@@ -21,6 +23,7 @@ from . import StateInitializer
 from . import Gradient
 from . import TBAModal
 from . import Topo
+from . import Fatband
 
 class PCWannier:
     def __init__(self):
@@ -35,6 +38,14 @@ class PCWannier:
         global_data.threads = args.threads
         nb.set_num_threads(global_data.threads)
         Logger.info(f"Running with {args.threads} threads")
+
+        if args.fatband:
+            Logger.info("Starting fatband calculation")
+            fatband = Fatband.Fatband()
+            fatband.parser(args.input)
+            fatband.run()
+            return
+
 
         self._parse_input(args)
 

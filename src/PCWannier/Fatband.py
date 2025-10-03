@@ -83,12 +83,18 @@ class Fatband:
                     def f(r, phi, _lc_states=lc_states, _lc_coeffs=lc_coeffs):
                         s = 0.0 + 0.0j
                         for (n, l, z), c in zip(_lc_states, _lc_coeffs):
-                            s += c * StateBases.Radial(n, l)(r, z) * StateBases.Angular(l)(phi)
+                            if self.incar.radius_func:
+                                s += c * StateBases.Radial(n, l)(r, z) * StateBases.Angular(l)(phi)
+                            else:
+                                s += c * 1 * StateBases.Angular(l)(phi)
                         return s
                 else:
                     n, l, z = state
                     def f(r, phi, _n=n, _l=l, _z=z):
-                        return StateBases.Radial(_n, _l)(r, _z) * StateBases.Angular(_l)(phi)
+                        if self.incar.radius_func:
+                            return StateBases.Radial(_n, _l)(r, _z) * StateBases.Angular(_l)(phi)
+                        else:
+                            return 1 * StateBases.Angular(_l)(phi)
 
                 cart_position = (p['frac_position'][0] * np.array(self.incar.real_lattice_vectors[0]) +
                                 p['frac_position'][1] * np.array(self.incar.real_lattice_vectors[1]) +
@@ -280,6 +286,7 @@ class IncarData:
         self.dielectric_file: str = None
         self.E_file: str = None
         self.kpoint_num: int = None
+        self.radius_func: bool = True
 
     def __repr__(self):
         class_name = self.__class__.__name__
@@ -303,6 +310,7 @@ class IncarParser:
         "reciprocal_lattice_vectors": np.array([[0, 0], [0, 0]]),
         "dataset_type":  "comsol",
         "origin": [0, 0],
+        "radius_func": True,
         }
 
     def __init__(self, filename: str):
@@ -492,7 +500,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth"]:
+        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "radius_func"]:
             if value.strip().lower() == "true":
                 return True
             else:

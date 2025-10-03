@@ -149,7 +149,6 @@ class StateInitializer:
 
         for i in range(shape[0]):
             for j in range(shape[1]):
-                phase = global_data.state_collection.get_extention_phase(i, j)
                 Nv = global_data.state_collection.extention_mesh.vertices.shape[0]
 
                 G = np.column_stack(g).astype(np.complex128, copy=False)
@@ -159,7 +158,7 @@ class StateInitializer:
                 for m in range(shape[2]):
                     field = global_data.state_collection.get_extention_field(i, j, m)
                     
-                    base = global_data.state_collection.extention_epsilon * np.conj(phase * field)
+                    base = global_data.state_collection.extention_epsilon * np.conj(field)
 
                     F = (base[:, None] * G)
                     fd = FieldData('', global_data.state_collection.extention_mesh, F)
@@ -168,7 +167,7 @@ class StateInitializer:
                     # A = FieldData("A", global_data.state_collection.extention_mesh, np.broadcast_to(np.conj(base[None, :]), (shape[3], Nv)).astype(np.complex128, copy=False))
                     # B = FieldData("B", global_data.state_collection.extention_mesh, (G.T).astype(np.complex128, copy=False))
                     # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
-                    self.matA[i][j][m, :vals.shape[0]] = vals
+                    self.matA[i][j][m, :vals.shape[0]] = vals * np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1])
                 
         for i in range(shape[0]):
             for j in range(shape[1]):

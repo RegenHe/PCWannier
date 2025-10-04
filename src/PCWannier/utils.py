@@ -54,10 +54,17 @@ class Mesh:
 
 
     def func(self, f, offset=[0, 0]):
-        return [f(p[0] - offset[0], p[1] - offset[1]) for p in self.vertices]
+        dx = self.vertices[:, 0] - offset[0]
+        dy = self.vertices[:, 1] - offset[1]
+        out = f(dx, dy)
+        return np.asarray(out, dtype=np.complex128, copy=False)
     
+
     def rfunc(self, f, offset=[0, 0], ang=0):
-        return [f(np.sqrt((p[0] - offset[0]) ** 2 + (p[1] - offset[1]) ** 2), np.atan2(p[0] - offset[0], p[1] - offset[1]) + np.radians(ang)) for p in self.vertices]
+        dx = self.vertices[:, 0] - offset[0]
+        dy = self.vertices[:, 1] - offset[1]
+        out = f(np.hypot(dx, dy), np.arctan2(dy, dx) + np.deg2rad(ang))
+        return np.asarray(out, dtype=np.complex128, copy=False)
         
 
     def __repr__(self) -> str:

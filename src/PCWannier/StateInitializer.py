@@ -115,6 +115,11 @@ class StateInitializer:
             Logger.error(err_msg)
             raise
 
+        a1 = np.array(global_data.incar.real_lattice_vectors[0], dtype=float) * global_data.incar.lattice_const
+        a2 = np.array(global_data.incar.real_lattice_vectors[1], dtype=float) * global_data.incar.lattice_const
+        ns = np.mgrid[-(k1_sz-1)//2:k1_sz//2, -(k2_sz-1)//2:k2_sz//2].reshape(2, -1).T
+        T_list = [n1 * a1 + n2 * a2 for (n1, n2) in ns]
+
         H_list = []
         for p in global_data.incar.projections:
             for state in p['states']:
@@ -135,9 +140,12 @@ class StateInitializer:
                 cart_position = (p['frac_position'][0] * np.array(global_data.incar.real_lattice_vectors[0]) +
                                 p['frac_position'][1] * np.array(global_data.incar.real_lattice_vectors[1]) +
                                 np.array(global_data.incar.origin)) * global_data.incar.lattice_const
+                
+                col = np.zeros(len(global_data.state_collection.extention_mesh.vertices), dtype=np.complex128)
+                for T in T_list:
+                    col += global_data.state_collection.extention_mesh.rfunc(f, T + cart_position, p['xaxis_angluar'])
 
-                h = global_data.state_collection.extention_mesh.rfunc(f, cart_position, p['xaxis_angluar'])
-                H_list.append(np.asarray(h, dtype=np.complex128))
+                H_list.append(np.asarray(col, dtype=np.complex128, copy=False))
 
         H = np.column_stack(H_list)
 
@@ -177,7 +185,7 @@ class StateInitializer:
                     # A = FieldData("A", global_data.state_collection.extention_mesh, np.broadcast_to(np.conj(base[None, :]), (shape[3], Nv)).astype(np.complex128, copy=False))
                     # B = FieldData("B", global_data.state_collection.extention_mesh, (G.T).astype(np.complex128, copy=False))
                     # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
-                    self.matA[i][j][m, :vals.shape[0]] = vals * np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1])
+                    self.matA[i][j][m, :vals.shape[0]] = vals
                 
         for i in range(k1_sz):
             for j in range(k2_sz):

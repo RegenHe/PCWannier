@@ -15,6 +15,7 @@ from .Timer import Timer, timer
 from .Utils import global_data
 
 from .Utils import WannierTools, FieldData
+from .IncarParser import EnergyWindow
 
 
 class TBAModal:
@@ -107,6 +108,9 @@ class TBAModal:
                 plt.axvline(x=pos, color='black', linestyle='--', linewidth=0.5)
             plt.xticks([p[1] for p in high_sym_points], [p[0] for p in high_sym_points])
             plt.xlim(0, total)
+            if isinstance(global_data.incar.band_window, EnergyWindow):
+                plt.axhline(y=global_data.incar.band_window.emin, color='k', linestyle='--', linewidth=1, zorder=3)
+                plt.axhline(y=global_data.incar.band_window.emax, color='k', linestyle='--', linewidth=1, zorder=3)
             plt.title("Band Structure", fontsize=14)
             plt.ylabel("E", fontsize=12)
             plt.tight_layout()
@@ -212,6 +216,10 @@ class TBAModal:
         ax_band = fig.add_subplot(gs[0])
         for band in range(bands.shape[1]):
             ax_band.plot(k_path, np.real(bands[:, band]), color='blue')
+        
+        if isinstance(global_data.incar.band_window, EnergyWindow):
+            plt.axhline(y=global_data.incar.band_window.emin, color='k', linestyle='--', linewidth=1, zorder=3)
+            plt.axhline(y=global_data.incar.band_window.emax, color='k', linestyle='--', linewidth=1, zorder=3)
 
         for pos in [p[1] for p in high_sym_points]:
             ax_band.axvline(x=pos, color='black', linestyle='--', linewidth=0.5)
@@ -225,6 +233,7 @@ class TBAModal:
         for i, dos in enumerate(dos_components):
             ax_dos.plot(np.real(dos), np.real(dos_energy), color=dos_colors[i], label=dos_labels[i])
             ax_dos.fill_betweenx(np.real(dos_energy), 0, np.real(dos), color=dos_colors[i], alpha=alpha)
+
         ax_dos.set_xlabel(dos_title)
         ax_dos.tick_params(labelleft=False)
         ax_dos.grid(True)

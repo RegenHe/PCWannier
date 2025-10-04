@@ -20,24 +20,29 @@ from .Utils import FieldData, StateCollection, WannierTools
 
 class Gradient:
     def __init__(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num]
-        self.U = [[np.eye(shape[2], shape[2], dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        self.G = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        self.dW = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        B = global_data.incar.band_calc_num
+
+        self.U = [[np.eye(B, B, dtype=complex) for _ in range(k2_sz)]for _ in range(k1_sz)]
+        self.G = [[np.zeros((B, B), dtype=complex) for _ in range(k2_sz)]for _ in range(k1_sz)]
+        self.dW = [[np.zeros((B, B), dtype=complex) for _ in range(k2_sz)]for _ in range(k1_sz)]
 
         self.omega = [1e6, 1e6, 1e6]
 
         self.epsilon = 0.01
 
-        self.rn = np.zeros((2, shape[2]), dtype=complex)
+        self.rn = np.zeros((2, B), dtype=complex)
 
     @timer("Gradient iter - ")
     def iter(self, err_diff: float, max_iter: int, epsilon: float=0.01):
         Logger.info('Starting Gradient iteration')
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
 
         if 'U' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - U")
-            self.U = IO.load_cell_matrix(global_data.incar.U_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+            self.U = IO.load_cell_matrix(global_data.incar.U_file, shape=(k1_sz, k2_sz))
         
         lastOmega = 1e6
         if max_iter == 0:
@@ -72,25 +77,28 @@ class Gradient:
 
 
     def calc(self, isUpdate=True):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num, int(len(global_data.incar.composition_of_b))]
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        B = global_data.incar.band_calc_num
+        b_sz = len(global_data.incar.composition_of_b)
         self.generateRn()
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                self.G[i][j] = np.zeros((shape[2], shape[2]), dtype=complex)
-                for b in range(shape[3]):
+        for i in range(k1_sz):
+            for j in range(k2_sz):
+                self.G[i][j] = np.zeros((B, B), dtype=complex)
+                for b in range(b_sz):
                     mM = global_data.m_set.get(i, j, b)
 
-                    mR = np.zeros((shape[2], shape[2]), dtype=complex)
-                    mT = np.zeros((shape[2], shape[2]), dtype=complex)
-                    for m in range(shape[2]):
-                        for n in range(shape[2]):
+                    mR = np.zeros((B, B), dtype=complex)
+                    mT = np.zeros((B, B), dtype=complex)
+                    for m in range(B):
+                        for n in range(B):
                             mR[m, n] = mM[m, n] * np.conj(mM[n, n])
                             mT[m, n] = mM[m, n] / mM[n, n] * (np.imag(np.log(mM[n, n])) + np.dot(global_data.incar.b_vectors[b, :], self.rn[:, n]))
                     self.G[i][j] += global_data.incar.wb[b] * (self.operator_A(mR) - self.operator_S(mT))
                 self.G[i][j] = 4 * self.G[i][j]
                 self.dW[i][j] = self.epsilon * self.G[i][j]
                 if isUpdate:
-                    if not np.isclose(np.abs(np.trace(self.U[i][j] @ self.U[i][j].conj().T)), shape[2], rtol=1e-8):
+                    if not np.isclose(np.abs(np.trace(self.U[i][j] @ self.U[i][j].conj().T)), B, rtol=1e-8):
                         Logger.warning(f"||U[{i}][{j}]|| = {np.abs(np.trace(self.U[i][j] @ self.U[i][j].conj().T))}, updating it")
                         u, s, vh = np.linalg.svd(self.U[i][j])
                         self.U[i][j] = u @ vh
@@ -98,32 +106,40 @@ class Gradient:
 
 
     def generateRn(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num, int(len(global_data.incar.composition_of_b))]
-        self.rn = np.zeros((2, shape[2]), dtype=complex)
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                for b in range(shape[3]):
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        B = global_data.incar.band_calc_num
+        b_sz = len(global_data.incar.composition_of_b)
+
+        self.rn = np.zeros((2, B), dtype=complex)
+        for i in range(k1_sz):
+            for j in range(k2_sz):
+                for b in range(b_sz):
                     mM = global_data.m_set.get(i, j, b)
-                    for n in range(shape[2]):
+                    for n in range(B):
                         self.rn[:, n] -= global_data.incar.wb[b] * global_data.incar.b_vectors[b, :] * np.imag(np.log(mM[n, n]))
-        self.rn = self.rn / (shape[0] * shape[1])
+        self.rn = self.rn / (k1_sz * k2_sz)
         return self.rn
 
     def update(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), global_data.incar.band_calc_num, int(len(global_data.incar.composition_of_b))]
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        B = global_data.incar.band_calc_num
+        b_sz = len(global_data.incar.composition_of_b)
+
         self.generateRn()
         self.omega = [0, 0, 0]
 
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                for b in range(shape[3]):
+        for i in range(k1_sz):
+            for j in range(k2_sz):
+                for b in range(b_sz):
                     mM = global_data.m_set.get(i, j, b)
 
-                    temp_I = shape[2]
+                    temp_I = B
                     temp_OD = 0
                     temp_D = 0
-                    for m in range(shape[2]):
-                        for n in range(shape[2]):
+                    for m in range(B):
+                        for n in range(B):
                             temp_I = temp_I - np.abs(mM[m, n]) ** 2
                             if m != n:
                                 temp_OD += np.abs(mM[m, n]) ** 2
@@ -131,7 +147,7 @@ class Gradient:
                     self.omega[0] += temp_I * global_data.incar.wb[b]
                     self.omega[1] += temp_OD * global_data.incar.wb[b]
                     self.omega[2] += temp_D * global_data.incar.wb[b]
-        self.omega = np.real(self.omega) / (shape[0] * shape[1])
+        self.omega = np.real(self.omega) / (k1_sz * k2_sz)
 
     def set_center(self, center):
         self.generateRn()

@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 import numpy as np
 import math
 
@@ -9,6 +11,9 @@ def evaluate_math_expression(expr: str) -> float:
     except Exception as e:
         raise ValueError(f"Invalid expression: '{expr}'. Error: {e}")
 
+class EnergyWindow(NamedTuple):
+    emin: float
+    emax: float
 
 class IncarData:
     def __init__(self):
@@ -191,12 +196,21 @@ class IncarParser:
                     raise ValueError(f"Invalid hopping_state range format: '{part}'")
             return ranges
         elif key in ["band_window", "band_calc"]:
-            tokens = value.split(':')
-            if len(tokens) == 2:
-                start, stop = map(int, tokens)
+            v = value.strip()
+            if ':' in v:
+                start_str, stop_str = v.split(':', 1)
+                start = int(start_str.strip())
+                stop = int(stop_str.strip())
                 return np.arange(start, stop)
-            else:
-                raise ValueError(f"Invalid band_window format: '{value}'")
+
+            if ',' in v:
+                left, right = [t.strip() for t in v.split(',', 1)]
+                emin = float(evaluate_math_expression(left))
+                emax = float(evaluate_math_expression(right))
+                if emin > emax:
+                    emin, emax = emax, emin
+                return EnergyWindow(emin, emax)
+            raise ValueError(f"Invalid band_window format: '{v}'")
         elif key == "dataset_order":
             return [x.strip() for x in value.split(',')]
         elif key == "projections":

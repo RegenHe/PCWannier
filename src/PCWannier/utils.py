@@ -292,6 +292,7 @@ class StateCollection:
         self.normalization: float = 0.0
 
         self.transform: np.ndarray = None
+        self.transform_: np.ndarray = None
         self.raw_field: list = None
 
         self.is_normalized = False
@@ -304,6 +305,7 @@ class StateCollection:
         self.extention_epsilon: np.array = None
 
         self.E: list = []
+        self.E_idx: list = []
 
     def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
         while len(self.field) <= i:
@@ -342,30 +344,17 @@ class StateCollection:
             self.normalization = np.transpose(np.array([p for p in self.normalization[:]]), (1, 2, 0))
             self.is_normalized = True
             for i in range(len(self.field)):
-                for j in range(len(self.field[0])):
-                    for n in range(len(self.field[0][0])):
+                for j in range(len(self.field[i])):
+                    for n in range(len(self.field[i][j])):
                         if self.normalization[i][j][n] == 0.0:
                             raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
                         self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
             return
         
-        self.normalization = [[[None for _ in range(len(self.field[0][0]))] for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
+        self.normalization = [[[None for _ in range(len(self.field[i][j]))] for j in range(len(self.field[i]))] for i in range(len(self.field))]
 
         Nv = self.mesh.vertices.shape[0]
-        arr0 = np.asarray(self.field[0][0])
-        if arr0.ndim == 1:
-            arr0 = arr0[None, :]
-        elif arr0.ndim == 2 and arr0.shape[1] != Nv:
-            arr0 = arr0.T
-
         eps = np.asarray(self.epsilon)
-        if eps.shape != arr0.shape:
-            if eps.ndim == 2 and eps.T.shape == arr0.shape:
-                eps = eps.T
-            elif eps.ndim == 1 and eps.shape[0] == Nv:
-                eps = np.broadcast_to(eps[None, :], arr0.shape)
-            else:
-                raise ValueError(f"epsilon shape {eps.shape} != field shape {arr0.shape}")
         
         for i in range(len(self.field)):
             for j in range(len(self.field[i])):
@@ -379,12 +368,14 @@ class StateCollection:
                 # B = FieldData("B", self.mesh, arr.astype(np.complex128, copy=False))
 
                 # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
+                if vals.ndim == 0:
+                    vals = np.asarray([vals])
                 self.normalization[i][j][:vals.shape[0]] = vals
         
         self.is_normalized = True
         for i in range(len(self.field)):
-            for j in range(len(self.field[0])):
-                for n in range(len(self.field[0][0])):
+            for j in range(len(self.field[i])):
+                for n in range(len(self.field[i][j])):
                     if self.normalization[i][j][n] == 0.0:
                         raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
                     self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
@@ -399,9 +390,6 @@ class StateCollection:
             err_msg = "Field data is not initialized"
             Logger.error(err_msg)
             raise ValueError(err_msg)
-        
-        if not self.is_normalized:
-            self.normalize()
 
         Nkx, Nky = len(self.field), len(self.field[0])
 
@@ -409,20 +397,27 @@ class StateCollection:
             Logger.info("using cache data - O")
             self.transform = IO.load_cell_matrix(global_data.incar.O_file, shape=(Nkx, Nky))
             self.is_orthogonalized = True
-            return self.transform
+            self.is_normalized = True
+            self.transform_ = [[None for _ in range(Nky)] for _ in range(Nkx)]
+            for i in range(Nkx):
+                for j in range(Nky):
+                    T_diag = np.diag(np.diag(self.transform[i][j]))
+                    for n in range(len(self.field[i][j])):
+                        if T_diag[n, n] == 0.0:
+                            raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
+                        self.field[i][j][n] *= T_diag[n, n]
+                    self.transform_[i][j] = np.linalg.inv(T_diag) @ self.transform[i][j]
+            return
         
         Nv = self.mesh.vertices.shape[0]
-        arr0 = np.asarray(self.field[0][0])
-        if arr0.ndim == 1:
-            arr0 = arr0[None, :]
-        elif arr0.ndim == 2 and arr0.shape[1] != Nv:
-            arr0 = arr0.T
 
         eps = np.asarray(self.epsilon)
 
         self.transform = [[None for _ in range(Nky)] for _ in range(Nkx)]
+        self.transform_ = [[None for _ in range(Nky)] for _ in range(Nkx)]
         for i in range(Nkx):
             for j in range(Nky):
+
                 Nwin = len(self.field[i][j])
                 Nv = self.mesh.vertices.shape[0]
                 W = np.asarray(self.field[i][j])
@@ -445,6 +440,9 @@ class StateCollection:
                     # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
                     # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
                     # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
+                    if vals.ndim == 0:
+                        vals = np.asarray([vals])
+
                     S[a, a:] = vals[a:]
                     S[a:, a] = vals[a:].conjugate()
                     # S[a, a] = np.real(S[a, a])
@@ -460,8 +458,17 @@ class StateCollection:
                 # block orth then total orth maybe better
                 T_full = T_corr
 
+                T_diag = np.diag(np.diag(T_full))
+                for n in range(len(self.field[i][j])):
+                    if T_diag[n, n] == 0.0:
+                        raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
+                    self.field[i][j][n] *= T_diag[n, n]
+
                 self.transform[i][j] = T_full
+                self.transform_[i][j] = np.linalg.inv(T_diag) @ T_full
         self.is_orthogonalized = True
+        self.is_normalized = True
+
         if not global_data.incar.O_file.lower == "false":
             IO.save_to_txt(global_data.incar.O_file, self.transform, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
 
@@ -483,11 +490,6 @@ class StateCollection:
             raise ValueError(err_msg)
         
         Nv = self.mesh.vertices.shape[0]
-        arr0 = np.asarray(self.field[0][0])
-        if arr0.ndim == 1:
-            arr0 = arr0[None, :]
-        elif arr0.ndim == 2 and arr0.shape[1] != Nv:
-            arr0 = arr0.T
 
         eps = np.asarray(self.epsilon)
         Nkx, Nky = len(self.field), len(self.field[0])
@@ -514,7 +516,8 @@ class StateCollection:
                     F = (right[:, None] * W.T).astype(np.complex128, copy=False)
                     fd = FieldData("S", self.mesh, F)
                     vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
-
+                    if vals.ndim == 0:
+                        vals = np.asarray([vals])
                     # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
                     # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
                     # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
@@ -523,7 +526,7 @@ class StateCollection:
                     # S[a, a] = np.real(S[a, a])
                 
                 if self.is_orthogonalized:
-                    S = self.transform[i][j].conj().T @ S @ self.transform[i][j]
+                    S = self.transform_[i][j].conj().T @ S @ self.transform_[i][j]
 
                 herm_res = float(np.linalg.norm(S - S.conj().T, ord='fro'))
                 diag = np.real(np.diag(S))
@@ -567,16 +570,16 @@ class StateCollection:
         self.is_bloch = True
 
         for i in range(len(self.field)):
-            for j in range(len(self.field[0])):
-                for n in range(len(self.field[0][0])):
+            for j in range(len(self.field[i])):
+                for n in range(len(self.field[i][j])):
                     phase = self.get_phase(i, j)
                     self.field[i][j][n] = np.conj(phase) * self.field[i][j][n]
     
     def get_transform(self, zero=False) -> np.ndarray:
-        if self.is_orthogonalized and self.transform is not None and not zero:
-            return self.transform
+        if self.is_orthogonalized and self.transform_ is not None and not zero:
+            return self.transform_
         else:
-            return [[np.eye(len(self.field[0][0])) for _ in range(len(self.field[0]))] for _ in range(len(self.field))]
+            return [[np.identity(self.transform_[i][j].shape[0], dtype=self.transform_[i][j].dtype) for j in range(len(self.field[i]))] for i in range(len(self.field))]
     
     def get_phase(self, i: int, j: int):
         if global_data.incar.dataset_type.lower() == 'comsol':
@@ -623,37 +626,6 @@ class StateCollection:
         if self.extention_epsilon is None:
             self.extention_epsilon = np.array([self.epsilon[k] for k in self.space_to_original_mapping])
         return self.extention_epsilon
-    
-    def set_transform(self, transform: np.ndarray) -> None:
-        if self.field is None:
-            err_msg = "Field data is not initialized"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
-        
-        if transform.shape != (len(self.field), len(self.field[0]), len(self.field[0][0]), len(self.field[0][0])):
-            err_msg = f"Transform shape {transform.shape} does not match field shape {len(self.field)}, {len(self.field[0])}, {len(self.field[0][0])}"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
-        
-        if self.raw_field is None:
-            self.raw_field = copy.deepcopy(self.field)
-
-            for i in range(len(self.field)):
-                for j in range(len(self.field[0])):
-                    old_modes = self.raw_field[i][j]
-                    T = transform[i, j]
-                    new_modes = []
-                    for q in range(len(self.field[0][0])):
-                        psi_q = None
-                        for p in range(len(self.field[0][0])):
-                            coeff = T[p, q]
-                            if abs(coeff) < 1e-14:
-                                continue
-                            term = old_modes[p] * coeff
-                            psi_q = term if psi_q is None else psi_q + term
-                        new_modes.append(psi_q)
-                    self.field[i][j] = new_modes
-        self.transform = transform
 
         
     def get_zero_field(self):

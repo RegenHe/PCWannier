@@ -1,13 +1,13 @@
 import numpy as np
 from scipy.spatial import cKDTree
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, NamedTuple
 import warnings
 
 from .Log import Logger
 from .GlobalData import global_data
 from .Utils import Mesh, RawData, StateCollection
-
+from .IncarParser import EnergyWindow
 
 
 def load_comsol_mesh(filename: str) -> Mesh:
@@ -209,26 +209,74 @@ def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
     if global_data.incar is None:
         raise RuntimeError("Incar data is not initialized.")
     
-    global_data.push_state_collection(StateCollection("psi", mesh))
-    
-    sizes = {"k1": len(global_data.incar.k_points[0]),"k2": len(global_data.incar.k_points[1]),"E": len(global_data.incar.band_window)}
-    shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
+    bw = global_data.incar.band_window
 
-    fields = [[[np.zeros(data.value_matrix.shape[0], dtype=complex) for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
-    t_fields = np.zeros((data.value_matrix.shape[0],) + shape, dtype=complex)
+    if isinstance(bw, EnergyWindow):
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        Nv    = data.value_matrix.shape[0]
 
-    for p in range(data.value_matrix.shape[0]):
-        t_fields[p] = data.value_matrix[p].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
+        d0, d1 = global_data.incar.dataset_order[0], global_data.incar.dataset_order[1]
+        n0 = len(global_data.incar.k_points[0]) if d0 == "k1" else len(global_data.incar.k_points[1])
+        n1 = len(global_data.incar.k_points[0]) if d1 == "k1" else len(global_data.incar.k_points[1])
+        base = data.value_matrix.reshape((Nv, n0, n1, -1), order='C')
 
-    desired_order = ["k1", "k2", "E"]
-    indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
-    t_fields = np.transpose(t_fields, axes=(0, indices[0] + 1, indices[1] + 1, indices[2] + 1))
+        pos = {dim: i for i, dim in enumerate(global_data.incar.dataset_order)}
+        ax_k1 = pos["k1"] + 1
+        ax_k2 = pos["k2"] + 1
 
-    for i in range(shape[0]):
-        for j in range(shape[1]):
-            for k in range(shape[2]):
-                fields[i][j][k] = t_fields[:, i, j, k]
-    global_data.state_collection.field = fields
-    
-    Logger.info("distribute data finished")
+        E_idx = getattr(global_data.state_collection, "E_idx", None)
+        Eall = getattr(data, "energy_matrix", None)
+        if Eall is None:
+            Eall = getattr(global_data, "energy_matrix", None)
+
+        fields = [[[] for _ in range(k2_sz)] for _ in range(k1_sz)]
+        for i in range(k1_sz):
+            for j in range(k2_sz):
+                if E_idx is not None:
+                    sel_list = E_idx[i][j]
+                else:
+                    sel_list = np.where((Eall[i, j] >= bw.emin) & (Eall[i, j] <= bw.emax))[0].tolist()
+                if not sel_list:
+                    continue
+                if ax_k1 == 1 and ax_k2 == 2:
+                    for b in sel_list:
+                        fields[i][j].append(base[:, i, j, b])
+                else:
+                    for b in sel_list:
+                        fields[i][j].append(base[:, j, i, b])
+
+        global_data.state_collection.field = fields
+        Logger.info("distribute data finished (energy-window, ragged E)")
+    else:
+        sizes = {
+            "k1": len(global_data.incar.k_points[0]),
+            "k2": len(global_data.incar.k_points[1]),
+            "E": len(global_data.incar.band_window)
+        }
+        shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
+
+        fields = [
+            [
+                [np.zeros(data.value_matrix.shape[0], dtype=complex) for _ in range(shape[2])]
+                for _ in range(shape[1])
+            ]
+            for _ in range(shape[0])
+        ]
+        t_fields = np.zeros((data.value_matrix.shape[0],) + shape, dtype=complex)
+
+        for p in range(data.value_matrix.shape[0]):
+            t_fields[p] = data.value_matrix[p].reshape((shape[0], shape[1], -1), order='C')[:, :, global_data.incar.band_window]
+
+        desired_order = ["k1", "k2", "E"]
+        indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
+        t_fields = np.transpose(t_fields, axes=(0, indices[0] + 1, indices[1] + 1, indices[2] + 1))
+
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                for k in range(shape[2]):
+                    fields[i][j][k] = t_fields[:, i, j, k]
+
+        global_data.state_collection.field = fields
+        Logger.info("distribute data finished")
     return global_data.state_collection

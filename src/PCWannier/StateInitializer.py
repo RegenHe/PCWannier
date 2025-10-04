@@ -19,13 +19,18 @@ from .Utils import FieldData, StateCollection, WannierTools
 
 class StateInitializer:
     def __init__(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
-        self.matC = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        self.matZ = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        self.last_matZ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
-        self.lambda_ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
 
-        self.matA = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
+        E_idx = global_data.state_collection.E_idx
+        B = global_data.incar.band_calc_num
+
+        self.matC = [[np.zeros((len(E_idx[i][j]), B), dtype=complex) for j in range(k2_sz)] for i in range(k1_sz)]
+        self.matZ = [[np.zeros((len(E_idx[i][j]), B), dtype=complex) for j in range(k2_sz)] for i in range(k1_sz)]
+        self.last_matZ = [[None for _ in range(k2_sz)] for _ in range(k1_sz)]
+        self.lambda_ = [[None for _ in range(k2_sz)]for _ in range(k1_sz)]
+
+        self.matA = [[np.zeros((len(E_idx[i][j]), B), dtype=complex) for j in range(k2_sz)]for i in range(k1_sz)]
         # matS = [[None for _ in range(shape[1])]for _ in range(shape[0])]
         self.matV = None
         self.alpha = 0.5
@@ -33,21 +38,26 @@ class StateInitializer:
     @timer("State Initialize iter - ")
     def iter(self, err_diff: float, max_iter: int):
         Logger.info('Starting state initialization iteration')
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        E_idx = global_data.state_collection.E_idx
+        B = global_data.incar.band_calc_num
+
         if 'V' in global_data.incar.use_cached_data and 'A' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - A")
-            self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+            self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(k1_sz, k2_sz))
             Logger.info(f"using cache data - V")
-            self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+            self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
         elif 'V' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - V")
-            self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+            self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
         elif 'A' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - A")
-            self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
-            for i in range(len(global_data.incar.k_points[0])):
-                for j in range(len(global_data.incar.k_points[1])):
+            self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(k1_sz, k2_sz))
+            for i in range(k1_sz):
+                for j in range(k2_sz):
                     mU, mS, mVh = np.linalg.svd(self.matA[i][j])
-                    self.matC[i][j] = mU @ np.eye(len(global_data.incar.band_window), global_data.incar.band_calc_num) @ mVh
+                    self.matC[i][j] = mU @ np.eye(len(E_idx[i][j]), B) @ mVh
             self.matV = self.matC
         else:
             self.projection()
@@ -55,7 +65,10 @@ class StateInitializer:
 
         if global_data.incar.proj_iter is None:
             global_data.incar.proj_iter = True
-        if len(global_data.incar.band_window) == global_data.incar.band_calc_num or (not global_data.incar.proj_iter):
+        max_len = max(len(sel) for row in E_idx for sel in row)
+        min_len = min(len(sel) for row in E_idx for sel in row)
+
+        if min_len == global_data.incar.band_calc_num == max_len or (not global_data.incar.proj_iter):
             global_data.m_set.initial(self.matV)
             return
         
@@ -78,11 +91,11 @@ class StateInitializer:
         
         if self.matA is None:
             self.projection()
-        for i in range(len(global_data.incar.k_points[0])):
-                for j in range(len(global_data.incar.k_points[1])):
+        for i in range(k1_sz):
+                for j in range(k2_sz):
                     t_ = np.conj(self.matV[i][j]).T @ self.matA[i][j]
                     mU, mS, mVh = np.linalg.svd(t_)
-                    self.matV[i][j] = self.matV[i][j] @ (mU @ np.eye(global_data.incar.band_calc_num, global_data.incar.band_calc_num) @ mVh)
+                    self.matV[i][j] = self.matV[i][j] @ (mU @ np.eye(B, B) @ mVh)
 
         global_data.m_set.initial(self.matV)
         Logger.info('State initialization iteration compeleted')
@@ -91,17 +104,14 @@ class StateInitializer:
     @timer("State Projection iter - ")
     def projection(self):
         Logger.info('Starting to initialize projection')
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
-        self.matC = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        self.matZ = [[np.zeros((shape[2], shape[2]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        self.last_matZ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
-        self.lambda_ = [[None for _ in range(shape[1])]for _ in range(shape[0])]
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
 
-        self.matA = [[np.zeros((shape[2], shape[3]), dtype=complex) for _ in range(shape[1])]for _ in range(shape[0])]
-        # matS = [[None for _ in range(shape[1])]for _ in range(shape[0])]
-
-        if shape[3] > shape[2]:
-            err_msg = f"The number of calculated bands cannot exceed the band window, {shape[3]} > {shape[2]}"
+        B = global_data.incar.band_calc_num
+        E_idx = global_data.state_collection.E_idx
+        min_len = min(len(sel) for row in E_idx for sel in row)
+        if B > min_len:
+            err_msg = f"The number of calculated bands cannot exceed the band window, {B} > {min_len}"
             Logger.error(err_msg)
             raise
 
@@ -147,15 +157,15 @@ class StateInitializer:
 
         g = [G[:, k] for k in range(G.shape[1])]
 
-        for i in range(shape[0]):
-            for j in range(shape[1]):
+        for i in range(k1_sz):
+            for j in range(k2_sz):
                 Nv = global_data.state_collection.extention_mesh.vertices.shape[0]
 
                 G = np.column_stack(g).astype(np.complex128, copy=False)
                 if G.shape[0] != Nv:
                     G = G.T
 
-                for m in range(shape[2]):
+                for m in range(len(E_idx[i][j])):
                     field = global_data.state_collection.get_extention_field(i, j, m)
                     
                     base = global_data.state_collection.extention_epsilon * np.conj(field)
@@ -169,18 +179,22 @@ class StateInitializer:
                     # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
                     self.matA[i][j][m, :vals.shape[0]] = vals * np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1])
                 
-        for i in range(shape[0]):
-            for j in range(shape[1]):
+        for i in range(k1_sz):
+            for j in range(k2_sz):
                 mU, mS, mVh = np.linalg.svd(self.matA[i][j])
-                self.matC[i][j] = mU @ np.eye(shape[2], shape[3]) @ mVh
+                self.matC[i][j] = mU @ np.eye(len(E_idx[i][j]), B) @ mVh
         Logger.info('Projection compeleted')
 
     def update_Z(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), int(len(global_data.incar.composition_of_b)), len(global_data.incar.band_window), global_data.incar.band_calc_num]
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                self.matZ[i][j] = np.zeros((shape[3], shape[3]), dtype=complex)
-                for b in range(shape[2]):
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+
+        E_idx = global_data.state_collection.E_idx
+        b_sz = len(global_data.incar.composition_of_b)
+        for i in range(k1_sz):
+            for j in range(k2_sz):
+                self.matZ[i][j] = np.zeros((len(E_idx[i][j]), len(E_idx[i][j])), dtype=complex)
+                for b in range(b_sz):
                     mM = global_data.m_set.get_M0(i, j, b)
                     n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
                     self.matZ[i][j] += global_data.incar.wb[b] * mM @ (self.matV[n_k1][n_k2] @ np.conj(self.matV[n_k1][n_k2]).T) @ np.conj(mM).T
@@ -191,27 +205,33 @@ class StateInitializer:
                     self.last_matZ[i][j] = self.matZ[i][j]
     
     def sort_Z(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
-        for i in range(shape[0]):
-            for j in range(shape[1]):
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+
+        B = global_data.incar.band_calc_num
+        for i in range(k1_sz):
+            for j in range(k2_sz):
                 D, V = np.linalg.eig(self.matZ[i][j])
                 sort_D = np.sort(D)[::-1]
                 idx = np.argsort(D)[::-1]
 
-                self.lambda_[i][j] = sort_D[:shape[3]]
+                self.lambda_[i][j] = sort_D[:B]
                 sort_V = V[:, idx]
-                self.matV[i][j] = sort_V[:, :shape[3]]
+                self.matV[i][j] = sort_V[:, :B]
     
     def get_omega_I(self):
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
-        res = 0
-        s_N_wb = shape[3] * np.sum(global_data.incar.wb)
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
 
-        for i in range(shape[0]):
-            for j in range(shape[1]):
+        B = global_data.incar.band_calc_num
+        res = 0
+        s_N_wb = B * np.sum(global_data.incar.wb)
+
+        for i in range(k1_sz):
+            for j in range(k2_sz):
                 res += s_N_wb - np.sum(self.lambda_[i][j])
         
-        return res / (shape[0] * shape[1])
+        return res / (k1_sz * k2_sz)
     
     def save_as(self, filenameV: str, filenameA: str):
         if not filenameV.lower() == "false":

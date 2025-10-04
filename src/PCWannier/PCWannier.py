@@ -11,9 +11,9 @@ from .Log import Logger
 from .IO import IO
 from .Interpolator import Interpolator
 from .Utils import global_data
-from .Utils import WannierTools, FieldData
+from .Utils import WannierTools, FieldData, StateCollection
 from .Timer import Timer, timer
-from .IncarParser import IncarParser
+from .IncarParser import IncarParser, EnergyWindow
 
 from .Symmetry import Symmetry, Orthogonalizer, RotationOverlap, SymmetryAdapter
 
@@ -91,6 +91,9 @@ class PCWannier:
         raise ValueError(f"Don't support {dtype} type dataset")
     
     def _prepare_state_collection(self):
+        global_data.push_state_collection(StateCollection("psi", self.mesh))
+        self._handle_energy_data()
+
         idxs, _ = MeshData.match_data_to_mesh(self.mesh, self.raw_data)
         self.raw_data.value_matrix = self.raw_data.value_matrix[idxs]
         
@@ -98,7 +101,6 @@ class PCWannier:
         MeshData.distribute_data(self.mesh, self.raw_data)
         
         global_data.state_collection.epsilon = self.epsilon.value_matrix[idxs].flatten()
-        global_data.state_collection.normalize()
         global_data.state_collection.turn_to_Bloch()
 
         _, need_orth = global_data.state_collection.check_orthogonality()
@@ -113,21 +115,55 @@ class PCWannier:
                 raise ValueError("Orthogonalization failed")
         Logger.info("orthogonality check passed")
 
-        self._handle_energy_data()
+        global_data.state_collection.extention(global_data.incar.extension)
 
     def _handle_energy_data(self):
-        sizes = {
-            "k1": len(global_data.incar.k_points[0]),
-            "k2": len(global_data.incar.k_points[1]),
-            "E": len(global_data.incar.band_window)
-        }
-        shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
-        t_ = self.E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
-        indices = [global_data.incar.dataset_order.index(dim) for dim in ["k1", "k2", "E"]]
-        transposed = np.transpose(t_, axes=indices)
-        global_data.state_collection.E = np.real(transposed) if global_data.incar.E_is_real else transposed
+        bw = global_data.incar.band_window
+        if isinstance(bw, EnergyWindow):
+            d0, d1 = global_data.incar.dataset_order[0], global_data.incar.dataset_order[1]
+            if set((d0, d1)) != {"k1", "k2"}:
+                Logger.error("Energy-window mode expects dataset_order first two dims to be k1 and k2.")
+                raise RuntimeError("Energy-window mode expects dataset_order first two dims to be k1 and k2.")
+            n0 = len(global_data.incar.k_points[0]) if d0 == "k1" else len(global_data.incar.k_points[1])
+            n1 = len(global_data.incar.k_points[0]) if d1 == "k1" else len(global_data.incar.k_points[1])
 
-        global_data.state_collection.extention(global_data.incar.extension)
+            t_all = self.E_raw_data.value_matrix[0].reshape((n0, n1, -1), order='C')
+
+            indices = [global_data.incar.dataset_order.index(dim) for dim in ["k1", "k2", "E"]]
+            transposed_all = np.transpose(t_all, axes=indices)
+
+            energy_matrix = np.ascontiguousarray(np.real(transposed_all) if global_data.incar.E_is_real else transposed_all)
+            setattr(self.E_raw_data, "energy_matrix", energy_matrix)
+            global_data.energy_matrix = energy_matrix
+
+            k1_sz, k2_sz, _ = energy_matrix.shape
+            fields = [[[] for _ in range(k2_sz)] for _ in range(k1_sz)]
+            idx_fields = [[[] for _ in range(k2_sz)] for _ in range(k1_sz)]
+
+            for i in range(k1_sz):
+                for j in range(k2_sz):
+                    eline = energy_matrix[i, j, :]
+                    sel = np.where((eline >= bw.emin) & (eline <= bw.emax))[0]
+                    fields[i][j] = eline[sel].tolist()
+                    idx_fields[i][j] = sel.tolist()
+
+            global_data.state_collection.E = fields
+            global_data.state_collection.E_idx = idx_fields
+        else:
+            sizes = {
+                "k1": len(global_data.incar.k_points[0]),
+                "k2": len(global_data.incar.k_points[1]),
+                "E": len(global_data.incar.band_window)
+            }
+            shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
+            t_ = self.E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
+            indices = [global_data.incar.dataset_order.index(dim) for dim in ["k1", "k2", "E"]]
+            transposed = np.transpose(t_, axes=indices)
+            global_data.state_collection.E = np.real(transposed) if global_data.incar.E_is_real else transposed
+
+            bw_idx = np.asarray(global_data.incar.band_window, dtype=int).tolist()
+            global_data.state_collection.E_idx = [[bw_idx.copy() for _ in range(len(global_data.incar.k_points[1]))] for _ in range(len(global_data.incar.k_points[0]))]
+
 
     def _symmetry(self):
         Logger.info("Try to orthogonalize eigenvalues")
@@ -254,28 +290,29 @@ class PCWannier:
         r_[1] = (r[0] * global_data.incar.real_lattice_vectors[0][1] + r[1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
         Logger.info(f"Generating Wannier Functions - r = ({r[0]}, {r[1]})")
 
-        Nkx = len(global_data.incar.k_points[0])
-        Nky = len(global_data.incar.k_points[1])
-        Nwin = len(global_data.incar.band_window)
-        Ncalc = global_data.incar.band_calc_num
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        B = global_data.incar.band_calc_num
+        E_idx = global_data.state_collection.E_idx
+
         Nv = global_data.state_collection.extention_mesh.vertices.shape[0]
 
-        Wsum = np.zeros((Nv, Ncalc), dtype=np.complex128)
+        Wsum = np.zeros((Nv, B), dtype=np.complex128)
         if global_data.incar.disable_orth:
             Logger.info("Disable orthogonalization as requested")
             T = global_data.state_collection.get_transform(True)
         else:
             T = global_data.state_collection.get_transform()
 
-        for i in range(Nkx):
-            for j in range(Nky):
+        for i in range(k1_sz):
+            for j in range(k2_sz):
                 phase_vec = global_data.state_collection.get_extention_phase(i, j)
                 kx, ky = WannierTools.get_kx_ky([i, j])
                 sign = -1 if global_data.incar.dataset_type.lower() == 'comsol' else 1
                 phase_scalar = np.exp(1j * (-(sign) * (kx * r_[0] + ky * r_[1])))
                 P = phase_vec * phase_scalar
 
-                fields_ij = [global_data.state_collection.get_extention_field(i, j, m) for m in range(Nwin)]
+                fields_ij = [global_data.state_collection.get_extention_field(i, j, m) for m in range(len(E_idx[i][j]))]
                 E = np.column_stack(fields_ij).astype(np.complex128, copy=False)
                 C = (T[i][j] @ global_data.state_initializer.matV[i][j] @ global_data.gradient.U[i][j])
 
@@ -283,15 +320,15 @@ class PCWannier:
 
                 Wsum += U_ij * P[:, None]
 
-        Wsum /= np.sqrt(Nkx * Nky)
+        Wsum /= np.sqrt(k1_sz * k2_sz)
 
-        self.wanniers = [Wsum[:, n] for n in range(Ncalc)]
+        self.wanniers = [Wsum[:, n] for n in range(B)]
 
         Fnorm = (np.abs(Wsum) ** 2) * global_data.state_collection.extention_epsilon[:, None]
         fd = FieldData('wannier', global_data.state_collection.extention_mesh, Fnorm.astype(np.complex128, copy=False))
         norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
 
-        for n in range(Ncalc):
+        for n in range(B):
             norm = norms[n]
             Logger.info(f"Check wannier function norm = {norm}")
             if not np.isclose(np.abs(norm), 1.0, atol=1e-3):

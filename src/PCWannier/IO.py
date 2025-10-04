@@ -6,65 +6,132 @@ from .Log import Logger
 
 class IO:
     @staticmethod
-    def load_cell_matrix(filename: str, shape) -> np.ndarray:
-        data = np.empty(shape, dtype=object)
-
+    def load_cell_matrix(filename: str, shape=None) -> np.ndarray:
         with open(filename, "r") as f:
             content = f.read()
-
         content = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
 
         pattern = re.compile(
-            r"CELL\s*[\(\[]\s*([0-9,\s]*)\s*[\)\]]\s*:\s*\n((?:.*?\n)*?)(?=CELL\s*[\(\[]|\Z)", re.MULTILINE)
+            r"CELL\s*[\(\[]\s*([0-9,\s]*)\s*[\)\]]\s*"
+            r"(?:shape\s*=\s*\(([^)]*)\)\s*)?"
+            r":\s*\n"
+            r"((?:.*?(?:\n|$))*?)(?=CELL\s*[\(\[]|\Z)",
+            re.IGNORECASE
+        )
 
-        for match in pattern.finditer(content):
-            index_str = match.group(1).strip()
-            lines = match.group(2).strip().splitlines()
-
-            if not index_str:
+        cells = []
+        ndims = 0
+        for m in pattern.finditer(content):
+            idx_str = (m.group(1) or "").strip()
+            if not idx_str:
                 continue
-
             try:
-                indices = [int(i.strip()) for i in index_str.split(',') if i.strip() != '']
+                idx_tuple = tuple(int(x.strip()) for x in idx_str.split(",") if x.strip() != "")
             except ValueError:
-                raise ValueError(f"Invalid index format in CELL: {index_str}")
-            
-            if len(indices) > len(shape):
-                raise ValueError(f"Index {indices} exceeds shape dimensions {shape}")
-            
-            while len(indices) < len(shape):
-                indices.append(0)
+                raise ValueError(f"Invalid index format in CELL: {idx_str}")
 
-            for dim, val in zip(shape, indices):
-                if val < 0 or val >= dim:
-                    raise IndexError(f"Index {indices} out of bounds for shape {shape}")
+            ndims = max(ndims, len(idx_tuple))
 
-            matrix = []
-            for line in lines:
-                if not line.strip():
-                    continue
-                entries = [complex(eval(e.strip().replace(' ', '')))
-                        for e in line.split(',') if e.strip()]
-                matrix.append(entries)
+            block_text = (m.group(3) or "").strip("\n")
+            if not block_text:
+                mat = np.empty((0, 0), dtype=complex)
+            else:
+                rows = []
+                for line in block_text.splitlines():
+                    s = line.strip()
+                    if not s:
+                        continue
+                    tokens = [tok.strip().replace(' ', '') for tok in s.split(',') if tok.strip()]
+                    try:
+                        row = [complex(tok) for tok in tokens]
+                    except Exception:
+                        row = [complex(eval(tok)) for tok in tokens]
+                    rows.append(row)
+                mat = np.array(rows, dtype=complex)
 
-            data[tuple(indices)] = np.array(matrix, dtype=complex)
+            cells.append((idx_tuple, mat))
+
+        if not cells:
+            raise ValueError("No CELL blocks found in file.")
+
+        if shape is None:
+            max_per_dim = [0] * ndims
+            for idx, _ in cells:
+                for d, val in enumerate(idx):
+                    if val > max_per_dim[d]:
+                        max_per_dim[d] = val
+            shape = tuple(v + 1 for v in max_per_dim)
+        else:
+            if len(shape) < ndims:
+                raise ValueError(f"Provided shape {shape} has fewer dims than index tuples ({ndims}).")
+
+        data = np.empty(shape, dtype=object)
+        data.flat[:] = None
+
+        for idx, mat in cells:
+            if len(idx) < len(shape):
+                idx = idx + (0,) * (len(shape) - len(idx))
+            for d, val in enumerate(idx):
+                if val < 0 or val >= shape[d]:
+                    raise IndexError(f"Index {idx} out of bounds for shape {shape}")
+            data[idx] = mat
 
         return data
 
     @staticmethod
-    def save_to_txt(filename: str, data: np.ndarray, shape: tuple) -> None:
-        data = np.array(data)
+    def save_to_txt(filename: str, data, shape: tuple | None = None) -> None:
+
+        def _is_matrix_like(x) -> bool:
+            try:
+                arr = np.asarray(x)
+            except Exception:
+                return False
+            return (arr.ndim == 2) and (arr.dtype != object)
+
+        def _iter_cells(obj, prefix=()):
+            if _is_matrix_like(obj):
+                yield prefix, np.asarray(obj)
+                return
+            if isinstance(obj, (list, tuple, np.ndarray)):
+                for i, sub in enumerate(obj):
+                    yield from _iter_cells(sub, prefix + (i,))
+                return
+            raise TypeError(f"Unsupported data type at {prefix}: {type(obj)}")
+
+        def _grid_overview(obj):
+            dims = []
+            cur = obj
+            try:
+                while isinstance(cur, (list, tuple, np.ndarray)) and not _is_matrix_like(cur):
+                    dims.append(len(cur))
+                    cur = cur[0] if len(cur) > 0 else []
+            except Exception:
+                pass
+            return tuple(dims)
+
         try:
             with open(filename, 'w') as f:
-                shape_info = f"Shape of the data array: {shape}"
-                f.write(f"# {shape_info}\n")
+                inferred = _grid_overview(data)
+                if shape is not None:
+                    f.write(f"# Declared grid shape (top-level): {shape}\n")
+                if inferred:
+                    f.write(f"# Inferred grid dims (top-level): {inferred}\n")
+                f.write("# Each CELL may have its own matrix shape (ragged supported).\n")
 
-                data = np.array(data)
-                for idx in np.ndindex(shape):
-                    matrix = data[idx]
-                    f.write(f"CELL{idx}:\n")
+                for idx, matrix in _iter_cells(data):
+                    is_complex = np.iscomplexobj(matrix)
+                    f.write(f"CELL{idx} shape={tuple(matrix.shape)}:\n")
+                    if matrix.size == 0:
+                        f.write("\n")
+                        continue
                     for row in matrix:
-                        row_str = ', '.join([f"{entry.real:.8f}" + (' + ' if entry.imag >= 0 else ' - ') + f"{abs(entry.imag):.8f}j" if np.iscomplexobj(data) else f"{entry:.8f}" for entry in row])
+                        if is_complex:
+                            row_str = ', '.join(
+                                f"{val.real:.8f}" + (" + " if val.imag >= 0 else " - ") + f"{abs(val.imag):.8f}j"
+                                for val in row
+                            )
+                        else:
+                            row_str = ', '.join(f"{float(val):.8f}" for val in row)
                         f.write(row_str + '\n')
 
             Logger.info(f"Data successfully saved to {filename}")

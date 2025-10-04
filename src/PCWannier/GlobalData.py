@@ -30,6 +30,8 @@ class GlobalData:
         self.m_set_list: list[MSet] = []
         self.state_initializer_list: list[StateInitializer] = []
         self.gradient_list: list[Gradient] = []
+
+        self.energy_matrix = None
         
 
     def push_incar(self, incar=None):

@@ -186,6 +186,11 @@ class StateInitializer:
                     # B = FieldData("B", global_data.state_collection.extention_mesh, (G.T).astype(np.complex128, copy=False))
                     # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
                     self.matA[i][j][m, :vals.shape[0]] = vals
+
+                if global_data.incar.proj_binarize:
+                    self.matA[i][j] = self.binarize(self.matA[i][j])
+        if global_data.incar.proj_binarize:
+            Logger.info("Projection binarization completed")
                 
         for i in range(k1_sz):
             for j in range(k2_sz):
@@ -246,6 +251,30 @@ class StateInitializer:
             IO.save_to_txt(filenameV, self.matV, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
         if not filenameA.lower() == "false":
             IO.save_to_txt(filenameA, self.matA, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+    
+    @staticmethod
+    def binarize(A):
+        S = np.abs(np.asarray(A)).astype(np.float64, copy=False)
+        n, m = S.shape
+        S = np.where(np.isnan(S), -np.inf, S)
+
+        order = np.argsort(S.ravel(), kind='mergesort')[::-1]
+        rows, cols = np.unravel_index(order, (n, m))
+
+        used_r = np.zeros(n, dtype=bool)
+        used_c = np.zeros(m, dtype=bool)
+        M = np.zeros((n, m), dtype=np.complex128)
+
+        picked = 0
+        for i, j in zip(rows, cols):
+            if not used_r[i] and not used_c[j] and np.isfinite(S[i, j]):
+                M[i, j] = 1.0
+                used_r[i] = True
+                used_c[j] = True
+                picked += 1
+                if picked == min(n, m) or used_r.all() or used_c.all():
+                    break
+        return M
 
 class StateBases:
     @staticmethod

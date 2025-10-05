@@ -48,6 +48,7 @@ class IncarData:
         self.origin: list = None
         self.band_window: list = None
         self.proj_iter: bool = None
+        self.proj_binarize: bool = None
         self.projections: list = None
         self.w_center: list = None
         self.M_in: str = None
@@ -120,6 +121,7 @@ class IncarParser:
         "wannier_file": "./wannier.txt",
         "wannier_figures": "./wanniers",
         "proj_iter": True,
+        "proj_binarize": False,
         "w_center": False,
         "origin": [0, 0],
         "M_in": False,
@@ -343,7 +345,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth"]:
+        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "proj_binarize"]:
             if value.strip().lower() == "true":
                 return True
             else:

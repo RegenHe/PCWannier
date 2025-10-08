@@ -313,6 +313,7 @@ class StateCollection:
 
         self.E: list = []
         self.E_idx: list = []
+        self.inner_E_idx: list = []
 
     def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
         while len(self.field) <= i:

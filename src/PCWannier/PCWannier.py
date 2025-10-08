@@ -119,6 +119,9 @@ class PCWannier:
 
     def _handle_energy_data(self):
         bw = global_data.incar.band_window
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+
         if isinstance(bw, EnergyWindow):
             d0, d1 = global_data.incar.dataset_order[0], global_data.incar.dataset_order[1]
             if set((d0, d1)) != {"k1", "k2"}:
@@ -136,7 +139,6 @@ class PCWannier:
             setattr(self.E_raw_data, "energy_matrix", energy_matrix)
             global_data.energy_matrix = energy_matrix
 
-            k1_sz, k2_sz, _ = energy_matrix.shape
             fields = [[[] for _ in range(k2_sz)] for _ in range(k1_sz)]
             idx_fields = [[[] for _ in range(k2_sz)] for _ in range(k1_sz)]
 
@@ -149,6 +151,18 @@ class PCWannier:
 
             global_data.state_collection.E = fields
             global_data.state_collection.E_idx = idx_fields
+            if global_data.incar.inner_window is not False:
+                ibw = global_data.incar.inner_window
+                if isinstance(ibw, EnergyWindow):
+                    inner_idx_fields = [[[] for _ in range(k2_sz)] for _ in range(k1_sz)]
+                    for i in range(k1_sz):
+                        for j in range(k2_sz):
+                            isel = np.where((eline >= ibw.emin) & (eline <= ibw.emax))[0]
+                            inner_idx_fields[i][j] = isel.tolist()
+                    global_data.state_collection.inner_E_idx = inner_idx_fields
+                else:
+                    ibw_idx = np.asarray(ibw, dtype=int).tolist()
+                    global_data.state_collection.inner_E_idx = [[ibw_idx.copy() for _ in range(len(global_data.incar.k_points[1]))] for _ in range(len(global_data.incar.k_points[0]))]
         else:
             sizes = {
                 "k1": len(global_data.incar.k_points[0]),

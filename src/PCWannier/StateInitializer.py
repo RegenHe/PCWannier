@@ -29,11 +29,15 @@ class StateInitializer:
         self.matZ = [[np.zeros((len(E_idx[i][j]), B), dtype=complex) for j in range(k2_sz)] for i in range(k1_sz)]
         self.last_matZ = [[None for _ in range(k2_sz)] for _ in range(k1_sz)]
         self.lambda_ = [[None for _ in range(k2_sz)]for _ in range(k1_sz)]
+        self.diagII_sum = [[0.0 for _ in range(k2_sz)]for _ in range(k1_sz)]
 
         self.matA = [[np.zeros((len(E_idx[i][j]), B), dtype=complex) for j in range(k2_sz)]for i in range(k1_sz)]
         # matS = [[None for _ in range(shape[1])]for _ in range(shape[0])]
-        self.matV = None
+        self.matV = [[np.zeros((len(E_idx[i][j]), B), dtype=complex) for j in range(k2_sz)] for i in range(k1_sz)]
         self.alpha = 0.5
+
+        self.I_idx = [[None for _ in range(k2_sz)]for _ in range(k1_sz)]
+        self.O_idx = [[None for _ in range(k2_sz)]for _ in range(k1_sz)]
 
     @timer("State Initialize iter - ")
     def iter(self, err_diff: float, max_iter: int):
@@ -48,9 +52,26 @@ class StateInitializer:
             self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(k1_sz, k2_sz))
             Logger.info(f"using cache data - V")
             self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
+
+            E_idx = global_data.state_collection.E_idx
+            inner_idx = global_data.state_collection.inner_E_idx
+            for i in range(k1_sz):
+                for j in range(k2_sz):
+                    N_k = len(E_idx[i][j])
+                    self.I_idx[i][j] = self.map_inner_to_local(E_idx[i][j], inner_idx[i][j])
+                    self.O_idx[i][j] = np.setdiff1d(np.arange(N_k), self.I_idx[i][j], assume_unique=True)
+
         elif 'V' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - V")
             self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
+            E_idx = global_data.state_collection.E_idx
+            inner_idx = global_data.state_collection.inner_E_idx
+            for i in range(k1_sz):
+                for j in range(k2_sz):
+                    N_k = len(E_idx[i][j])
+                    self.I_idx[i][j] = self.map_inner_to_local(E_idx[i][j], inner_idx[i][j])
+                    self.O_idx[i][j] = np.setdiff1d(np.arange(N_k), self.I_idx[i][j], assume_unique=True)
+
         elif 'A' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - A")
             self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(k1_sz, k2_sz))
@@ -92,10 +113,12 @@ class StateInitializer:
         if self.matA is None:
             self.projection()
         for i in range(k1_sz):
-                for j in range(k2_sz):
-                    t_ = np.conj(self.matV[i][j]).T @ self.matA[i][j]
-                    mU, mS, mVh = np.linalg.svd(t_)
-                    self.matV[i][j] = self.matV[i][j] @ (mU @ np.eye(B, B) @ mVh)
+            for j in range(k2_sz):
+                t_ = np.conj(self.matV[i][j]).T @ self.matA[i][j]
+                mU, mS, mVh = np.linalg.svd(t_)
+                self.matV[i][j] = self.matV[i][j] @ (mU @ np.eye(B, B) @ mVh)
+        if global_data.incar.v_proj:
+            self.V_projection()
 
         global_data.m_set.initial(self.matV)
         Logger.info('State initialization iteration compeleted')
@@ -191,12 +214,85 @@ class StateInitializer:
                     self.matA[i][j] = self.binarize(self.matA[i][j])
         if global_data.incar.proj_binarize:
             Logger.info("Projection binarization completed")
-                
+        
         for i in range(k1_sz):
             for j in range(k2_sz):
                 mU, mS, mVh = np.linalg.svd(self.matA[i][j])
                 self.matC[i][j] = mU @ np.eye(len(E_idx[i][j]), B) @ mVh
+        if global_data.incar.inner_window is not False:
+            Logger.info("Using inner window for projection")
+            self.inner_projection()
+        else:
+            self.I_idx = [[np.empty((0,), dtype=np.intp) for j in range(k2_sz)] for i in range(k1_sz)]
+            self.O_idx = [[np.setdiff1d(np.arange(len(E_idx[i][j])), self.I_idx[i][j], assume_unique=True) for j in range(k2_sz)] for i in range(k1_sz)]
+
         Logger.info('Projection compeleted')
+
+    def inner_projection(self):
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+
+        E_idx = global_data.state_collection.E_idx
+        N = global_data.incar.band_calc_num
+        inner_idx = global_data.state_collection.inner_E_idx
+
+        tol = 1e-10
+
+        for i in range(k1_sz):
+            for j in range(k2_sz):
+                N_k = len(E_idx[i][j])
+                self.I_idx[i][j] = self.map_inner_to_local(E_idx[i][j], inner_idx[i][j])
+                self.O_idx[i][j] = np.setdiff1d(np.arange(N_k), self.I_idx[i][j], assume_unique=True)
+                M_k = self.I_idx[i][j].size
+                p = N - M_k
+                if p == 0:
+                    Logger
+                    self.matV[i][j] = self.matC[i][j][:, :N]
+                elif p < 0:
+                    raise ValueError(f"(i={i}, j={j}) inner window M_k={M_k} > N={N}. Increase N or shrink inner window.")
+                if p > self.O_idx[i][j].size:
+                    raise ValueError(f"(i={i}, j={j}) outer window insufficient: N-M_k={p} > N_k-M_k={self.O_idx[i][j].size}.")
+                
+                # P_inner = np.zeros((N_k, N_k), dtype=np.complex128)
+                # Q_inner = np.eye(N_k, dtype=np.complex128) - P_inner
+                U, S, Vh = np.linalg.svd(self.matA[i][j], full_matrices=False)
+                r = int(np.sum(S > tol))
+                r = min(r, N)
+                if r == 0:
+                    P_G = np.zeros((N_k, N_k), dtype=np.complex128)
+                else:
+                    U_r = U[:, :r]
+                    P_G = U_r @ U_r.conj().T
+
+                # PG_II = 0.5*(P_G[np.ix_(I_idx, I_idx)] + P_G[np.ix_(I_idx, I_idx)].conj().T)
+                # wI, WI = np.linalg.eigh(PG_II)
+                # UI = np.zeros((N_k, M_k), dtype=complex)
+                # UI[I_idx, :] = WI
+                UI = np.eye(N_k, dtype=np.complex128)[:, self.I_idx[i][j]]
+
+                P_G_OO = 0.5 * (P_G[np.ix_(self.O_idx[i][j], self.O_idx[i][j])] + P_G[np.ix_(self.O_idx[i][j], self.O_idx[i][j])].conj().T)
+                wO, WO = np.linalg.eigh(P_G_OO)
+                order = np.argsort(wO)[::-1]
+                wO = wO[order]
+                WO = WO[:, order]
+                Vp = WO[:, :p]
+                U_opt = np.zeros((N_k, p), dtype=np.complex128)
+                U_opt[self.O_idx[i][j], :] = Vp
+                
+                U_init = np.concatenate([UI, U_opt], axis=1)
+                self.matV[i][j] = U_init
+        Logger.info('Inner projection compeleted')
+    
+    def V_projection(self):
+        Logger.info('Starting V projection')
+        k1_sz = len(global_data.incar.k_points[0])
+        k2_sz = len(global_data.incar.k_points[1])
+        for i in range(k1_sz):
+            for j in range(k2_sz):
+                A = self.matV[i][j].conj().T @ self.matA[i][j]
+                mU, mS, mVh = np.linalg.svd(A)
+                self.matV[i][j] = self.matV[i][j] @ (mU @ np.eye(mU.shape[0], mVh.shape[0]) @ mVh)
+        Logger.info('V projection compeleted')
 
     def update_Z(self):
         k1_sz = len(global_data.incar.k_points[0])
@@ -206,11 +302,21 @@ class StateInitializer:
         b_sz = len(global_data.incar.composition_of_b)
         for i in range(k1_sz):
             for j in range(k2_sz):
-                self.matZ[i][j] = np.zeros((len(E_idx[i][j]), len(E_idx[i][j])), dtype=complex)
+                self.matZ[i][j] = np.zeros((len(self.O_idx[i][j]), len(self.O_idx[i][j])), dtype=complex)
+                diag_II = 0.0
                 for b in range(b_sz):
                     mM = global_data.m_set.get_M0(i, j, b)
                     n_k1, n_k2, _ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j], b)
-                    self.matZ[i][j] += global_data.incar.wb[b] * mM @ (self.matV[n_k1][n_k2] @ np.conj(self.matV[n_k1][n_k2]).T) @ np.conj(mM).T
+                    Cb = mM @ self.matV[n_k1][n_k2]
+                    Cb_O = Cb[self.O_idx[i][j], :]
+                    self.matZ[i][j] += global_data.incar.wb[b] * (Cb_O @ Cb_O.conj().T)
+
+                    if self.I_idx[i][j].size > 0:
+                        Ci = Cb[self.I_idx[i][j], :]
+                        diag_II += global_data.incar.wb[b] * np.sum(np.abs(Ci)**2)
+                self.diagII_sum[i][j] = diag_II
+
+                self.matZ[i][j] = 0.5*(self.matZ[i][j] + self.matZ[i][j].conj().T)
                 if self.last_matZ[i][j] is None:
                     self.last_matZ[i][j] = self.matZ[i][j]
                 else:
@@ -222,30 +328,32 @@ class StateInitializer:
         k2_sz = len(global_data.incar.k_points[1])
 
         B = global_data.incar.band_calc_num
+        E_idx = global_data.state_collection.E_idx
         for i in range(k1_sz):
             for j in range(k2_sz):
-                D, V = np.linalg.eig(self.matZ[i][j])
-                sort_D = np.sort(D)[::-1]
-                idx = np.argsort(D)[::-1]
+                D, V = np.linalg.eigh(self.matZ[i][j])
+                p = B - len(self.I_idx[i][j])
+                Vp = V[:, -p:] if p > 0 else np.zeros((self.matZ[i][j].shape[0], 0), complex)
 
-                self.lambda_[i][j] = sort_D[:B]
-                sort_V = V[:, idx]
-                self.matV[i][j] = sort_V[:, :B]
+                self.lambda_[i][j] = float(np.sum(D[-p:])) if p>0 else 0.0
+                N_k = len(E_idx[i][j])
+                U_opt = np.zeros((N_k, p), dtype=complex)
+                U_opt[ self.O_idx[i][j], :] = Vp
+                E_I = np.eye(N_k, dtype=complex)[:, self.I_idx[i][j]]
+                U_concat = np.concatenate([E_I, U_opt], axis=1)
+                self.matV[i][j] = U_concat[:, :B]
     
     def get_omega_I(self):
         k1_sz = len(global_data.incar.k_points[0])
         k2_sz = len(global_data.incar.k_points[1])
-
-        B = global_data.incar.band_calc_num
-        res = 0
-        s_N_wb = B * np.sum(global_data.incar.wb)
-
+        N = global_data.incar.band_calc_num
+        s_N_wb = N * np.sum(global_data.incar.wb)
+        total = 0.0
         for i in range(k1_sz):
             for j in range(k2_sz):
-                res += s_N_wb - np.sum(self.lambda_[i][j])
+                total += s_N_wb - ( self.diagII_sum[i][j] + self.lambda_[i][j] )
+        return total / (k1_sz * k2_sz)
         
-        return res / (k1_sz * k2_sz)
-    
     def save_as(self, filenameV: str, filenameA: str):
         if not filenameV.lower() == "false":
             IO.save_to_txt(filenameV, self.matV, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
@@ -275,6 +383,19 @@ class StateInitializer:
                 if picked == min(n, m) or used_r.all() or used_c.all():
                     break
         return M
+    
+    @staticmethod
+    def map_inner_to_local(E_idx_ij, inner_idx_ij):
+        E = np.asarray(E_idx_ij, dtype=int)
+        inner = np.asarray(inner_idx_ij, dtype=int)
+
+        E0 = E
+        inner0 = inner
+
+        pos = {band_id: pos for pos, band_id in enumerate(E0)}
+        I = [pos[b] for b in inner0 if b in pos]
+        I = np.unique(I) 
+        return I
 
 class StateBases:
     @staticmethod

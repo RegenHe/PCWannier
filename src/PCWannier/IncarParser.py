@@ -47,8 +47,10 @@ class IncarData:
 
         self.origin: list = None
         self.band_window: list = None
+        self.inner_window: list = None
         self.proj_iter: bool = None
         self.proj_binarize: bool = None
+        self.v_proj: bool = None
         self.projections: list = None
         self.w_center: list = None
         self.M_in: str = None
@@ -121,6 +123,8 @@ class IncarParser:
         "wannier_file": "./wannier.txt",
         "wannier_figures": "./wanniers",
         "proj_iter": True,
+        "v_proj": True,
+        "inner_window": False,
         "proj_binarize": False,
         "w_center": False,
         "origin": [0, 0],
@@ -197,7 +201,7 @@ class IncarParser:
                 else:
                     raise ValueError(f"Invalid hopping_state range format: '{part}'")
             return ranges
-        elif key in ["band_window", "band_calc"]:
+        elif key in ["band_window", "band_calc", "inner_window"]:
             v = value.strip()
             if ':' in v:
                 start_str, stop_str = v.split(':', 1)
@@ -345,7 +349,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "proj_binarize"]:
+        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "proj_binarize", "v_proj"]:
             if value.strip().lower() == "true":
                 return True
             else:

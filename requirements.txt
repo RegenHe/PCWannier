@@ -2,8 +2,6 @@ matplotlib
 numpy
 scipy
 setuptools
-threadpoolctl
 spglib
 spgrep
-cloudpickle
 numba

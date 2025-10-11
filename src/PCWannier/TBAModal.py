@@ -7,7 +7,6 @@ from math import factorial
 import scipy
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from threadpoolctl import threadpool_limits
 
 from .Log import Logger
 from .IO import IO
@@ -111,6 +110,9 @@ class TBAModal:
             if isinstance(global_data.incar.band_window, EnergyWindow):
                 plt.axhline(y=global_data.incar.band_window.emin, color='k', linestyle='--', linewidth=1, zorder=3)
                 plt.axhline(y=global_data.incar.band_window.emax, color='k', linestyle='--', linewidth=1, zorder=3)
+            if global_data.incar.inner_window is not False and isinstance(global_data.incar.inner_window, EnergyWindow):
+                plt.axhline(y=global_data.incar.inner_window.emin, color='r', linestyle='--', linewidth=0.8, zorder=3)
+                plt.axhline(y=global_data.incar.inner_window.emax, color='r', linestyle='--', linewidth=0.8, zorder=3)
             plt.title("Band Structure", fontsize=14)
             plt.ylabel("E", fontsize=12)
             plt.tight_layout()
@@ -220,6 +222,9 @@ class TBAModal:
         if isinstance(global_data.incar.band_window, EnergyWindow):
             plt.axhline(y=global_data.incar.band_window.emin, color='k', linestyle='--', linewidth=1, zorder=3)
             plt.axhline(y=global_data.incar.band_window.emax, color='k', linestyle='--', linewidth=1, zorder=3)
+        if global_data.incar.inner_window is not False and isinstance(global_data.incar.inner_window, EnergyWindow):
+            plt.axhline(y=global_data.incar.inner_window.emin, color='r', linestyle='--', linewidth=0.8, zorder=3)
+            plt.axhline(y=global_data.incar.inner_window.emax, color='r', linestyle='--', linewidth=0.8, zorder=3)
 
         for pos in [p[1] for p in high_sym_points]:
             ax_band.axvline(x=pos, color='black', linestyle='--', linewidth=0.5)

@@ -4,9 +4,6 @@ import scipy
 
 from typing import List, Tuple
 
-from concurrent.futures import ProcessPoolExecutor, wait
-from multiprocessing import Manager
-
 import scipy.linalg
 
 from .Log import Logger
@@ -14,7 +11,6 @@ from .Timer import Timer, timer
 from .IO import IO
 
 from .GlobalData import global_data
-from .CallableWrapper import CallableWrapper
 
 from .Utils import FieldData, StateCollection, WannierTools
 
@@ -44,7 +40,7 @@ class Gradient:
             Logger.info(f"using cache data - U")
             self.U = IO.load_cell_matrix(global_data.incar.U_file, shape=(k1_sz, k2_sz))
         
-        lastOmega = 1e6
+        lastOmega = +np.inf
         if max_iter == 0:
             Logger.info(f'iter n = 0')
             self.update()

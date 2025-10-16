@@ -277,9 +277,12 @@ class PCWannier:
             mesh_point = IO.load_mesh_points(interp_path)
             vals = []
             for wannier in self.wanniers:
-                interp = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, wannier)
-                res = interp.batch_evaluate(mesh_point)
-                vals.append(res)
+                interp_real = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, np.real(wannier))
+                interp_imag = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, np.imag(wannier))
+                real = interp_real.batch_evaluate(mesh_point)
+                imag = interp_imag.batch_evaluate(mesh_point)
+                vals.append(real)
+                vals.append(imag)
             if interp_wannier is None:
                 IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp-wannier.txt", mesh_point, vals)
             else:

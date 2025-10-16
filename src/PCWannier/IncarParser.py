@@ -132,6 +132,7 @@ class IncarParser:
         "epsilon": 0.01,
         "err_diff": 1e-6,
         "max_iter": 2000,
+        "neighbor": [],
         "band_figure": "./band.png",
 
         "use_cached_data": ["False"],
@@ -356,6 +357,8 @@ class IncarParser:
                 return False
         elif key in ["neighbor"]:
             neighbor = []
+            if value == '':
+                return neighbor
             parts = value.strip().split(',')
             for part in parts:
                 neighbor.append([int(p.strip()) for p in part.strip().split(' ')])

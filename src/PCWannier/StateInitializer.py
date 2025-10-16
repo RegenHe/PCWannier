@@ -49,7 +49,6 @@ class StateInitializer:
             Logger.info(f"using cache data - V")
             self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
 
-            E_idx = global_data.state_collection.E_idx
             inner_idx = global_data.state_collection.inner_E_idx
             for i in range(k1_sz):
                 for j in range(k2_sz):
@@ -60,7 +59,6 @@ class StateInitializer:
         elif 'V' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - V")
             self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
-            E_idx = global_data.state_collection.E_idx
             inner_idx = global_data.state_collection.inner_E_idx
             for i in range(k1_sz):
                 for j in range(k2_sz):
@@ -76,6 +74,12 @@ class StateInitializer:
                     mU, mS, mVh = np.linalg.svd(self.matA[i][j])
                     self.matC[i][j] = mU @ np.eye(len(E_idx[i][j]), B) @ mVh
             self.matV = self.matC
+            inner_idx = global_data.state_collection.inner_E_idx
+            for i in range(k1_sz):
+                for j in range(k2_sz):
+                    N_k = len(E_idx[i][j])
+                    self.I_idx[i][j] = self.map_inner_to_local(E_idx[i][j], inner_idx[i][j])
+                    self.O_idx[i][j] = np.setdiff1d(np.arange(N_k), self.I_idx[i][j], assume_unique=True)
         else:
             self.projection()
             self.matV = self.matC

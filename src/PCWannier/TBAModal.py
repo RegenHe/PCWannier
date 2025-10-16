@@ -21,18 +21,18 @@ class TBAModal:
     def __init__(self):
         pass
 
-    @timer("Generate hoppings - ")
+    # @timer("Generate hoppings - ")
     def gen_hopping(self, r: list=[0, 0]):
         r_ = [0, 0]
         r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] + r[1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
         r_[1] = (r[0] * global_data.incar.real_lattice_vectors[0][1] + r[1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
-        Logger.info(f"Generating hoppings - r = ({r[0]}, {r[1]})")
+        # Logger.info(f"Generating hoppings - r = ({r[0]}, {r[1]})")
 
         shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
         hopping = np.zeros((shape[3], shape[3]), dtype=complex)
 
         if global_data.incar.disable_orth:
-            Logger.info("Disable orthogonalization as requested")
+            # Logger.info("Disable orthogonalization as requested")
             T = global_data.state_collection.get_transform(True)
         else:
             T = global_data.state_collection.get_transform()
@@ -75,6 +75,9 @@ class TBAModal:
         high_sym_points.append([global_data.incar.k_path[0]['name'], total])
         K = np.arange(0, total + 1)
 
+        if global_data.incar.neighbor == []:
+            global_data.incar.neighbor = self.R_half_rect(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]))
+
         self.hoppings = []
         for p in global_data.incar.neighbor:
             self.hoppings.append(self.gen_hopping(p))
@@ -82,6 +85,7 @@ class TBAModal:
         E = []
         for k_ in k_list:
             Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+            Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
             kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
             ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
             k = [kx, ky]
@@ -89,9 +93,12 @@ class TBAModal:
                 r_ = [0, 0]
                 r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const)
                 r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+                if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
+                    Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
+                    continue
                 Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
             Hi = Hi + np.conj(Hi).T
-            H = H0 + Hi
+            H = H0 + Hi + Hq
             D, V = np.linalg.eig(H)
             E.append(np.sort(np.real(D)))
         E = np.array(E)
@@ -124,6 +131,7 @@ class TBAModal:
             DOS = np.zeros((1, global_data.incar.DOS_num), dtype=complex)
             for k_ in k_list:
                 Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+                Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
                 kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
                 ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
                 k = [kx, ky]
@@ -131,9 +139,12 @@ class TBAModal:
                     r_ = [0, 0]
                     r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
                     r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
+                    if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
+                        Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
+                        continue
                     Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
                 Hi = Hi + np.conj(Hi).T
-                H = H0 + Hi
+                H = H0 + Hi + Hq
                 for i, e in enumerate(E_list):
                     G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
                     DOS[0, i] += np.sum(np.real(-1 / np.pi * np.imag(np.diag(G))))
@@ -144,6 +155,7 @@ class TBAModal:
             DOS = np.zeros((global_data.incar.band_calc_num, global_data.incar.DOS_num), dtype=complex)
             for k_ in k_list:
                 Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+                Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
                 kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
                 ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
                 k = [kx, ky]
@@ -151,9 +163,12 @@ class TBAModal:
                     r_ = [0, 0]
                     r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const)
                     r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
+                    if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
+                        Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
+                        continue
                     Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
                 Hi = Hi + np.conj(Hi).T
-                H = H0 + Hi
+                H = H0 + Hi + Hq
                 for i, e in enumerate(E_list):
                     G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
                     DOS[:, i] += np.real(-1 / np.pi * np.imag(np.diag(G)))
@@ -164,6 +179,7 @@ class TBAModal:
             DOS = np.zeros((1, global_data.incar.DOS_num), dtype=complex)
             for k_ in k_list:
                 Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+                Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
                 kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
                 ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
                 k = [kx, ky]
@@ -171,12 +187,16 @@ class TBAModal:
                     r_ = [0, 0]
                     r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
                     r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
+                    if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
+                        Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
+                        continue
                     Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
                 Hi = Hi + np.conj(Hi).T
-                H = H0 + Hi
+                H = H0 + Hi + Hq
             for i in range(global_data.incar.DOS_Brillouin_mesh[0]):
                 for j in range(global_data.incar.DOS_Brillouin_mesh[1]):
                     Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
+                    Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
                     k0 = WannierTools.get_kx_ky([0, 0])
                     kx = k0[0] + i * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[0] + j * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[1]
                     ky = k0[1] + i * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[0] + j * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[1]
@@ -185,14 +205,43 @@ class TBAModal:
                         r_ = [0, 0]
                         r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
                         r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
+                        if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
+                            Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
+                            continue
                         Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
                     Hi = Hi + np.conj(Hi).T
-                    H = H0 + Hi
+                    H = H0 + Hi + Hq
                     for i, e in enumerate(E_list):
                         G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
                         DOS[0, i] += np.sum(np.real(-1 / np.pi * np.imag(np.diag(G))))
             self.plot_hs_band_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure)
             Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
+    
+    @staticmethod
+    def is_nyquist(Rx, Ry, Nx, Ny):
+        return (Nx % 2 == 0 and (2*Rx) % Nx == 0) and (Ny % 2 == 0 and (2*Ry) % Ny == 0)
+
+    @staticmethod
+    def R_half_rect(Nx: int, Ny: int) -> np.ndarray:
+        x_m = Nx // 2
+        y_m = Ny // 2
+        y_min = -y_m + (1 if Ny % 2 == 0 else 0)
+        R = []
+        Rmax = max(x_m, y_m)
+
+        for r in range(1, Rmax + 1):
+            if r <= y_m:
+                xmax = min(r, x_m)
+                for x in range(0, xmax + 1):
+                    if not (x == 0 and r == 0):
+                        R.append((x, r))
+            if r <= x_m:
+                y_top = min(r - 1, y_m)
+                for y in range(y_top, y_min - 1, -1):
+                    if not (r == 0 and y == 0):
+                        R.append((r, y))
+        return np.array(R, dtype=int)
+
 
     @staticmethod
     def plot_hs_band_dos(k_path: np.ndarray,
@@ -273,8 +322,7 @@ class TBAModal:
         H0 = np.asarray(self.gen_hopping())
         Hk = H0 + Hi + np.conjugate(np.swapaxes(Hi, -2, -1))
 
-        with threadpool_limits(limits=global_data.threads):
-            self.eigvals, self.eigvecs = np.linalg.eigh(Hk)
+        self.eigvals, self.eigvecs = np.linalg.eigh(Hk)
         del Hk, Hi, H0, phase
 
         self.groups = self.group_bands(self.eigvals, delta_rel=1e-2)
@@ -322,28 +370,61 @@ class TBAModal:
         groups.sort(key=lambda g: g[0])
         return groups
     
+
     @timer("Generate Effective Hamiltonian - ")
     def effective_Hamiltonian(self):
         H0 = self.gen_hopping()
+
         if getattr(self, 'hoppings', None) is None or len(self.hoppings) == 0:
             self.hoppings = []
             for R in global_data.incar.neighbor:
                 self.hoppings.append(self.gen_hopping(R))
+
         self.H_eff = {}
 
         Rlist = np.asarray(global_data.incar.neighbor, dtype=float)
-        Tlist = np.stack(self.hoppings, axis=0).astype(complex)
-        axes = self._axis_names(Rlist.shape[1])
+        Rint  = Rlist.astype(int, copy=False)
+        Tlist = np.stack(self.hoppings, axis=0).astype(np.complex128)
+        axes  = self._axis_names(Rlist.shape[1])
 
-        phase = np.exp(1j * 2*np.pi * (global_data.incar.neighbor @ np.asarray(global_data.incar.eff_k)))
-        WT = phase[:, None, None] * Tlist
+
+        D = Rlist.shape[1]
+        Nks = [len(global_data.incar.k_points[d]) for d in range(D)]
+
+        def is_nyquist_vectorized(Rint, Nks):
+            mask = np.ones(Rint.shape[0], dtype=bool)
+            for d in range(Rint.shape[1]):
+                Nd = Nks[d]
+                if Nd % 2 != 0:
+                    mask &= False
+                else:
+                    mask &= ((2 * Rint[:, d]) % Nd == 0)
+            return mask
+
+        nyq_mask = is_nyquist_vectorized(Rint, Nks)
+        int_mask = ~nyq_mask
+
+        if np.any(nyq_mask):
+            Tn = Tlist[nyq_mask]
+            Tlist[nyq_mask] = 0.5 * (Tn + np.conjugate(Tn).transpose(0, 2, 1))
+
+        phase = np.exp(1j * 2 * np.pi * (Rlist @ np.asarray(global_data.incar.eff_k, dtype=float)))  # (NR,)
+
+        WT  = phase[:, None, None] * Tlist
         WTd = np.conjugate(WT).transpose(0, 2, 1)
 
-        self.H_eff['1'] = WT.sum(axis=0) + WTd.sum(axis=0) + H0
+        H_const = H0.copy()
+        if np.any(int_mask):
+            H_const += WT[int_mask].sum(axis=0) + WTd[int_mask].sum(axis=0)
+        if np.any(nyq_mask):
+            H_const += WT[nyq_mask].sum(axis=0)
+        self.H_eff['1'] = H_const
 
         for n in range(1, global_data.incar.eff_order + 1):
-            monoms = self._monomials_of_order(Rlist.shape[1], n)
+            monoms = self._monomials_of_order(D, n)
             pref_power = (1j) ** n
+            sgn = -1 if (n % 2 == 1) else 1
+
             for m in monoms:
                 prodRm = np.ones(Rlist.shape[0], dtype=float)
                 denom = 1
@@ -351,10 +432,19 @@ class TBAModal:
                     if e:
                         prodRm *= Rlist[:, a] ** e
                         denom  *= factorial(e)
-                term = (np.tensordot(prodRm, WT,  axes=(0, 0)) + (-1 if (n % 2 == 1) else 1) * np.tensordot(prodRm, WTd, axes=(0, 0))) * pref_power / denom
+
+                term = np.zeros_like(H0, dtype=np.complex128)
+                if np.any(int_mask):
+                    w = prodRm[int_mask]
+                    term += (np.tensordot(w, WT[int_mask],  axes=(0, 0)) + sgn * np.tensordot(w, WTd[int_mask], axes=(0, 0)))
+                if np.any(nyq_mask):
+                    w = prodRm[nyq_mask]
+                    term += np.tensordot(w, WT[nyq_mask], axes=(0, 0))
+
+                term *= (pref_power / denom)
                 key = self._key_from_m(axes, m)
                 self.H_eff[key] = term
-        
+
         Logger.info(f"Effective Hamiltonian terms: {list(self.H_eff.keys())}")
         IO.save_dict(global_data.incar.eff_file, self.H_eff)
 
@@ -364,6 +454,7 @@ class TBAModal:
             Logger.info(f"Decomposed effective Hamiltonian terms saved to {global_data.incar.decompose_file}")
 
         return self.H_eff
+
 
     def _axis_names(self, dim):
         base = ['x','y','z']

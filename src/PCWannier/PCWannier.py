@@ -247,6 +247,8 @@ class PCWannier:
         if global_data.incar.eff_k is not False:
             Logger.info(f"Calculate effective Hamiltonian at k = {global_data.incar.eff_k}")
             self.TBA.effective_Hamiltonian()
+        
+        self.TBA.calc_finite()
     
     def _topology_calculation(self):
         self.TBA.gen_band()

@@ -43,13 +43,16 @@ class StateInitializer:
         E_idx = global_data.state_collection.E_idx
         B = global_data.incar.band_calc_num
 
+        inner_idx = global_data.state_collection.inner_E_idx
+        if len(inner_idx) == 0:
+            inner_idx = [[[] for _ in range(k2_sz)]for _ in range(k1_sz)]
+
         if 'V' in global_data.incar.use_cached_data and 'A' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - A")
             self.matA = IO.load_cell_matrix(global_data.incar.A_file, shape=(k1_sz, k2_sz))
             Logger.info(f"using cache data - V")
             self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
 
-            inner_idx = global_data.state_collection.inner_E_idx
             for i in range(k1_sz):
                 for j in range(k2_sz):
                     N_k = len(E_idx[i][j])
@@ -59,7 +62,6 @@ class StateInitializer:
         elif 'V' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - V")
             self.matV = IO.load_cell_matrix(global_data.incar.V_file, shape=(k1_sz, k2_sz))
-            inner_idx = global_data.state_collection.inner_E_idx
             for i in range(k1_sz):
                 for j in range(k2_sz):
                     N_k = len(E_idx[i][j])
@@ -74,7 +76,6 @@ class StateInitializer:
                     mU, mS, mVh = np.linalg.svd(self.matA[i][j])
                     self.matC[i][j] = mU @ np.eye(len(E_idx[i][j]), B) @ mVh
             self.matV = self.matC
-            inner_idx = global_data.state_collection.inner_E_idx
             for i in range(k1_sz):
                 for j in range(k2_sz):
                     N_k = len(E_idx[i][j])
@@ -339,7 +340,10 @@ class StateInitializer:
                 N_k = len(E_idx[i][j])
                 U_opt = np.zeros((N_k, p), dtype=complex)
                 U_opt[ self.O_idx[i][j], :] = Vp
-                E_I = np.eye(N_k, dtype=complex)[:, self.I_idx[i][j]]
+                if self.I_idx[i][j].size == 0:
+                    E_I = np.zeros((N_k, 0), dtype=complex)
+                else:
+                    E_I = np.eye(N_k, dtype=complex)[:, self.I_idx[i][j]]
                 U_concat = np.concatenate([E_I, U_opt], axis=1)
                 self.matV[i][j] = U_concat[:, :B]
     

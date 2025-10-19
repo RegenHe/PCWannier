@@ -16,6 +16,8 @@ from .Utils import global_data
 from .Utils import WannierTools, FieldData
 from .IncarParser import EnergyWindow
 
+from .Finite import Finite
+
 
 class TBAModal:
     def __init__(self):
@@ -528,3 +530,31 @@ class TBAModal:
             decom[key] = [coeffs[i] for i in range(len(coeffs))]
 
         return decom
+    
+    @timer("Calculate Finite System Band Structure - ")
+    def calc_finite(self):
+        if len(global_data.incar.neighbor) == 0:
+            global_data.incar.neighbor = self.R_half_rect(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]))
+        finite = Finite(global_data.incar.finite[0], global_data.incar.finite[1], self.gen_hopping, global_data.incar.neighbor)
+        k_list = np.linspace(global_data.incar.finite_k[0], global_data.incar.finite_k[1], int(global_data.incar.finite_k[-1]), endpoint=True) * 2 * np.pi / global_data.incar.lattice_const
+        k_list, E = finite.bands_stripe(k_list)
+        fig, ax = plt.subplots()
+        if k_list is not None:
+            for band in range(E.shape[1]):
+                plt.plot(k_list, E[:, band], color='blue')
+            ax.set_xlim(np.min(k_list), np.max(k_list))
+            plt.xlabel("k", fontsize=12)
+        else:
+            plt.scatter(np.linspace(0, E.size - 1, E.size), E, color='blue', s=3)
+            plt.xlabel("solution number", fontsize=12)
+        
+        plt.title("Band Structure", fontsize=14)
+        plt.ylabel("E", fontsize=12)
+        plt.tight_layout()
+        if global_data.incar.finite_band_figure.lower() != 'false':
+            plt.savefig(global_data.incar.finite_band_figure, dpi=300, bbox_inches='tight')
+            Logger.info(f"figure successfully saved to {global_data.incar.finite_band_figure}")
+            plt.close(fig)
+        
+        if global_data.incar.finite_band_file.lower() != 'false':
+            IO.save_band(global_data.incar.finite_band_file, E, k_list)

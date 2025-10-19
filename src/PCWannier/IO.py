@@ -142,22 +142,76 @@ class IO:
     @staticmethod
     def save_band(filename: str, data: np.ndarray, k_path: np.ndarray):
         try:
+            E = np.asarray(data)
+            if k_path is None:
+                if E.ndim == 1:
+                    E = E.reshape(1, -1)
+                elif E.ndim > 2:
+                    E = E.reshape(E.shape[0], -1)
+                if E.shape[0] != 1:
+                    raise ValueError(
+                        f"When k_path is None, data must be 1D or have first dim == 1, got shape {data.shape}."
+                    )
+
+                num_k_points, num_bands = 1, E.shape[1]
+                with open(filename, 'w') as f:
+                    f.write(f"# k-points: {num_k_points}, Bands: {num_bands}\n")
+                    f.write("# band_1, band_2, ..., band_n\n")
+
+                    band_energies = ", ".join(
+                        (f"{E[0, j].real:.8f}{E[0, j].imag:+.8f}j"
+                        if E[0, j].imag != 0 else f"{E[0, j].real:.8f}")
+                        for j in range(num_bands)
+                    )
+                    f.write(f"{band_energies}\n")
+
+                Logger.info(f"Band structure data has been saved to {filename}")
+                return
+
+            k = np.asarray(k_path)
+            if k.ndim == 1:
+                k = k.reshape(-1, 1)
+            elif k.ndim > 2:
+                k = k.reshape(k.shape[0], -1)
+            num_k_points, k_dim = k.shape
+
+            if E.ndim == 1:
+                E = E.reshape(-1, 1)
+            elif E.ndim > 2:
+                E = E.reshape(E.shape[0], -1)
+
+            if E.shape[0] != num_k_points:
+                raise ValueError(
+                    f"The first dimension of k_path and data do not match: {num_k_points} vs {E.shape[0]}"
+                )
+
+            num_bands = E.shape[1]
+
+            if k_dim == 1:
+                k_header = "k"
+            else:
+                k_header = ", ".join([f"k{i+1}" for i in range(k_dim)])
+
             with open(filename, 'w') as f:
-                num_k_points = k_path.shape[0]
-                num_bands = data.shape[1]
                 f.write(f"# k-points: {num_k_points}, Bands: {num_bands}\n")
-                f.write("# kx, ky, band_1, band_2, ..., band_n\n")
+                f.write(f"# {k_header}, band_1, band_2, ..., band_n\n")
 
                 for i in range(num_k_points):
-                    k_point = ", ".join([f"{k_path[i, j]:.8f}" for j in range(k_path.shape[1])])
-                    
-                    band_energies = ", ".join([f"{data[i, j].real:.8f}+{data[i, j].imag:.8f}j" if data[i, j].imag != 0 else f"{data[i, j].real:.8f}" for j in range(num_bands)])
-                    
+                    k_point = ", ".join(f"{k[i, j]:.8f}" for j in range(k_dim))
+                    band_energies = ", ".join(
+                        (f"{E[i, j].real:.8f}{E[i, j].imag:+.8f}j"
+                        if E[i, j].imag != 0 else f"{E[i, j].real:.8f}")
+                        for j in range(num_bands)
+                    )
                     f.write(f"{k_point},{band_energies}\n")
+
             Logger.info(f"Band structure data has been saved to {filename}")
+
         except Exception as e:
             Logger.error(f"An error occurred while saving the band structure: {e}")
             raise
+
+
     
     @staticmethod
     def load_mesh_points(filename: str) -> np.ndarray:

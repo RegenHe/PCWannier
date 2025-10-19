@@ -88,6 +88,11 @@ class IncarData:
         self.decompose: bool = None
         self.decompose_file: str = None
 
+        self.finite: list = None
+        self.finite_k: list = None
+        self.finite_band_figure: str = None
+        self.finite_band_file: str = None
+
     def __repr__(self):
         class_name = self.__class__.__name__
         lines = []
@@ -151,7 +156,12 @@ class IncarParser:
         "eff_k": False,
         "eff_file": "./H_eff.txt",
         "decompose": False,
-        "decompose_file": "./decompose.txt"
+        "decompose_file": "./decompose.txt",
+
+        "finite": False,
+        "finite_k": [0, 1, 100],
+        "finite_band_figure": "./finite_band.png",
+        "finite_band_file": "./finite_band.txt",
         }
 
     def __init__(self, filename: str):
@@ -159,16 +169,16 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file", "finite_band_figure", "finite_band_file"]:
             return value
         elif key in ["epsilon", "err_diff", "DOS_eps"]:
             return float(value.strip())
         elif key in ["max_iter", "DOS", "DOS_num", "eff_order"]:
             return int(value.strip())
         elif key in ["extension", "k_num", "DOS_Brillouin_mesh"]:
-            return [int(x) for x in value.split(',')]
-        elif key in ["origin", "w_center", "eff_k"]:
-            return [float(x) for x in value.split(',')]
+            return [int(evaluate_math_expression(x)) for x in value.split(',')]
+        elif key in ["origin", "w_center", "eff_k", "finite_k"]:
+            return [float(evaluate_math_expression(x)) for x in value.split(',')]
         elif key == "lattice_const":
             return float(evaluate_math_expression(value.strip()))
         elif key in ["real_lattice_vectors", "reciprocal_lattice_vectors", "composition_of_b"]:
@@ -365,6 +375,21 @@ class IncarParser:
             return neighbor
         elif key in ["use_cached_data"]:
             return [p.strip().upper() for p in value.split(',')]
+        elif key == "finite":
+            s = value.strip()
+            parts = [p.strip() for p in s.split(',')[:2]]
+            if len(parts) < 2:
+                parts.append('')
+            out = []
+            for t in parts:
+                if t == '':
+                    out.append(None)
+                else:
+                    n = int(t)
+                    if n < 1:
+                        raise ValueError("finite ≥ 1")
+                    out.append(n)
+            return tuple(out)
         else:
             return value
 

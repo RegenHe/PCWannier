@@ -147,19 +147,24 @@ class Finite:
 
         if k_list is None:
             H = self.build_finite_H()
-            E = np.linalg.eigvalsh(H)
-            return None, E
+            E, v = np.linalg.eigh(H)
+            return None, E, v
         else:
             k_list = np.asarray(k_list, dtype=float)
 
             evals = []
+            vlist = []
             for k in k_list:
                 H = self.build_stripe_H(k)
-                w = np.linalg.eigvalsh(H)
+                w, v = np.linalg.eigh(H)
                 evals.append(w)
+                vlist.append(v)
 
             maxlen = max(len(w) for w in evals)
             E = np.full((len(evals), maxlen), np.nan, dtype=float)
+            V = np.zeros((len(evals), maxlen, n), dtype=np.complex128)
             for i, w in enumerate(evals):
                 E[i, :len(w)] = w
-            return k_list, E
+                V[i, :len(w), :] = vlist[i]
+            return k_list, E, V
+

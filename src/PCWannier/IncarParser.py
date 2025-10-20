@@ -92,6 +92,7 @@ class IncarData:
         self.finite_k: list = None
         self.finite_band_figure: str = None
         self.finite_band_file: str = None
+        self.finite_wavefunction_file: str = None
 
     def __repr__(self):
         class_name = self.__class__.__name__
@@ -162,6 +163,7 @@ class IncarParser:
         "finite_k": [0, 1, 100],
         "finite_band_figure": "./finite_band.png",
         "finite_band_file": "./finite_band.txt",
+        "finite_wavefunction_file": "./finite_wavefunctions.txt",
         }
 
     def __init__(self, filename: str):
@@ -169,7 +171,7 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file", "finite_band_figure", "finite_band_file"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file", "finite_band_figure", "finite_band_file", "finite_wavefunction_file"]:
             return value
         elif key in ["epsilon", "err_diff", "DOS_eps"]:
             return float(value.strip())

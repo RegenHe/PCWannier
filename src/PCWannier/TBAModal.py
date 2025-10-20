@@ -537,7 +537,7 @@ class TBAModal:
             global_data.incar.neighbor = self.R_half_rect(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]))
         finite = Finite(global_data.incar.finite[0], global_data.incar.finite[1], self.gen_hopping, global_data.incar.neighbor)
         k_list = np.linspace(global_data.incar.finite_k[0], global_data.incar.finite_k[1], int(global_data.incar.finite_k[-1]), endpoint=True) * 2 * np.pi / global_data.incar.lattice_const
-        k_list, E = finite.bands_stripe(k_list)
+        k_list, E, V = finite.bands_stripe(k_list)
         fig, ax = plt.subplots()
         if k_list is not None:
             for band in range(E.shape[1]):
@@ -558,3 +558,7 @@ class TBAModal:
         
         if global_data.incar.finite_band_file.lower() != 'false':
             IO.save_band(global_data.incar.finite_band_file, E, k_list)
+        
+        if global_data.incar.finite_wavefunction_file.lower() != 'false':
+            IO.save_to_txt(global_data.incar.finite_wavefunction_file, V, (V.shape[0], ))
+        

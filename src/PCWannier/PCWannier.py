@@ -27,7 +27,7 @@ from . import Fatband
 
 class PCWannier:
     def __init__(self):
-        self.wanniers: list = []
+        self.wanniers: dict = {}
 
     @timer("PCWannier run - ")
     def run(self, args):
@@ -278,7 +278,7 @@ class PCWannier:
             Logger.info(f"Found existing interpolation file at {interp_path}, loading...")
             mesh_point = IO.load_mesh_points(interp_path)
             vals = []
-            for wannier in self.wanniers:
+            for wannier in self.wanniers[(0, 0)]:
                 interp_real = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, np.real(wannier))
                 interp_imag = Interpolator(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, np.imag(wannier))
                 real = interp_real.batch_evaluate(mesh_point)
@@ -303,11 +303,12 @@ class PCWannier:
                 IO.save_points_with_values(interp_epsilon, mesh_point, vals)
 
     @timer("Generate Wannier - ")
-    def gen_wannier(self, r: list=[0, 0]):
+    def gen_wannier(self, r: list=[0, 0], out:bool=True):
         r_ = [0, 0]
         r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] + r[1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
         r_[1] = (r[0] * global_data.incar.real_lattice_vectors[0][1] + r[1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
-        Logger.info(f"Generating Wannier Functions - r = ({r[0]}, {r[1]})")
+        if out:
+            Logger.info(f"Generating Wannier Functions - r = ({r[0]}, {r[1]})")
 
         k1_sz = len(global_data.incar.k_points[0])
         k2_sz = len(global_data.incar.k_points[1])
@@ -318,7 +319,8 @@ class PCWannier:
 
         Wsum = np.zeros((Nv, B), dtype=np.complex128)
         if global_data.incar.disable_orth:
-            Logger.info("Disable orthogonalization as requested")
+            if out:
+                Logger.info("Disable orthogonalization as requested")
             T = global_data.state_collection.get_transform(True)
         else:
             T = global_data.state_collection.get_transform()
@@ -341,23 +343,27 @@ class PCWannier:
 
         Wsum /= np.sqrt(k1_sz * k2_sz)
 
-        self.wanniers = [Wsum[:, n] for n in range(B)]
+        self.wanniers[(r[0], r[1])] = [Wsum[:, n] for n in range(B)]
 
-        Fnorm = (np.abs(Wsum) ** 2) * global_data.state_collection.extention_epsilon[:, None]
-        fd = FieldData('wannier', global_data.state_collection.extention_mesh, Fnorm.astype(np.complex128, copy=False))
-        norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
-
-        for n in range(B):
-            norm = norms[n]
-            Logger.info(f"Check wannier function norm = {norm}")
-            if not np.isclose(np.abs(norm), 1.0, atol=1e-3):
-                warn = (f"Normalization ({np.abs(norm)}) not equal to 1 in Wannier State - {n}, "
-                        f"err = {np.abs(1 - np.abs(norm))}")
-                Logger.warning(warn)
-            if global_data.incar.wannier_figures.lower() != "false":
-                fdn = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[n])
-                fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-real.png", real=True)
-                fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-imag.png", real=False)
-            
+        if out:
+            Fnorm = (np.abs(Wsum) ** 2) * global_data.state_collection.extention_epsilon[:, None]
+            fd = FieldData('wannier', global_data.state_collection.extention_mesh, Fnorm.astype(np.complex128, copy=False))
+            norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+            for n in range(B):
+                norm = norms[n]
+                Logger.info(f"Check wannier function norm = {norm}")
+                if not np.isclose(np.abs(norm), 1.0, atol=1e-3):
+                    warn = (f"Normalization ({np.abs(norm)}) not equal to 1 in Wannier State - {n}, "
+                            f"err = {np.abs(1 - np.abs(norm))}")
+                    Logger.warning(warn)
+                if global_data.incar.wannier_figures.lower() != "false":
+                    fdn = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[(r[0], r[1])][n])
+                    fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-real.png", real=True)
+                    fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-imag.png", real=False)
+    
+    def get_wannier(self, r: list=[0, 0]):
+        if (r[0], r[1]) not in self.wanniers:
+            self.gen_wannier(r)
+        return self.wanniers[(r[0], r[1])]
 
     

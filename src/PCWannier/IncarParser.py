@@ -94,6 +94,12 @@ class IncarData:
         self.finite_band_file: str = None
         self.finite_wavefunction_file: str = None
 
+        self.finite_DOS_file: str = None
+        self.finite_DOS_figure: str = None
+        self.finite_DOS_eps: float = None
+        self.finite_DOS_num: int = None
+        self.finite_layer_num: int = None
+
     def __repr__(self):
         class_name = self.__class__.__name__
         lines = []
@@ -164,6 +170,11 @@ class IncarParser:
         "finite_band_figure": "./finite_band.png",
         "finite_band_file": "./finite_band.txt",
         "finite_wavefunction_file": "./finite_wavefunctions.txt",
+        "finite_DOS_file": "./finite_DOS.txt",
+        "finite_DOS_figure": "./finite_DOS.png",
+        "finite_DOS_eps": 0.01,
+        "finite_DOS_num": False,
+        "finite_layer_num": 3,
         }
 
     def __init__(self, filename: str):
@@ -171,12 +182,12 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file", "finite_band_figure", "finite_band_file", "finite_wavefunction_file"]:
+        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file", "finite_band_figure", "finite_band_file", "finite_wavefunction_file", "finite_DOS_file", "finite_DOS_figure"]:
             return value
-        elif key in ["epsilon", "err_diff", "DOS_eps"]:
-            return float(value.strip())
-        elif key in ["max_iter", "DOS", "DOS_num", "eff_order"]:
-            return int(value.strip())
+        elif key in ["epsilon", "err_diff", "DOS_eps", "finite_DOS_eps"]:
+            return float(evaluate_math_expression(value.strip()))
+        elif key in ["max_iter", "DOS", "DOS_num", "eff_order", "finite_DOS_num", "finite_layer_num"]:
+            return int(evaluate_math_expression(value.strip()))
         elif key in ["extension", "k_num", "DOS_Brillouin_mesh"]:
             return [int(evaluate_math_expression(x)) for x in value.split(',')]
         elif key in ["origin", "w_center", "eff_k", "finite_k"]:
@@ -230,6 +241,16 @@ class IncarParser:
                     emin, emax = emax, emin
                 return EnergyWindow(emin, emax)
             raise ValueError(f"Invalid band_window format: '{v}'")
+        # elif key == "finite_DOS_range":
+        #     v = value.strip()
+        #     if ',' in v:
+        #         left, right = [t.strip() for t in v.split(',', 1)]
+        #         emin = float(evaluate_math_expression(left))
+        #         emax = float(evaluate_math_expression(right))
+        #         if emin > emax:
+        #             emin, emax = emax, emin
+        #         return EnergyWindow(emin, emax)
+        #     raise ValueError(f"Invalid energy range format: '{v}'")
         elif key == "dataset_order":
             return [x.strip() for x in value.split(',')]
         elif key == "projections":

@@ -561,4 +561,27 @@ class TBAModal:
         
         if global_data.incar.finite_wavefunction_file.lower() != 'false':
             IO.save_to_txt(global_data.incar.finite_wavefunction_file, V, (V.shape[0], ))
+
         
+        if global_data.incar.finite_DOS_num is not False:
+            energy_range = np.linspace(E.min(), E.max(), global_data.incar.finite_DOS_num)
+            klist, LDOS = finite.half_infinte_DOS(global_data.incar.finite_layer_num, k_list, global_data.incar.finite_DOS_eps, energy_range)
+
+            if global_data.incar.finite_DOS_file.lower() != 'false':
+                info = {'type': 'LDOS', 'energy_range': f"{E.min()}, {E.max()}", 'DOS_num': f"{global_data.incar.finite_DOS_num}"}
+                IO.save_band(global_data.incar.finite_DOS_file, LDOS, klist, info)
+            
+            fig, ax = plt.subplots()
+            K, E = np.meshgrid(klist, energy_range)
+            pcm = ax.pcolormesh(K, E, LDOS.T, shading='auto', cmap='jet')
+            fig.colorbar(pcm, ax=ax)
+            
+            plt.title("LDOS", fontsize=14)
+            plt.xlabel("k", fontsize=12)
+            plt.ylabel("E", fontsize=12)
+            plt.tight_layout()
+            
+            if global_data.incar.finite_DOS_figure.lower() != 'false':
+                plt.savefig(global_data.incar.finite_DOS_figure, dpi=300, bbox_inches='tight')
+                Logger.info(f"figure successfully saved to {global_data.incar.finite_DOS_figure}")
+                plt.close(fig)

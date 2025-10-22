@@ -167,4 +167,99 @@ class Finite:
                 E[i, :len(w)] = w
                 V[i, :len(w), :] = vlist[i]
             return k_list, E, V
+        
+    def _half_blocks_with_layer(self, axis: str, k: float, L: int):
+        norb = self.norb
+        n = L * norb
+        H00 = np.zeros((n, n), dtype=np.complex128)
+        H01 = np.zeros((n, n), dtype=np.complex128)
+
+        for (dx, dy), H in self.HR.items():
+            d_alpha, d_beta = (dx, dy) if axis == 'x' else (dy, dx)
+            phase = np.exp(1j * k * d_beta)
+
+            for a in range(L):
+                j = a + d_alpha
+                q = j // L
+                a2 = j - q * L
+                if not (0 <= a2 < L):
+                    continue
+
+                I = slice(a * norb, (a + 1) * norb)
+                J = slice(a2 * norb, (a2 + 1) * norb)
+
+                if q == 0:
+                    H00[I, J] += H * phase
+                elif q == 1:
+                    H01[I, J] += H * phase
+                elif q == -1:
+                    pass
+                else:
+                    if not hasattr(self, '__layer_warninged__') or not self.__layer_warninged__:
+                        self.__layer_warninged__ = True
+                        warn = f"layer number {L} is too small to include hopping."
+                        Logger.warning(warn)
+
+        H00 = 0.5 * (H00 + H00.conj().T)
+        return H00, H01
+        
+    def half_infinte_H(self, k: float, layernum: int = 1):
+        if (self.nx is not None) and (self.ny is None):
+            axis = 'x'
+        elif (self.nx is None) and (self.ny is not None):
+            axis = 'y'
+        else:
+            raise ValueError("build_stripe_H only supports one direction finite or two directions finite.")
+        
+        return self._half_blocks_with_layer(axis, k, int(layernum))
+    
+    def _sancho_T(self, H00: np.ndarray, H01: np.ndarray, z: complex, tol: float = 1e-12, max_iter: int = 200):
+        n = H00.shape[0]
+        I = np.eye(n, dtype=np.complex128)
+        H10 = H01.conj().T
+
+        A = z * I - H00
+        t = np.linalg.solve(A, H10)
+        t_tilde = np.linalg.solve(A, H01)
+
+        T_eff = t.copy()
+        prod_tilde = t_tilde.copy()
+
+        for _ in range(max_iter):
+            Den = I - t @ t_tilde - t_tilde @ t
+            t_new = np.linalg.solve(Den, t @ t)
+            t_tilde_new = np.linalg.solve(Den, t_tilde @ t_tilde)
+
+            T_eff += prod_tilde @ t_new
+            prod_tilde = prod_tilde @ t_tilde_new
+
+            if max(np.linalg.norm(t_new, ord='fro'), np.linalg.norm(t_tilde_new, ord='fro')) < tol:
+                break
+            t, t_tilde = t_new, t_tilde_new
+
+        return T_eff
+
+    def _surface_greens(self, H00: np.ndarray, H01: np.ndarray, z: complex):
+        n = H00.shape[0]
+        I = np.eye(n, dtype=np.complex128)
+        T = self._sancho_T(H00, H01, z)
+        Sigma = H01 @ T
+        return np.linalg.solve(z * I - H00 - Sigma, I)
+    
+    @timer("Half-infinite DOS calculation - ")
+    def half_infinte_DOS(self, layernum: int, k_list, eta: float, energy: np.ndarray):
+        k_list = np.atleast_1d(np.asarray(k_list, dtype=float))
+        energy = np.asarray(energy, dtype=float)
+
+        dos = np.empty((k_list.size, energy.size), dtype=float)
+
+        for ik, k in enumerate(k_list):
+            H00, H01 = self.half_infinte_H(k, layernum=int(layernum))
+            for ie, E in enumerate(energy):
+                z = E + 1j * float(eta)
+                gS = self._surface_greens(H00, H01, z)
+                dos[ik, ie] = -(1.0 / np.pi) * np.imag(np.trace(gS))
+
+        return k_list, dos
+
 

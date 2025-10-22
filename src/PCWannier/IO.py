@@ -140,7 +140,7 @@ class IO:
             raise
 
     @staticmethod
-    def save_band(filename: str, data: np.ndarray, k_path: np.ndarray):
+    def save_band(filename: str, data: np.ndarray, k_path: np.ndarray, other_info: Dict = None) -> None:
         try:
             E = np.asarray(data)
             if k_path is None:
@@ -157,6 +157,9 @@ class IO:
                 with open(filename, 'w') as f:
                     f.write(f"# k-points: {num_k_points}, Bands: {num_bands}\n")
                     f.write("# band_1, band_2, ..., band_n\n")
+                    if other_info is not None:
+                        for key, value in other_info.items():
+                            f.write(f"# {key}: {value}\n")
 
                     band_energies = ", ".join(
                         (f"{E[0, j].real:.8f}{E[0, j].imag:+.8f}j"
@@ -195,6 +198,10 @@ class IO:
             with open(filename, 'w') as f:
                 f.write(f"# k-points: {num_k_points}, Bands: {num_bands}\n")
                 f.write(f"# {k_header}, band_1, band_2, ..., band_n\n")
+                
+                if other_info is not None:
+                    for key, value in other_info.items():
+                        f.write(f"# {key}: {value}\n")
 
                 for i in range(num_k_points):
                     k_point = ", ".join(f"{k[i, j]:.8f}" for j in range(k_dim))

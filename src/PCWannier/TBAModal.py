@@ -568,7 +568,7 @@ class TBAModal:
             klist, LDOS = finite.half_infinte_DOS(global_data.incar.finite_layer_num, k_list, global_data.incar.finite_DOS_eps, energy_range)
 
             if global_data.incar.finite_DOS_file.lower() != 'false':
-                info = {'type': 'LDOS', 'energy_range': f"{E.min()}, {E.max()}", 'DOS_num': f"{global_data.incar.finite_DOS_num}"}
+                info = {'type': 'SDOS', 'energy_range': f"{E.min()}, {E.max()}", 'DOS_num': f"{global_data.incar.finite_DOS_num}"}
                 IO.save_band(global_data.incar.finite_DOS_file, LDOS, klist, info)
             
             fig, ax = plt.subplots()
@@ -576,7 +576,7 @@ class TBAModal:
             pcm = ax.pcolormesh(K, E, LDOS.T, shading='auto', cmap='jet')
             fig.colorbar(pcm, ax=ax)
             
-            plt.title("LDOS", fontsize=14)
+            plt.title("SDOS", fontsize=14)
             plt.xlabel("k", fontsize=12)
             plt.ylabel("E", fontsize=12)
             plt.tight_layout()

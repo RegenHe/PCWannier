@@ -500,7 +500,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "radius_func"]:
+        elif key in ["M_in", "hermitian", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "radius_func"]:
             if value.strip().lower() == "true":
                 return True
             else:

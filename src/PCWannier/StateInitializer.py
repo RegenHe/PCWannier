@@ -165,11 +165,14 @@ class StateInitializer:
                                 p['frac_position'][1] * np.array(global_data.incar.real_lattice_vectors[1]) +
                                 np.array(global_data.incar.origin)) * global_data.incar.lattice_const
                 
-                col = np.zeros(len(global_data.state_collection.extention_mesh.vertices), dtype=np.complex128)
-                for T in T_list:
-                    col += global_data.state_collection.extention_mesh.rfunc(f, T + cart_position, p['xaxis_angluar'])
+                # col = np.zeros(len(global_data.state_collection.extention_mesh.vertices), dtype=np.complex128)
+                # for T in T_list:
+                #     col += global_data.state_collection.extention_mesh.rfunc(f, T + cart_position, p['xaxis_angluar'])
 
-                H_list.append(np.asarray(col, dtype=np.complex128, copy=False))
+                # H_list.append(np.asarray(col, dtype=np.complex128, copy=False))
+
+                h = global_data.state_collection.extention_mesh.rfunc(f, cart_position, p['xaxis_angluar'])
+                H_list.append(np.asarray(h, dtype=np.complex128))
 
         H = np.column_stack(H_list)
 
@@ -184,13 +187,15 @@ class StateInitializer:
         fd = FieldData('', global_data.state_collection.extention_mesh, F)
         norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
         norms = np.where(norms == 0, 1.0, norms)
-
+        if norms.ndim == 0:
+            norms = np.array([norms])
         G = H / np.sqrt(norms)[None, :]
 
         g = [G[:, k] for k in range(G.shape[1])]
 
         for i in range(k1_sz):
             for j in range(k2_sz):
+                phase = global_data.state_collection.get_extention_phase(i, j)
                 Nv = global_data.state_collection.extention_mesh.vertices.shape[0]
 
                 G = np.column_stack(g).astype(np.complex128, copy=False)
@@ -200,7 +205,7 @@ class StateInitializer:
                 for m in range(len(E_idx[i][j])):
                     field = global_data.state_collection.get_extention_field(i, j, m)
                     
-                    base = global_data.state_collection.extention_epsilon * np.conj(field)
+                    base = global_data.state_collection.extention_epsilon * np.conj(phase * field)
 
                     F = (base[:, None] * G)
                     fd = FieldData('', global_data.state_collection.extention_mesh, F)
@@ -209,6 +214,8 @@ class StateInitializer:
                     # A = FieldData("A", global_data.state_collection.extention_mesh, np.broadcast_to(np.conj(base[None, :]), (shape[3], Nv)).astype(np.complex128, copy=False))
                     # B = FieldData("B", global_data.state_collection.extention_mesh, (G.T).astype(np.complex128, copy=False))
                     # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
+                    if vals.ndim == 0:
+                        vals = np.array([vals])
                     self.matA[i][j][m, :vals.shape[0]] = vals
 
                 if global_data.incar.proj_binarize:

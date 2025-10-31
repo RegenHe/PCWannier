@@ -33,7 +33,7 @@ class PCWannier:
     def run(self, args):
         self.logger = Logger(args.log)
 
-        Logger.info('=========  PCWannier v0.1.0  =========')
+        Logger.info('=========  PCWannier v0.1.1  =========')
 
         global_data.threads = args.threads
         nb.set_num_threads(global_data.threads)
@@ -135,7 +135,7 @@ class PCWannier:
             indices = [global_data.incar.dataset_order.index(dim) for dim in ["k1", "k2", "E"]]
             transposed_all = np.transpose(t_all, axes=indices)
 
-            energy_matrix = np.ascontiguousarray(np.real(transposed_all) if global_data.incar.E_is_real else transposed_all)
+            energy_matrix = np.ascontiguousarray(np.real(transposed_all) if global_data.incar.hermitian else transposed_all)
             setattr(self.E_raw_data, "energy_matrix", energy_matrix)
             global_data.energy_matrix = energy_matrix
 
@@ -173,7 +173,7 @@ class PCWannier:
             t_ = self.E_raw_data.value_matrix[0].reshape((shape[0], shape[1], -1), order='C')[:,:, global_data.incar.band_window]
             indices = [global_data.incar.dataset_order.index(dim) for dim in ["k1", "k2", "E"]]
             transposed = np.transpose(t_, axes=indices)
-            global_data.state_collection.E = np.real(transposed) if global_data.incar.E_is_real else transposed
+            global_data.state_collection.E = np.real(transposed) if global_data.incar.hermitian else transposed
 
             bw_idx = np.asarray(global_data.incar.band_window, dtype=int).tolist()
             global_data.state_collection.E_idx = [[bw_idx.copy() for _ in range(len(global_data.incar.k_points[1]))] for _ in range(len(global_data.incar.k_points[0]))]
@@ -247,8 +247,9 @@ class PCWannier:
         if global_data.incar.eff_k is not False:
             Logger.info(f"Calculate effective Hamiltonian at k = {global_data.incar.eff_k}")
             self.TBA.effective_Hamiltonian()
-        
-        self.TBA.calc_finite()
+        if global_data.incar.finite is not False:
+            Logger.info(f"Calculate finite system band structure")
+            self.TBA.calc_finite()
     
     def _topology_calculation(self):
         self.TBA.gen_band()
@@ -350,6 +351,8 @@ class PCWannier:
             fd = FieldData('wannier', global_data.state_collection.extention_mesh, Fnorm.astype(np.complex128, copy=False))
             norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
             for n in range(B):
+                if norms.ndim == 0:
+                    norms = np.array([norms])
                 norm = norms[n]
                 Logger.info(f"Check wannier function norm = {norm}")
                 if not np.isclose(np.abs(norm), 1.0, atol=1e-3):

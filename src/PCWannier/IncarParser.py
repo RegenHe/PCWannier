@@ -32,7 +32,7 @@ class IncarData:
         self.M_file: str = None
         self.A_file: str = None
         self.O_file: str = None
-        self.E_is_real: bool = None
+        self.hermitian: bool = None
         self.E_file: str = None
         self.band_file: str = None
         self.hopping_file: str = None
@@ -129,7 +129,7 @@ class IncarParser:
         "A_file": "./A.txt",
         "O_file": "./O.txt",
         "disable_orth": True,
-        "E_is_real": True,
+        "hermitian": True,
         "band_file": "./band.txt",
         "hopping_file": "./hopping.txt",
         "wannier_file": "./wannier.txt",
@@ -383,7 +383,7 @@ class IncarParser:
                             k_path_dict['num'] = int(parts[i].strip())
                     k_path.append(k_path_dict)
             return k_path
-        elif key in ["M_in", "E_is_real", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "proj_binarize", "v_proj"]:
+        elif key in ["M_in", "hermitian", "proj_iter", "hybrid_Wilson_loop", "Chern_number", "symmetry", "decompose", "disable_orth", "proj_binarize", "v_proj"]:
             if value.strip().lower() == "true":
                 return True
             else:

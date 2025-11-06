@@ -3,7 +3,9 @@ from typing import Any, Tuple
 import numpy as np
 import matplotlib.tri as mtri
 
-class Interpolator:
+from .Log import Logger
+
+class Interpolator2D:
     def __init__(self, points: np.ndarray, triangles: np.ndarray, values: np.ndarray):
         self.points = points
         self.triangles = triangles
@@ -22,7 +24,7 @@ class Interpolator:
         result = self.interpolator(x, y)
         return result.filled(np.nan) if isinstance(result, np.ma.MaskedArray) else result
 
-class CachedInterpolator(Interpolator):
+class CachedInterpolator2D(Interpolator2D):
     def __init__(self, points: np.ndarray, triangles: np.ndarray):
         super().__init__(points, triangles, np.zeros(len(points)))
         self.cache = {}
@@ -53,7 +55,8 @@ class CachedInterpolator(Interpolator):
                     v_id = self._coord2vert[key]
                     tri_id[idx] = self._vert2tri[v_id]
                 except KeyError:
-                    raise ValueError(f"Point {key} is not within the triangulation domain")
+                    Logger.error(f"Point {key} is not within the triangulation domain")
+                    raise
 
         verts = self.triangles[tri_id]
         A = self.points[verts]
@@ -64,7 +67,8 @@ class CachedInterpolator(Interpolator):
         den = v0[:, 0]*v1[:, 1] - v0[:, 1]*v1[:, 0]
         if np.any(np.isclose(den, 0.0)):
             bad = np.where(np.isclose(den, 0.0))[0]
-            raise ValueError(f"{bad.size} triangles are degenerate with area close to 0. Please check mesh quality.")
+            Logger.error(f"{bad.size} triangles are degenerate with area close to 0. Please check mesh quality.")
+            raise
 
         a = ( vp[:, 0]*v1[:, 1] - vp[:, 1]*v1[:, 0]) / den
         b = ( v0[:, 0]*vp[:, 1] - v0[:, 1]*vp[:, 0]) / den

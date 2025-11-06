@@ -16,7 +16,7 @@ from .Utils import global_data
 from .Utils import WannierTools, FieldData
 from .IncarParser import EnergyWindow
 
-from .Finite import Finite
+from .Finite import Finite2D
 
 
 class TBAModal:
@@ -24,29 +24,34 @@ class TBAModal:
         pass
 
     # @timer("Generate hoppings - ")
-    def gen_hopping(self, r: list=[0, 0]):
-        r_ = [0, 0]
-        r_[0] = (r[0] * global_data.incar.real_lattice_vectors[0][0] + r[1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
-        r_[1] = (r[0] * global_data.incar.real_lattice_vectors[0][1] + r[1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
-        # Logger.info(f"Generating hoppings - r = ({r[0]}, {r[1]})")
+    def gen_hopping(self, r: list=[0, 0, 0]):
+        kdim = global_data.incar.kdim
 
-        shape = [len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]), len(global_data.incar.band_window), global_data.incar.band_calc_num]
-        hopping = np.zeros((shape[3], shape[3]), dtype=complex)
+        a0 = global_data.incar.lattice_const
+        avec = np.asarray(global_data.incar.real_lattice_vectors)
+        D = avec.shape[1]
+        r_use  = (list(r) + [0, 0, 0])[:kdim]
+        r_cart = np.zeros(D, dtype=float)
+        for a in range(kdim):
+            r_cart += r_use[a] * avec[a, :]
+        r_cart *= a0
 
+        B = global_data.incar.band_calc_num
+
+        hopping = np.zeros((B, B), dtype=complex)
+
+        sign = -1 if str(global_data.incar.dataset_type).lower() == 'comsol' else 1
         if global_data.incar.disable_orth:
             # Logger.info("Disable orthogonalization as requested")
             T = global_data.state_collection.get_transform(True)
         else:
             T = global_data.state_collection.get_transform()
 
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                mU = T[i][j] @ global_data.state_initializer.matV[i][j] @ global_data.gradient.U[i][j]
-                if global_data.incar.dataset_type.lower() == 'comsol':
-                    sign = -1
-                kx, ky = WannierTools.get_kx_ky([i, j])
-                hopping += np.conj(mU).T @ np.diag(global_data.state_collection.E[i][j]) @ mU * np.exp(1j * np.dot(-1 * sign * np.array([kx, ky]), r_))
-        hopping = hopping / shape[0] / shape[1]
+        for i, j, k in global_data.state_collection.k_indices():
+                mU = T[i][j][k] @ global_data.state_initializer.matV[i][j][k] @ global_data.gradient.U[i][j][k]
+                k_vec = WannierTools.get_kxyz([i, j, k])[:D]
+                hopping += np.conj(mU).T @ np.diag(global_data.state_collection.E[i][j][k]) @ mU * np.exp(1j * (-sign) * np.dot(k_vec, r_cart))
+        hopping = hopping / global_data.state_collection.get_k_num()
         return hopping
 
     def save_hoppings(self, filename: str):
@@ -58,52 +63,74 @@ class TBAModal:
 
     @timer("Generate High Symmetry Point Band Structure - ")
     def gen_hs_bands(self):
+        kdim = global_data.incar.kdim
         if global_data.incar.band_figure.lower() == 'false':
             return
         H0 = self.gen_hopping()
         
         high_sym_points = []
-        k_list = np.array(global_data.incar.k_path[0]['point'])
+        k_list = [np.array(global_data.incar.k_path[0]['point'])[:kdim]]
         total = 0
         for i in range(len(global_data.incar.k_path)):
             high_sym_points.append([global_data.incar.k_path[i]['name'], total])
-            total += global_data.incar.k_path[i]['num']
+            num = global_data.incar.k_path[i]['num']
 
-            start = global_data.incar.k_path[i]['point']
-            stop = global_data.incar.k_path[(i + 1) % len(global_data.incar.k_path)]['point']
-            kx_list = np.linspace(start[0], stop[0], global_data.incar.k_path[i]['num'] + 1)[1:]
-            ky_list = np.linspace(start[1], stop[1], global_data.incar.k_path[i]['num'] + 1)[1:]
-            k_list = np.vstack((k_list, (np.vstack((kx_list, ky_list))).T))
+            start = np.asarray(global_data.incar.k_path[i]['point'])[:kdim]
+            stop =  np.asarray(global_data.incar.k_path[(i + 1) % len(global_data.incar.k_path)]['point'])[:kdim]
+
+            if num > 0:
+                seg = np.stack([np.linspace(start[a], stop[a], num + 1)[1:] for a in range(kdim)], axis=1)
+                k_list.append(seg)
+
+            total += num
         high_sym_points.append([global_data.incar.k_path[0]['name'], total])
+        k_list = np.vstack(k_list)
         K = np.arange(0, total + 1)
 
-        if global_data.incar.neighbor == []:
-            global_data.incar.neighbor = self.R_half_rect(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]))
+        if global_data.incar.neighbor is None or len(global_data.incar.neighbor) == 0:
+            global_data.incar.neighbor = self.R_half_rect(global_data.state_collection.k_shape)
 
         self.hoppings = []
         for p in global_data.incar.neighbor:
             self.hoppings.append(self.gen_hopping(p))
         
-        E = []
-        for k_ in k_list:
-            Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-            Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-            kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
-            ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
-            k = [kx, ky]
-            for i in range(len(global_data.incar.neighbor)):
-                r_ = [0, 0]
-                r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const)
-                r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
-                if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
-                    Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                    continue
-                Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-            Hi = Hi + np.conj(Hi).T
-            H = H0 + Hi + Hq
-            D, V = np.linalg.eig(H)
-            E.append(np.sort(np.real(D)))
-        E = np.array(E)
+        a0 = float(global_data.incar.lattice_const)
+        B = global_data.incar.band_calc_num
+        avec = np.asarray(global_data.incar.real_lattice_vectors)
+        G = np.asarray(global_data.incar.reciprocal_lattice_vectors, dtype=float)
+        D = avec.shape[1]
+
+        neigh = np.asarray(global_data.incar.neighbor, int)
+        hops = np.asarray(self.hoppings, np.complex128)
+        delta_R = (neigh[:, :D] @ avec) * a0
+        nyq_mask = np.array([self.is_nyquist(R, global_data.state_collection.k_shape) for R in neigh], dtype=bool)
+
+        H0 = np.asarray(self.gen_hopping([0, 0, 0]), np.complex128)
+
+        def kfrac_to_kcart(kfrac: np.ndarray) -> np.ndarray:
+            return (kfrac @ G) * (2.0 * np.pi / a0)
+
+        def H_of_k_batch(k_cart: np.ndarray) -> np.ndarray:
+            if neigh.size == 0:
+                return np.broadcast_to(H0, (k_cart.shape[0], B, B)).copy()
+
+            phase = np.exp(1j * (k_cart @ delta_R.T))
+            if np.any(~nyq_mask):
+                Hi = np.einsum('mn,nab->mab', phase[:, ~nyq_mask], hops[~nyq_mask])
+            else:
+                Hi = np.zeros((k_cart.shape[0], B, B), dtype=np.complex128)
+            if np.any(nyq_mask):
+                Hq = np.einsum('mn,nab->mab', phase[:,  nyq_mask], hops[ nyq_mask])
+            else:
+                Hq = 0.0
+
+            return H0 + Hi + np.conjugate(np.swapaxes(Hi, -2, -1)) + Hq
+        
+        k_cart = kfrac_to_kcart(k_list)
+        Hk = H_of_k_batch(k_cart)
+        E = np.linalg.eigvals(Hk)
+        E = np.sort(E)
+        
         if global_data.incar.band_file.lower() != "false":
             IO.save_band(global_data.incar.band_file, E, k_list)
 
@@ -131,118 +158,77 @@ class TBAModal:
         elif global_data.incar.DOS == 1:
             E_list = np.linspace(np.min(E), np.max(E), global_data.incar.DOS_num)
             DOS = np.zeros((1, global_data.incar.DOS_num), dtype=complex)
-            for k_ in k_list:
-                Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
-                ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
-                k = [kx, ky]
-                for i in range(len(global_data.incar.neighbor)):
-                    r_ = [0, 0]
-                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
-                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
-                    if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
-                        Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                        continue
-                    Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                Hi = Hi + np.conj(Hi).T
-                H = H0 + Hi + Hq
-                for i, e in enumerate(E_list):
-                    G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
-                    DOS[0, i] += np.sum(np.real(-1 / np.pi * np.imag(np.diag(G))))
+            for i, e in enumerate(E_list):
+                Gm = np.linalg.inv(Hk - (e - 1j * global_data.incar.DOS_eps) * np.eye(B, dtype=np.complex128))
+                DOS[0, i] += np.real(-1 / np.pi * np.imag(np.diagonal(Gm, axis1=-2, axis2=-1))).sum()
             self.plot_hs_band_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure, dos_title='PDOS')
             Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
         elif global_data.incar.DOS == 2:
             E_list = np.linspace(np.min(E), np.max(E), global_data.incar.DOS_num)
             DOS = np.zeros((global_data.incar.band_calc_num, global_data.incar.DOS_num), dtype=complex)
-            for k_ in k_list:
-                Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
-                ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
-                k = [kx, ky]
-                for i in range(len(global_data.incar.neighbor)):
-                    r_ = [0, 0]
-                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0] * global_data.incar.lattice_const)
-                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] * global_data.incar.lattice_const + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1] * global_data.incar.lattice_const)
-                    if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
-                        Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                        continue
-                    Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                Hi = Hi + np.conj(Hi).T
-                H = H0 + Hi + Hq
-                for i, e in enumerate(E_list):
-                    G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
-                    DOS[:, i] += np.real(-1 / np.pi * np.imag(np.diag(G)))
+            for i, e in enumerate(E_list):
+                Gm = np.linalg.inv(Hk - (e - 1j * global_data.incar.DOS_eps) * np.eye(B, dtype=np.complex128))
+                DOS[:, i] += np.real(-1 / np.pi * np.imag(np.diagonal(Gm, axis1=-2, axis2=-1))).sum(axis=0)
             self.plot_hs_band_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure, dos_title='PDOS')
             Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
         elif global_data.incar.DOS == 3:
-            E_list = np.linspace(np.min(E), np.max(E), global_data.incar.DOS_num)
+            mesh = np.array(global_data.incar.DOS_Brillouin_mesh, int)[:kdim]
+            k0_cart = WannierTools.get_kxyz([0, 0, 0])[:D]
+            axes = [np.arange(m, dtype=float)/m for m in mesh]
+            grid = np.stack(np.meshgrid(*axes, indexing='ij'), axis=-1).reshape(-1, kdim)
+            k_cart_grid = k0_cart + (grid @ G) * (2 * np.pi / a0)
+            
+            Hk_grid = H_of_k_batch(k_cart_grid)
             DOS = np.zeros((1, global_data.incar.DOS_num), dtype=complex)
-            for k_ in k_list:
-                Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                kx = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
-                ky = k_[0] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + k_[1] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
-                k = [kx, ky]
-                for i in range(len(global_data.incar.neighbor)):
-                    r_ = [0, 0]
-                    r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
-                    r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
-                    if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
-                        Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                        continue
-                    Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                Hi = Hi + np.conj(Hi).T
-                H = H0 + Hi + Hq
-            for i in range(global_data.incar.DOS_Brillouin_mesh[0]):
-                for j in range(global_data.incar.DOS_Brillouin_mesh[1]):
-                    Hi = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                    Hq = np.zeros((global_data.incar.band_calc_num, global_data.incar.band_calc_num), dtype=complex)
-                    k0 = WannierTools.get_kx_ky([0, 0])
-                    kx = k0[0] + i * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[0] + j * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[1]
-                    ky = k0[1] + i * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[0] + j * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const / global_data.incar.DOS_Brillouin_mesh[1]
-                    k = [kx, ky]
-                    for i in range(len(global_data.incar.neighbor)):
-                        r_ = [0, 0]
-                        r_[0] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][0] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][0]) * global_data.incar.lattice_const
-                        r_[1] = (global_data.incar.neighbor[i][0] * global_data.incar.real_lattice_vectors[0][1] + global_data.incar.neighbor[i][1] * global_data.incar.real_lattice_vectors[1][1]) * global_data.incar.lattice_const
-                        if self.is_nyquist(global_data.incar.neighbor[i][0], global_data.incar.neighbor[i][1], len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])):
-                            Hq = self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                            continue
-                        Hi += self.hoppings[i] * np.exp(1j * np.dot(k, r_))
-                    Hi = Hi + np.conj(Hi).T
-                    H = H0 + Hi + Hq
-                    for i, e in enumerate(E_list):
-                        G = np.linalg.inv(H - (e - 1j * global_data.incar.DOS_eps) * np.eye(H.shape[0], H.shape[1]))
-                        DOS[0, i] += np.sum(np.real(-1 / np.pi * np.imag(np.diag(G))))
+            E_list = np.linspace(np.min(E), np.max(E), global_data.incar.DOS_num)
+            for i, e in enumerate(E_list):
+                Gm = np.linalg.inv(Hk_grid - (e - 1j * global_data.incar.DOS_eps) * np.eye(B, dtype=np.complex128))
+                diagG = np.diagonal(Gm, axis1=-2, axis2=-1)
+                DOS[0, i] = (-1/np.pi) * np.imag(diagG).sum()
             self.plot_hs_band_dos(K, E, high_sym_points, E_list, DOS, save_path=global_data.incar.band_figure)
             Logger.info(f"figure successfully saved to {global_data.incar.band_figure}")
     
     @staticmethod
-    def is_nyquist(Rx, Ry, Nx, Ny):
-        return (Nx % 2 == 0 and (2*Rx) % Nx == 0) and (Ny % 2 == 0 and (2*Ry) % Ny == 0)
+    def is_nyquist(R, kshape) -> bool:
+        R = list(map(int, R))
+        dims = len(kshape)
+        all_zero = True
+        for a in range(dims):
+            N = int(kshape[a])
+            ra = R[a] % N
+            if ra != 0:
+                all_zero = False
+            if N % 2 == 0:
+                if (2 * ra) % N != 0:
+                    return False
+            else:
+                if ra != 0:
+                    return False
+        return not all_zero
 
     @staticmethod
-    def R_half_rect(Nx: int, Ny: int) -> np.ndarray:
-        x_m = Nx // 2
-        y_m = Ny // 2
-        y_min = -y_m + (1 if Ny % 2 == 0 else 0)
-        R = []
-        Rmax = max(x_m, y_m)
+    def R_half_rect(kshape) -> np.ndarray:
+        dims = len(kshape)
+        ranges = []
+        for N in kshape:
+            N = int(N)
+            half = N // 2
+            lo = -half + (1 if N % 2 == 0 else 0)
+            hi = half
+            ranges.append(range(lo, hi + 1))
 
-        for r in range(1, Rmax + 1):
-            if r <= y_m:
-                xmax = min(r, x_m)
-                for x in range(0, xmax + 1):
-                    if not (x == 0 and r == 0):
-                        R.append((x, r))
-            if r <= x_m:
-                y_top = min(r - 1, y_m)
-                for y in range(y_top, y_min - 1, -1):
-                    if not (r == 0 and y == 0):
-                        R.append((r, y))
-        return np.array(R, dtype=int)
+        R = []
+        for coords in product(*ranges):
+            if all(c == 0 for c in coords):
+                continue
+            keep = False
+            for c in coords:
+                if c != 0:
+                    keep = (c > 0)
+                    break
+            if keep:
+                R.append(coords[:3] if dims >= 3 else (coords + (0, 0))[:3])
+        return np.array(R, int)
 
 
     @staticmethod
@@ -301,31 +287,60 @@ class TBAModal:
 
     @timer("Generate Band Structure - ")
     def gen_band(self):
-        n1 = global_data.incar.k_num[0]
-        n2 = global_data.incar.k_num[1]
-        k1_grid = np.linspace(-0.5, 0.5, n1, endpoint=False)
-        k2_grid = np.linspace(-0.5, 0.5, n2, endpoint=False)
-        K1, K2 = np.meshgrid(k1_grid, k2_grid, indexing="ij")
-        kvecs = (K1[..., None] * global_data.incar.reciprocal_lattice_vectors[0] + K2[..., None] * global_data.incar.reciprocal_lattice_vectors[1]) * 2 * np.pi / global_data.incar.lattice_const
+        kdim = global_data.incar.kdim
+        a0 = float(global_data.incar.lattice_const)
+        B = global_data.incar.band_calc_num
 
+        k_num = np.array(global_data.incar.k_num, int)[:kdim]
+
+        axes = [np.linspace(-0.5, 0.5, n, endpoint=False) for n in k_num]
+        Kgrids = np.meshgrid(*axes, indexing="ij")
+        kfrac = np.stack(Kgrids, axis=-1)
+        Nkshape = kfrac.shape[:-1]
+        Nk_tot = int(np.prod(Nkshape))
+        
         if self.hoppings is None:
             self.hoppings = []
             for p in global_data.incar.neighbor:
                 self.hoppings.append(self.gen_hopping(p))
 
-        neighbor = np.asarray(global_data.incar.neighbor)
-        real_lattice = np.asarray(global_data.incar.real_lattice_vectors)
-        delta_R = neighbor @ real_lattice * global_data.incar.lattice_const
+        neigh = np.asarray(global_data.incar.neighbor, int)
+        G = np.asarray(global_data.incar.reciprocal_lattice_vectors, float)[:kdim, :]
+        avec = np.asarray(global_data.incar.real_lattice_vectors, float)[:kdim, :]
+        D = G.shape[1]
 
-        hoppings = np.asarray(self.hoppings)
+        hops = np.asarray(self.hoppings, np.complex128)
+        delta_R  = (neigh[:, :D] @ avec) * a0
+        nyq_mask = np.array([self.is_nyquist(R, global_data.state_collection.k_shape) for R in neigh], bool)
 
-        phase = np.exp(1j * np.einsum('...d,nd->...n', kvecs, delta_R))
-        Hi = np.einsum('...n,nab->...ab', phase, hoppings)
-        H0 = np.asarray(self.gen_hopping())
-        Hk = H0 + Hi + np.conjugate(np.swapaxes(Hi, -2, -1))
+        H0 = np.asarray(self.gen_hopping([0, 0, 0]), np.complex128)
 
-        self.eigvals, self.eigvecs = np.linalg.eigh(Hk)
-        del Hk, Hi, H0, phase
+        def kfrac_to_kcart(kf: np.ndarray) -> np.ndarray:
+            return (kf @ G) * (2.0 * np.pi / a0)
+
+        def H_of_k_batch(k_cart: np.ndarray) -> np.ndarray:
+            M = k_cart.shape[0]
+            if neigh.size == 0:
+                return np.broadcast_to(H0, (M, B, B)).copy()
+
+            phase = np.exp(1j * (k_cart @ delta_R.T))
+            if np.any(~nyq_mask):
+                Hi = np.einsum('mn,nab->mab', phase[:, ~nyq_mask], hops[~nyq_mask])
+            else:
+                Hi = np.zeros((M, B, B), dtype=np.complex128)
+            if np.any(nyq_mask):
+                Hq = np.einsum('mn,nab->mab', phase[:,  nyq_mask], hops[ nyq_mask])
+            else:
+                Hq = 0.0
+            Hk = H0 + Hi + np.conjugate(np.swapaxes(Hi, -2, -1)) + Hq
+            return Hk
+        
+        k_cart = kfrac_to_kcart(kfrac.reshape(Nk_tot, kdim))
+        Hk = H_of_k_batch(k_cart)
+
+        eigvals, eigvecs = np.linalg.eigh(Hk)
+        self.eigvals = eigvals.reshape(*Nkshape, B)
+        self.eigvecs = eigvecs.reshape(*Nkshape, B, B)
 
         self.groups = self.group_bands(self.eigvals, delta_rel=1e-2)
         for gid, g in enumerate(self.groups):
@@ -335,7 +350,8 @@ class TBAModal:
     def group_bands(E: np.ndarray, delta_rel=1e-3, delta_abs=None):
         E = np.asarray(E)
         if E.ndim < 2:
-            raise ValueError("E must have at least 2 dims: (..., Nb)")
+            Logger.error("E must have at least 2 dims: (..., Nb)")
+            raise
 
         Nk = int(np.prod(E.shape[:-1]))
         Nb = int(E.shape[-1])
@@ -389,28 +405,25 @@ class TBAModal:
         Tlist = np.stack(self.hoppings, axis=0).astype(np.complex128)
         axes  = self._axis_names(Rlist.shape[1])
 
-
         D = Rlist.shape[1]
         Nks = [len(global_data.incar.k_points[d]) for d in range(D)]
 
-        def is_nyquist_vectorized(Rint, Nks):
-            mask = np.ones(Rint.shape[0], dtype=bool)
-            for d in range(Rint.shape[1]):
-                Nd = Nks[d]
-                if Nd % 2 != 0:
-                    mask &= False
-                else:
-                    mask &= ((2 * Rint[:, d]) % Nd == 0)
-            return mask
-
-        nyq_mask = is_nyquist_vectorized(Rint, Nks)
-        int_mask = ~nyq_mask
+        ra = np.mod(Rint, Nks)
+        cond_even = (Nks % 2 == 0)
+        even_ok = np.mod(2 * ra, Nks) == 0
+        odd_ok = ra == 0
+        per_dim_ok = np.where(cond_even, even_ok, odd_ok)
+        nyq_mask = per_dim_ok.all(axis=1) & (ra.any(axis=1))
 
         if np.any(nyq_mask):
             Tn = Tlist[nyq_mask]
             Tlist[nyq_mask] = 0.5 * (Tn + np.conjugate(Tn).transpose(0, 2, 1))
 
-        phase = np.exp(1j * 2 * np.pi * (Rlist @ np.asarray(global_data.incar.eff_k, dtype=float)))  # (NR,)
+        int_mask = ~nyq_mask
+
+        eff_k = np.asarray(global_data.incar.eff_k, dtype=float).reshape(-1)
+
+        phase = np.exp(1j * 2 * np.pi * (Rlist @ eff_k))
 
         WT  = phase[:, None, None] * Tlist
         WTd = np.conjugate(WT).transpose(0, 2, 1)
@@ -533,9 +546,9 @@ class TBAModal:
     
     @timer("Calculate Finite System Band Structure - ")
     def calc_finite(self):
-        if len(global_data.incar.neighbor) == 0:
+        if global_data.incar.neighbor is None or len(global_data.incar.neighbor) == 0:
             global_data.incar.neighbor = self.R_half_rect(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]))
-        finite = Finite(global_data.incar.finite[0], global_data.incar.finite[1], self.gen_hopping, global_data.incar.neighbor)
+        finite = Finite2D(global_data.incar.finite[0], global_data.incar.finite[1], self.gen_hopping, global_data.incar.neighbor)
         k_list = np.linspace(global_data.incar.finite_k[0], global_data.incar.finite_k[1], int(global_data.incar.finite_k[-1]), endpoint=True) * 2 * np.pi / global_data.incar.lattice_const
         k_list, E, V = finite.bands_stripe(k_list)
         fig, ax = plt.subplots()

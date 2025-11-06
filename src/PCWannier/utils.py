@@ -8,7 +8,7 @@ from scipy.spatial import cKDTree
 
 import copy
 
-from typing import List, Tuple
+from typing import List, Tuple, Iterator, Callable, Any
 
 from .IO import IO
 from .Log import Logger
@@ -126,13 +126,11 @@ class Mesh:
         if lattice_const is None:
             lattice_const=global_data.incar.lattice_const
         if n[0] < 1 or n[1] < 1:
-            err_msg = "n must be greater than 1"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
+            Logger.error("n must be greater than 1")
+            raise
         if self.vertices is None:
-            err_msg = "Mesh must be initialized"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
+            Logger.error("Mesh must be initialized")
+            raise
         
         original_vertices = self.vertices.copy()
         original_elements = self.elements.copy()
@@ -287,7 +285,7 @@ class FieldData:
 
 
 class StateCollection:
-    def __init__(self, name: str, mesh: Mesh) -> None:
+    def __init__(self, name: str, mesh: Mesh, kdim: int) -> None:
         self.name: str = name
         self.mesh: Mesh = mesh
         self.field: list = []
@@ -311,170 +309,177 @@ class StateCollection:
         self.E_idx: list = []
         self.inner_E_idx: list = []
 
-    def add_field(self, state: np.ndarray, i: int, j: int, k: int) -> None:
-        while len(self.field) <= i:
-            self.field.append([])
-        while len(self.field[i]) <= j:
-            self.field[i].append([])
-        while len(self.field[i][j]) <= k:
-            self.field[i][j].append(None)
+        self.kdim = kdim
+        self.k_shape = (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1]) if len(global_data.incar.k_points) > 1 else 1, len(global_data.incar.k_points[2]) if len(global_data.incar.k_points) > 2 else 1)
+
+    def k_indices(self) -> Iterator[Tuple[int, int, int]]:
+        Nk1, Nk2, Nk3 = self.k_shape
+        if self.kdim not in (1, 2, 3):
+            Logger.error(f"Unsupported k_dim = {self.kdim}; expected 1, 2 or 3.")
+            raise
+        shape = (Nk1, Nk2 if self.kdim >= 2 else 1, Nk3 if self.kdim >= 3 else 1)
+        yield from np.ndindex(shape)
         
-        self.field[i][j][k] = state
-
-    def __getitem__(self, index: tuple) -> np.ndarray:
-        if self.field is None:
-            err_msg = "Field data is not initialized"
-            Logger.error(err_msg)
-            raise IndexError(err_msg)
-
-        i, j, n = index
-        if not (0 <= i < len(self.mesh) and 0 <= j < len(self.mesh) and 0 <= n < len(self.field)):
-            err_msg = "Index out of range"
-            Logger.error(err_msg)
-            raise IndexError(err_msg)
-
-        return self.field[i][j][n]
-    
-    @timer("Normalize - ")
-    def normalize(self) -> None:
-        if self.field is None:
-            err_msg = "Field data is not initialized"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
-        
-        if 'N' in global_data.incar.use_cached_data:
-            Logger.info(f"using cache data - N")
-            self.normalization = IO.load_cell_matrix(global_data.incar.N_file, shape=(len(self.field[0][0]),))
-            self.normalization = np.transpose(np.array([p for p in self.normalization[:]]), (1, 2, 0))
-            self.is_normalized = True
-            for i in range(len(self.field)):
-                for j in range(len(self.field[i])):
-                    for n in range(len(self.field[i][j])):
-                        if self.normalization[i][j][n] == 0.0:
-                            raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
-                        self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
+    def n_indices(self, *idx) -> Iterator[int]:
+        i, j, k, _ = self._norm_ijkn(*(list(idx) + [0]))
+        blk = self.field[i][j][k]
+        if blk is None:
             return
-        
-        self.normalization = [[[None for _ in range(len(self.field[i][j]))] for j in range(len(self.field[i]))] for i in range(len(self.field))]
+        yield from range(len(blk))
 
-        Nv = self.mesh.vertices.shape[0]
-        eps = np.asarray(self.epsilon)
-        
-        for i in range(len(self.field)):
-            for j in range(len(self.field[i])):
-                arr = np.asarray(self.field[i][j])
-                F = (np.abs(arr)**2 * eps).T
+    def get_k_num(self) -> int:
+        Nkx, Nky, Nkz = self.k_shape
+        if self.kdim == 1:
+            return Nkx
+        elif self.kdim == 2:
+            return Nkx * Nky
+        elif self.kdim == 3:
+            return Nkx * Nky * Nkz
+        else:
+            Logger.error(f"Unsupported k_dim={self.kdim}; expected 1, 2 or 3.")
+            raise
 
-                fd = FieldData(self.name, self.mesh, F.astype(np.complex128, copy=False))
-                vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+    def gen_matrix_on_kmesh(self, factory: Callable[..., Any]) -> np.ndarray:
+        Nkx, Nky, Nkz = self.k_shape
+        arr = np.empty((Nkx, Nky, Nkz), dtype=object)
+        for idx in np.ndindex(Nkx, Nky, Nkz):
+            arr[idx] = factory(*idx)
+        return arr
+    
+    def gen_zeros_matrxi(self, dtype=complex) -> np.ndarray:
+        return np.zeros(self.k_shape, dtype=dtype)
 
-                # A = FieldData("A", self.mesh, np.conj(arr * eps).astype(np.complex128, copy=False))
-                # B = FieldData("B", self.mesh, arr.astype(np.complex128, copy=False))
+    def _norm_ijkn(self, *idx) -> tuple[int, int, int, int]:
+        L = len(idx)
+        if L < 1:
+            Logger.error(f"_norm_ijkn expects at least 1 args, got {L}")
+            raise
 
-                # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
-                if vals.ndim == 0:
-                    vals = np.asarray([vals])
-                self.normalization[i][j][:vals.shape[0]] = vals
-        
-        self.is_normalized = True
-        for i in range(len(self.field)):
-            for j in range(len(self.field[i])):
-                for n in range(len(self.field[i][j])):
-                    if self.normalization[i][j][n] == 0.0:
-                        raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
-                    self.field[i][j][n] /= np.sqrt(self.normalization[i][j][n])
-        
-        if not global_data.incar.N_file.lower == "false":
-            IO.save_to_txt(global_data.incar.N_file, np.transpose(self.normalization, (2, 0, 1)), (len(self.field[0][0])))
+        n = int(idx[-1])
+        coords = list(idx[:-1])
+
+        expect = self.kdim
+        if len(coords) < expect:
+            coords += [0] * (expect - len(coords))
+        else:
+            coords = coords[:expect]
+
+        coords += [0] * (3 - len(coords))
+        i, j, k = int(coords[0]), int(coords[1]), int(coords[2])
+
+        Nkx, Nky, Nkz = self.k_shape
+        i = i % Nkx
+        j = (j % Nky) if self.kdim >= 2 else 0
+        k = (k % Nkz) if self.kdim >= 3 else 0
+
+        return i, j, k, n
+    
+    def get(self, *idx):
+        i, j, k, n = self._norm_ijkn(*idx)
+        try:
+            return self.field[i][j][k][n]
+        except Exception as e:
+            Logger.error(f"Failed to access field[{i}][{j}][{k}][{n}]: {e}")
+            raise
+
+    def get_block(self, *kidx):
+        i, j, k, _ = self._norm_ijkn(*(kidx + (0,)))
+        blk = self.field[i][j][k]
+        if blk is None:
+            Logger.error(f"empty block at k=({i},{j},{k})")
+            raise
+
+        if isinstance(blk, (list, tuple)):
+            blk = np.vstack(blk)
+
+        return np.asarray(blk, dtype=np.complex128)
+
 
     @timer("Orthogonalize - ")
     def orthogonalize(self, tol_rel: float = 1e-6, atol_abs: float = 1e-12) -> None:
         Logger.info("Orthogonalizing states...")
         if self.field is None:
-            err_msg = "Field data is not initialized"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
-
-        Nkx, Nky = len(self.field), len(self.field[0])
+            Logger.error("Field data is not initialized")
+            raise
 
         if 'O' in global_data.incar.use_cached_data:
             Logger.info("using cache data - O")
-            self.transform = IO.load_cell_matrix(global_data.incar.O_file, shape=(Nkx, Nky))
+            self.transform = IO.load_cell_matrix(global_data.incar.O_file, self.k_shape)
             self.is_orthogonalized = True
             self.is_normalized = True
-            self.transform_ = [[None for _ in range(Nky)] for _ in range(Nkx)]
-            for i in range(Nkx):
-                for j in range(Nky):
-                    T_diag = np.diag(np.diag(self.transform[i][j]))
-                    for n in range(len(self.field[i][j])):
-                        if T_diag[n, n] == 0.0:
-                            raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
-                        self.field[i][j][n] *= T_diag[n, n]
-                    self.transform_[i][j] = np.linalg.inv(T_diag) @ self.transform[i][j]
+            self.transform_ = self.gen_matrix_on_kmesh(lambda *_: None)
+            for i, j, k in self.k_indices():
+                T_diag = np.diag(np.diag(self.transform[i][j][k]))
+                for n in range(len(self.field[i][j][k])):
+                    if T_diag[n, n] == 0.0:
+                        Logger.error(f"Normalization failed for field ({i}, {j}, {k}, {n})")
+                        raise
+                    self.field[i][j][k][n] *= T_diag[n, n]
+                self.transform_[i][j][k] = np.linalg.inv(T_diag) @ self.transform[i][j][k]
             return
         
         Nv = self.mesh.vertices.shape[0]
 
         eps = np.asarray(self.epsilon)
 
-        self.transform = [[None for _ in range(Nky)] for _ in range(Nkx)]
-        self.transform_ = [[None for _ in range(Nky)] for _ in range(Nkx)]
-        for i in range(Nkx):
-            for j in range(Nky):
+        self.transform = self.gen_matrix_on_kmesh(lambda *_: None)
+        self.transform_ = self.gen_matrix_on_kmesh(lambda *_: None)
+        for i, j, k in self.k_indices():
+            W = np.asarray(self.get_block(i, j, k))
+            Nwin = len(W)
+            Nv = self.mesh.vertices.shape[0]
+            if W.ndim == 1:
+                W = W[None, :]
+            elif W.ndim == 2 and W.shape[1] != Nv:
+                W = W.T
+            if W.shape[1] != Nv:
+                Logger.error(f"field shape {W.shape} incompatible with Nv={Nv}")
+                raise
 
-                Nwin = len(self.field[i][j])
-                Nv = self.mesh.vertices.shape[0]
-                W = np.asarray(self.field[i][j])
-                if W.ndim == 1:
-                    W = W[None, :]
-                elif W.ndim == 2 and W.shape[1] != Nv:
-                    W = W.T
-                if W.shape[1] != Nv:
-                    raise ValueError(f"field shape {W.shape} incompatible with Nv={Nv}")
+            S = np.empty((Nwin, Nwin), dtype=np.complex128)
+            for a in self.n_indices(i, j, k):
+                wa = self.get(i, j, k, a)
 
-                S = np.empty((Nwin, Nwin), dtype=np.complex128)
-                for a in range(Nwin):
-                    wa = self.field[i][j][a]
+                right = np.conj(wa) * eps
+                F = (right[:, None] * W.T).astype(np.complex128, copy=False)
+                fd = FieldData("S", self.mesh, F)
+                vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
 
-                    right = np.conj(wa) * eps
-                    F = (right[:, None] * W.T).astype(np.complex128, copy=False)
-                    fd = FieldData("S", self.mesh, F)
-                    vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
+                # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
+                # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
+                if vals.ndim == 0:
+                    vals = np.asarray([vals])
 
-                    # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
-                    # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
-                    # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
-                    if vals.ndim == 0:
-                        vals = np.asarray([vals])
+                S[a, a:] = vals[a:]
+                S[a:, a] = vals[a:].conjugate()
 
-                    S[a, a:] = vals[a:]
-                    S[a:, a] = vals[a:].conjugate()
-                    # S[a, a] = np.real(S[a, a])
+            S = 0.5*(S + S.conj().T)
+            w, V = np.linalg.eigh(S)
+            lam = w.real
+            lam_max = np.max(lam)
+            tau = max(tol_rel*lam_max, atol_abs)
+            invsqrt = 1.0/np.sqrt(np.maximum(lam, tau))
+            T_corr = V @ np.diag(invsqrt) @ V.conj().T
+            T_corr = 0.5*(T_corr + T_corr.conj().T)
+            # block orth then total orth maybe better
+            T_full = T_corr
 
-                S = 0.5*(S + S.conj().T)
-                w, V = np.linalg.eigh(S)
-                lam = w.real
-                lam_max = np.max(lam)
-                tau = max(tol_rel*lam_max, atol_abs)
-                invsqrt = 1.0/np.sqrt(np.maximum(lam, tau))
-                T_corr = V @ np.diag(invsqrt) @ V.conj().T
-                T_corr = 0.5*(T_corr + T_corr.conj().T)
-                # block orth then total orth maybe better
-                T_full = T_corr
+            T_diag = np.diag(np.diag(T_full))
 
-                T_diag = np.diag(np.diag(T_full))
-                for n in range(len(self.field[i][j])):
-                    if T_diag[n, n] == 0.0:
-                        raise ValueError(f"Normalization failed for field ({i}, {j}, {n})")
-                    self.field[i][j][n] *= T_diag[n, n]
+            for n in range(len(self.field[i][j][k])):
+                if T_diag[n, n] == 0.0:
+                    Logger.error(f"Normalization failed for field ({i}, {j}, {k}, {n})")
+                    raise
+                self.field[i][j][k][n] *= T_diag[n, n]
 
-                self.transform[i][j] = T_full
-                self.transform_[i][j] = np.linalg.inv(T_diag) @ T_full
+            self.transform[i][j][k] = T_full
+            self.transform_[i][j][k] = np.linalg.inv(T_diag) @ T_full
         self.is_orthogonalized = True
         self.is_normalized = True
 
         if not global_data.incar.O_file.lower == "false":
-            IO.save_to_txt(global_data.incar.O_file, self.transform, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+            IO.save_to_txt(global_data.incar.O_file, self.transform, self.k_shape)
 
 
     @timer("Orthogonality Check - ")
@@ -489,112 +494,109 @@ class StateCollection:
             [5] cond         = cond(S_H) = lam_max / lam_min
         """
         if self.field is None:
-            err_msg = "Field data is not initialized"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
+            Logger.error("Field data is not initialized")
+            raise
         
         Nv = self.mesh.vertices.shape[0]
 
         eps = np.asarray(self.epsilon)
-        Nkx, Nky = len(self.field), len(self.field[0])
-        report = np.zeros((Nkx, Nky, 6), dtype=np.float64)
+        Nk1, Nk2, Nk3 = self.k_shape
+        report = np.zeros((Nk1, Nk2, Nk3, 6), dtype=np.float64)
         need_orth = False
                     
-        for i in range(Nkx):
-            for j in range(Nky):
-                Nwin = len(self.field[i][j])
-                Nv = self.mesh.vertices.shape[0]
-                W = np.asarray(self.field[i][j])
-                if W.ndim == 1:
-                    W = W[None, :]
-                elif W.ndim == 2 and W.shape[1] != Nv:
-                    W = W.T
-                if W.shape[1] != Nv:
-                    raise ValueError(f"field shape {W.shape} incompatible with Nv={Nv}")
+        for i, j, k in self.k_indices():
+            W = np.asarray(self.get_block(i, j, k))
+            Nwin = len(W)
+            Nv = self.mesh.vertices.shape[0]
+            if W.ndim == 1:
+                W = W[None, :]
+            elif W.ndim == 2 and W.shape[1] != Nv:
+                W = W.T
+            if W.shape[1] != Nv:
+                Logger.error(f"field shape {W.shape} incompatible with Nv={Nv}")
+                raise
 
-                S = np.empty((Nwin, Nwin), dtype=np.complex128)
-                for a in range(Nwin):
-                    wa = self.field[i][j][a]
+            S = np.empty((Nwin, Nwin), dtype=np.complex128)
+            for a in self.n_indices(i, j, k):
+                wa = self.get(i, j, k, a)
 
-                    right = np.conj(wa) * eps
-                    F = (right[:, None] * W.T).astype(np.complex128, copy=False)
-                    fd = FieldData("S", self.mesh, F)
-                    vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
-                    if vals.ndim == 0:
-                        vals = np.asarray([vals])
-                    # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
-                    # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
-                    # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
-                    S[a, a:] = vals[a:]
-                    S[a:, a] = vals[a:].conjugate()
-                    # S[a, a] = np.real(S[a, a])
+                right = np.conj(wa) * eps
+                F = (right[:, None] * W.T).astype(np.complex128, copy=False)
+                fd = FieldData("S", self.mesh, F)
+                vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+                if vals.ndim == 0:
+                    vals = np.asarray([vals])
+                # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
+                # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
+                # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
+                S[a, a:] = vals[a:]
+                S[a:, a] = vals[a:].conjugate()
+                # S[a, a] = np.real(S[a, a])
                 
-                if self.is_orthogonalized:
-                    S = self.transform_[i][j].conj().T @ S @ self.transform_[i][j]
+            if self.is_orthogonalized:
+                S = self.transform_[i][j][k].conj().T @ S @ self.transform_[i][j][k]
 
-                herm_res = float(np.linalg.norm(S - S.conj().T, ord='fro'))
-                diag = np.real(np.diag(S))
-                diag_max_err = float(np.max(np.abs(diag - 1.0))) if Nwin > 0 else 0.0
-                offdiag = S - np.diag(np.diag(S))
-                offdiag_max = float(np.max(np.abs(offdiag))) if Nwin > 1 else 0.0
-                
-                S_H = 0.5 * (S + S.conj().T)
-                frob_res = float(np.linalg.norm(S_H - np.eye(Nwin), ord='fro'))
+            herm_res = float(np.linalg.norm(S - S.conj().T, ord='fro'))
+            diag = np.real(np.diag(S))
+            diag_max_err = float(np.max(np.abs(diag - 1.0))) if Nwin > 0 else 0.0
+            offdiag = S - np.diag(np.diag(S))
+            offdiag_max = float(np.max(np.abs(offdiag))) if Nwin > 1 else 0.0
+            
+            S_H = 0.5 * (S + S.conj().T)
+            frob_res = float(np.linalg.norm(S_H - np.eye(Nwin), ord='fro'))
 
-                evals = np.linalg.eigvalsh(S_H)
-                lam_min = float(np.min(evals))
-                lam_max = float(np.max(evals))
+            evals = np.linalg.eigvalsh(S_H)
+            lam_min = float(np.min(evals))
+            lam_max = float(np.max(evals))
 
-                lam_min_safe = max(lam_min, 1e-16)
-                cond = float(lam_max / lam_min_safe) if lam_max > 0 else np.inf
+            lam_min_safe = max(lam_min, 1e-16)
+            cond = float(lam_max / lam_min_safe) if lam_max > 0 else np.inf
 
-                report[i, j, 0] = herm_res
-                report[i, j, 1] = diag_max_err
-                report[i, j, 2] = offdiag_max
-                report[i, j, 3] = frob_res
-                report[i, j, 4] = lam_min
-                report[i, j, 5] = cond
+            report[i, j, k, 0] = herm_res
+            report[i, j, k, 1] = diag_max_err
+            report[i, j, k, 2] = offdiag_max
+            report[i, j, k, 3] = frob_res
+            report[i, j, k, 4] = lam_min
+            report[i, j, k, 5] = cond
 
-                if herm_res > 1e-8 or diag_max_err > 1e-3 or offdiag_max > 1e-3 or lam_min < -1e-6:
-                    need_orth = True
-                    Logger.warning(f"[OrthChk] k=({i},{j}): herm={herm_res:.3e}, "
-                                f"diag_max_err={diag_max_err:.3e}, offdiag_max={offdiag_max:.3e}, "
-                                f"frob={frob_res:.3e}, lam_min={lam_min:.3e}, cond={cond:.2e}")
+            if herm_res > 1e-8 or diag_max_err > 1e-3 or offdiag_max > 1e-3 or lam_min < -1e-6:
+                need_orth = True
+                Logger.warning(f"[OrthChk] k=({i},{j},{k}): herm={herm_res:.3e}, "
+                            f"diag_max_err={diag_max_err:.3e}, offdiag_max={offdiag_max:.3e}, "
+                            f"frob={frob_res:.3e}, lam_min={lam_min:.3e}, cond={cond:.2e}")
         return report, need_orth
         
     def turn_to_Bloch(self) -> None:
         if self.field is None:
-            err_msg = "Field data is not initialized"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
+            Logger.error("Field data is not initialized")
+            raise
         
         if self.is_bloch:
             Logger.info("Field data is already in Bloch form")
             return
         self.is_bloch = True
 
-        for i in range(len(self.field)):
-            for j in range(len(self.field[i])):
-                for n in range(len(self.field[i][j])):
-                    phase = self.get_phase(i, j)
-                    self.field[i][j][n] = np.conj(phase) * self.field[i][j][n]
+        for i, j, k in self.k_indices():
+            phase = self.get_phase(i, j, k)
+            for n in self.n_indices(i, j, k):
+                self.field[i][j][k][n] = np.conj(phase) * self.field[i][j][k][n]
     
     def get_transform(self, zero=False) -> np.ndarray:
         if self.is_orthogonalized and self.transform_ is not None and not zero:
             return self.transform_
         else:
-            return [[np.identity(self.transform_[i][j].shape[0], dtype=self.transform_[i][j].dtype) for j in range(len(self.field[i]))] for i in range(len(self.field))]
+            return [[[np.identity(self.transform_[i][j][k].shape[0], dtype=self.transform_[i][j][k].dtype) for k in range(len(self.field[i][j]))] for j in range(len(self.field[i]))] for i in range(len(self.field))]
     
-    def get_phase(self, i: int, j: int):
+    def get_phase(self, i: int, j: int, k: int):
         if global_data.incar.dataset_type.lower() == 'comsol':
             sign = -1
-        k = WannierTools.get_kx_ky([i, j])
-        return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
+        k_ = WannierTools.get_kxyz([i, j, k])[:global_data.incar.kdim]
+        return np.exp(1j * sign * np.dot(self.mesh.vertices, k_))
     
     def get_phase_k(self, k: np.ndarray):
         if global_data.incar.dataset_type.lower() == 'comsol':
             sign = -1
-        return np.exp(1j * sign * np.dot(self.mesh.vertices, k))
+        return np.exp(1j * sign * np.dot(self.mesh.vertices, k[:global_data.incar.kdim]))
     
     @staticmethod
     def get_phase_k_r(k: np.ndarray, r: np.ndarray):
@@ -602,11 +604,11 @@ class StateCollection:
             sign = -1
         return np.exp(1j * sign * np.dot(r, k))
     
-    def get_extention_phase(self, i: int, j: int):
+    def get_extention_phase(self, i: int, j: int, k: int):
         if global_data.incar.dataset_type.lower() == 'comsol':
             sign = -1
-        k = WannierTools.get_kx_ky([i, j])
-        return np.exp(1j * sign * np.dot(self.extention_mesh.vertices, k))
+        k = WannierTools.get_kxyz([i, j, k])
+        return np.exp(1j * sign * np.dot(self.extention_mesh.vertices, k[:global_data.incar.kdim]))
     
     @timer("Extention - ")
     def extention(self, n: List) -> None:
@@ -615,34 +617,35 @@ class StateCollection:
         if self.epsilon is not None:
             self.get_extention_epsilon()
     
-    def get_extention_field(self, i: int, j: int, n: int) -> List:
+    def get_extention_field(self, *idx) -> List:
+        i, j, k, n = self._norm_ijkn(*idx)
         if self.extention_mesh is None:
-            err_msg = "The field has not been extended"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
-        return np.array([self.field[i][j][n][k] / np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1]) for k in self.space_to_original_mapping])
+            Logger.error("The field has not been extended")
+            raise
+        return np.array([self.field[i][j][k][n][p] / np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1]) for p in self.space_to_original_mapping])
     
     def get_extention_epsilon(self) -> List:
         if self.extention_mesh is None:
-            err_msg = "The field has not been extended"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
+            Logger.error("The field has not been extended")
+            raise
         if self.extention_epsilon is None:
-            self.extention_epsilon = np.array([self.epsilon[k] for k in self.space_to_original_mapping])
+            self.extention_epsilon = np.array([self.epsilon[p] for p in self.space_to_original_mapping])
         return self.extention_epsilon
 
         
     def get_zero_field(self):
-        return [0.0 + 0.0j] * self.mesh.vertices.shape[0]
+        return np.zeros(global_data.incar.kdim) * self.mesh.vertices.shape[0]
     
     def get_zero_extension_field(self):
-        return [0.0 + 0.0j] * self.extention_mesh.vertices.shape[0]
+        return np.zeros(global_data.incar.kdim) * self.extention_mesh.vertices.shape[0]
     
-    def plot_field(self, i: int, j: int, n: int) -> None:
+    def plot_field(self, *idx) -> None:
+        i, j, k, n = self._norm_ijkn(*idx)
+
         fig, ax = plt.subplots()
         triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
 
-        plt.tricontourf(triang, np.real(self.field[i][j][n]), levels=255, cmap='jet')
+        plt.tricontourf(triang, np.real(self.field[i][j][k][n]), levels=255, cmap='jet')
         plt.colorbar(label='Real Part')
         ax.set_aspect('equal')
         ax.set_xlabel('X')
@@ -655,11 +658,13 @@ class StateCollection:
         ax.set_ylim(min_y - margin, max_y + margin)
         plt.show()
     
-    def plot_extention_field(self, i: int, j: int, n: int) -> None:
+    def plot_extention_field(self, *idx) -> None:
+        i, j, k, n = self._norm_ijkn(*idx)
+
         fig, ax = plt.subplots()
         triang = Triangulation(self.extention_mesh.vertices[:, 0], self.extention_mesh.vertices[:, 1], self.extention_mesh.elements)
 
-        field = self.get_extention_field(i, j, n)
+        field = self.get_extention_field(i, j, k, n)
         plt.tricontourf(triang, np.real(field), levels=255, cmap='jet')
         plt.colorbar(label='Real Part')
         ax.set_aspect('equal')
@@ -727,8 +732,9 @@ class WannierTools:
         self.init = False
 
     def preprocess(self) -> None:
-        if np.array_equal(global_data.incar.reciprocal_lattice_vectors, np.array([[0, 0], [0, 0]])):
-            v = np.linalg.inv(global_data.incar.real_lattice_vectors) @ np.eye(len(global_data.incar.real_lattice_vectors))
+        global_data.incar.kdim = len(global_data.incar.real_lattice_vectors)
+        if np.allclose(np.asarray(global_data.incar.reciprocal_lattice_vectors), np.zeros((global_data.incar.kdim, global_data.incar.kdim))):
+            v = np.linalg.inv(global_data.incar.real_lattice_vectors) @ np.eye(global_data.incar.kdim)
             Logger.info(f"reciprocal_lattice_vectors will be set to: {v.T}")
             global_data.incar.reciprocal_lattice_vectors = v.T
         
@@ -739,16 +745,18 @@ class WannierTools:
 
             global_data.incar.b_vectors = []
             for i in range(len(global_data.incar.composition_of_b)):
-                global_data.incar.b_vectors.append((global_data.incar.composition_of_b[i][0] * global_data.incar.reciprocal_lattice_vectors[0] / len(global_data.incar.k_points[0]) * 2 * np.pi / global_data.incar.lattice_const
-                                            + global_data.incar.composition_of_b[i][1] * global_data.incar.reciprocal_lattice_vectors[1] / len(global_data.incar.k_points[1]) * 2 * np.pi / global_data.incar.lattice_const).tolist())
+                vec = np.zeros_like(global_data.incar.reciprocal_lattice_vectors[0], dtype=float)
+                for ax in range(global_data.incar.kdim):
+                    vec += global_data.incar.composition_of_b[i][ax] * global_data.incar.reciprocal_lattice_vectors[ax] / len(global_data.incar.k_points[ax]) * 2 * np.pi / global_data.incar.lattice_const
+                global_data.incar.b_vectors.append(vec.tolist())
                 
             global_data.incar.b_vectors = np.array(global_data.incar.b_vectors) * global_data.incar.lattice_const
-            mat_a = np.eye(2).reshape(-1, 1)
-            mat_b = np.zeros((2 ** 2, len(global_data.incar.composition_of_b)))
-            for i in range(2):
-                for j in range(2):
+            mat_a = np.eye(global_data.incar.kdim).reshape(-1, 1)
+            mat_b = np.zeros((global_data.incar.kdim ** global_data.incar.kdim, len(global_data.incar.composition_of_b)))
+            for i in range(global_data.incar.kdim):
+                for j in range(global_data.incar.kdim):
                     for k in range(len(global_data.incar.composition_of_b)):
-                        mat_b[i * 2 + j][k] = global_data.incar.b_vectors[k][i] * global_data.incar.b_vectors[k][j]
+                        mat_b[i * global_data.incar.kdim + j][k] = global_data.incar.b_vectors[k][i] * global_data.incar.b_vectors[k][j]
             
             global_data.incar.wb = (np.linalg.pinv(mat_b) @ mat_a).flatten()
         
@@ -762,25 +770,65 @@ class WannierTools:
         global_data.incar = incar_data
 
     @staticmethod
-    def neighbor_reciprocal_lattice_vectors(k: list, direction: int) -> np.ndarray:
-        n_k1_idx = int(np.mod(k[0] + global_data.incar.composition_of_b[direction][0], len(global_data.incar.k_points[0])))
-        n_k2_idx = int(np.mod(k[1] + global_data.incar.composition_of_b[direction][1], len(global_data.incar.k_points[1])))
-        k_ = None
-        if n_k1_idx != k[0] + global_data.incar.composition_of_b[direction][0] or n_k2_idx != k[1] + global_data.incar.composition_of_b[direction][1]:
-            k_ = [0, 0]
-            k_[0] = int(k[0] + global_data.incar.composition_of_b[direction][0])
-            k_[1] = int(k[1] + global_data.incar.composition_of_b[direction][1])
-        return n_k1_idx, n_k2_idx, k_
+    def neighbor_reciprocal_lattice_vectors(k: list, direction: int):
+        gd = global_data.incar
+        axes = int(gd.kdim)
+
+        idxs = (list(k) + [0] * max(0, axes - len(k)))[:axes]
+        comp = (list(gd.composition_of_b[direction]) + [0] * max(0, axes - len(gd.composition_of_b[direction])))[:axes]
+
+        wrapped = [0, 0, 0]
+        raw_list = []
+        crossed = False
+
+        for ax in range(axes):
+            N = len(gd.k_points[ax])
+            raw = idxs[ax] + comp[ax]
+            w = int(np.mod(raw, N))
+            wrapped[ax] = w
+            raw_list.append(int(raw))
+            if w != raw:
+                crossed = True
+
+        k1 = wrapped[0]
+        k2 = wrapped[1] if axes >= 2 else 0
+        k3 = wrapped[2] if axes >= 3 else 0
+
+        k_raw3 = (raw_list + [0, 0, 0])[:3]
+        k_ = k_raw3 if crossed else None
+
+        return (k1, k2, k3), k_
+
     
     @staticmethod
-    def get_kx_ky(k: list) -> np.ndarray:
-        if k[0] >= global_data.incar.k_points[0].size or k[1] >= global_data.incar.k_points[1].size or k[0] < 0 or k[1] < 0:
-            kx = (((global_data.incar.k_points[0][1] - global_data.incar.k_points[0][0]) * k[0] + global_data.incar.k_points[0][0]) * global_data.incar.reciprocal_lattice_vectors[0][0] + ((global_data.incar.k_points[1][1] - global_data.incar.k_points[1][0]) * k[1] + global_data.incar.k_points[1][0]) * global_data.incar.reciprocal_lattice_vectors[1][0]) * 2 * np.pi / global_data.incar.lattice_const
-            ky = (((global_data.incar.k_points[0][1] - global_data.incar.k_points[0][0]) * k[0] + global_data.incar.k_points[0][0]) * global_data.incar.reciprocal_lattice_vectors[0][1] + ((global_data.incar.k_points[1][1] - global_data.incar.k_points[1][0]) * k[1] + global_data.incar.k_points[1][0]) * global_data.incar.reciprocal_lattice_vectors[1][1]) * 2 * np.pi / global_data.incar.lattice_const
-            return np.array([kx, ky])
-        kx = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][0] * 2 * np.pi / global_data.incar.lattice_const + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][0] * 2 * np.pi / global_data.incar.lattice_const
-        ky = global_data.incar.k_points[0][k[0]] * global_data.incar.reciprocal_lattice_vectors[0][1] * 2 * np.pi / global_data.incar.lattice_const + global_data.incar.k_points[1][k[1]] * global_data.incar.reciprocal_lattice_vectors[1][1] * 2 * np.pi / global_data.incar.lattice_const
-        return np.array([kx, ky])
+    def get_kxyz(k: list) -> np.ndarray:
+        kps = global_data.incar.k_points
+        G = np.asarray(global_data.incar.reciprocal_lattice_vectors)
+
+        axes = len(kps)
+        idxs = list(k) + [0] * max(0, axes - len(k))
+        idxs = idxs[:axes]
+
+        # !!!!!!!!!!!! need to check !!!!!!!!!!!!
+        if G.shape[0] < axes:
+            G = np.pad(G, ((0, axes - G.shape[0]), (0, 0)), mode='constant')
+        if G.shape[1] < 3:
+            G = np.pad(G, ((0, 0), (0, 3 - G.shape[1])), mode='constant')
+
+        vec = np.zeros(3, dtype=float)
+        for ax in range(axes):
+            arr = np.asarray(kps[ax], dtype=float)
+            if arr.size == 0:
+                Logger.error(f"empty k_points[{ax}]")
+                raise
+            if 0 <= idxs[ax] < arr.size:
+                kval = arr[idxs[ax]]
+            else:
+                step = (arr[1] - arr[0]) if arr.size >= 2 else 0.0
+                kval = arr[0] + step * idxs[ax]
+            vec += kval * G[ax, :3]
+
+        return (2.0 * np.pi / global_data.incar.lattice_const) * vec
     
     @staticmethod
     def integrate_over_triangle(vertices: np.ndarray, data_on_triangle: np.ndarray) -> complex:
@@ -890,7 +938,8 @@ class WannierTools:
             elif arr.ndim == 2:
                 out = arr if arr.shape[0] == Nv else arr.T
             else:
-                raise ValueError("field must be (Nv,) or (Nv,K)")
+                Logger.error(f"field has invalid shape {arr.shape}")
+                raise
             return out.astype(np.complex128, copy=False)
 
         A = _to_NV_K(data.field)
@@ -903,7 +952,8 @@ class WannierTools:
         else:
             B = _to_NV_K(other.field)
             if A.shape[1] != B.shape[1]:
-                raise ValueError("The number of columns in A and B must be the same")
+                Logger.error("The number of columns in A and B must be the same")
+                raise
             kernel = WannierTools._integrate_prod_numba
             if not hasattr(kernel, "_warmed"):
                 _ = kernel(A[:, :1], B[:, :1], elems, w, hermitian)
@@ -930,12 +980,3 @@ class WannierTools:
             out = out.real
 
         return out[0] if (A.shape[1] == 1) else out
-
-
-if __name__ == "__main__":
-    from PCWannier import IncarParser
-    parser_data = IncarParser.IncarParser("examples/incar")
-    wtools = WannierTools()
-    wtools.set_incar(parser_data.parse_file())
-    wtools.preprocess()
-    Logger.info(global_data.incar)

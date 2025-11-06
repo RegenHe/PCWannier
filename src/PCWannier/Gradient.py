@@ -20,25 +20,22 @@ class Gradient:
         k2_sz = len(global_data.incar.k_points[1])
         B = global_data.incar.band_calc_num
 
-        self.U = [[np.eye(B, B, dtype=complex) for _ in range(k2_sz)]for _ in range(k1_sz)]
-        self.G = [[np.zeros((B, B), dtype=complex) for _ in range(k2_sz)]for _ in range(k1_sz)]
-        self.dW = [[np.zeros((B, B), dtype=complex) for _ in range(k2_sz)]for _ in range(k1_sz)]
+        self.U = global_data.state_collection.gen_matrix_on_kmesh(lambda *_: np.eye(B, dtype=complex))
+        self.G = global_data.state_collection.gen_matrix_on_kmesh(lambda *_: np.zeros((B, B), dtype=complex))
+        self.dW = global_data.state_collection.gen_matrix_on_kmesh(lambda *_: np.zeros((B, B), dtype=complex))
 
-        self.omega = [1e6, 1e6, 1e6]
+        self.omega = [np.nan, np.nan, np.nan]
 
         self.epsilon = 0.01
 
-        self.rn = np.zeros((2, B), dtype=complex)
+        self.rn = np.zeros((global_data.incar.kdim, B), dtype=complex)
 
     @timer("Gradient iter - ")
     def iter(self, err_diff: float, max_iter: int, epsilon: float=0.01):
         Logger.info('Starting Gradient iteration')
-        k1_sz = len(global_data.incar.k_points[0])
-        k2_sz = len(global_data.incar.k_points[1])
-
         if 'U' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - U")
-            self.U = IO.load_cell_matrix(global_data.incar.U_file, shape=(k1_sz, k2_sz))
+            self.U = IO.load_cell_matrix(global_data.incar.U_file, global_data.state_collection.k_shape)
         
         lastOmega = +np.inf
         if max_iter == 0:
@@ -73,95 +70,85 @@ class Gradient:
 
 
     def calc(self, isUpdate=True):
-        k1_sz = len(global_data.incar.k_points[0])
-        k2_sz = len(global_data.incar.k_points[1])
         B = global_data.incar.band_calc_num
         b_sz = len(global_data.incar.composition_of_b)
         self.generateRn()
-        for i in range(k1_sz):
-            for j in range(k2_sz):
-                self.G[i][j] = np.zeros((B, B), dtype=complex)
-                for b in range(b_sz):
-                    mM = global_data.m_set.get(i, j, b)
+        for i, j, k in global_data.state_collection.k_indices():
+            self.G[i][j][k] = np.zeros((B, B), dtype=complex)
+            for b in range(b_sz):
+                mM = global_data.m_set.get(i, j, k, b)
 
-                    mR = np.zeros((B, B), dtype=complex)
-                    mT = np.zeros((B, B), dtype=complex)
-                    for m in range(B):
-                        for n in range(B):
-                            mR[m, n] = mM[m, n] * np.conj(mM[n, n])
-                            mT[m, n] = mM[m, n] / mM[n, n] * (np.imag(np.log(mM[n, n])) + np.dot(global_data.incar.b_vectors[b, :], self.rn[:, n]))
-                    self.G[i][j] += global_data.incar.wb[b] * (self.operator_A(mR) - self.operator_S(mT))
-                self.G[i][j] = 4 * self.G[i][j]
-                self.dW[i][j] = self.epsilon * self.G[i][j]
-                if isUpdate:
-                    if not np.isclose(np.abs(np.trace(self.U[i][j] @ self.U[i][j].conj().T)), B, rtol=1e-8):
-                        Logger.warning(f"||U[{i}][{j}]|| = {np.abs(np.trace(self.U[i][j] @ self.U[i][j].conj().T))}, updating it")
-                        u, s, vh = np.linalg.svd(self.U[i][j])
-                        self.U[i][j] = u @ vh
-                    self.U[i][j] = self.U[i][j] @ scipy.linalg.expm(self.dW[i][j])
+                mR = np.zeros((B, B), dtype=complex)
+                mT = np.zeros((B, B), dtype=complex)
+                for m in range(B):
+                    for n in range(B):
+                        mR[m, n] = mM[m, n] * np.conj(mM[n, n])
+                        mT[m, n] = mM[m, n] / mM[n, n] * (np.imag(np.log(mM[n, n])) + np.dot(global_data.incar.b_vectors[b, :], self.rn[:, n]))
+                self.G[i][j][k] += global_data.incar.wb[b] * (self.operator_A(mR) - self.operator_S(mT))
+            self.G[i][j][k] = 4 * self.G[i][j][k]
+            self.dW[i][j][k] = self.epsilon * self.G[i][j][k]
+            if isUpdate:
+                if not np.isclose(np.abs(np.trace(self.U[i][j][k] @ self.U[i][j][k].conj().T)), B, rtol=1e-8):
+                    Logger.warning(f"||U[{i}][{j}][{k}]|| = {np.abs(np.trace(self.U[i][j][k] @ self.U[i][j][k].conj().T))}, updating it")
+                    u, s, vh = np.linalg.svd(self.U[i][j][k])
+                    self.U[i][j][k] = u @ vh
+                self.U[i][j][k] = self.U[i][j][k] @ scipy.linalg.expm(self.dW[i][j][k])
 
 
     def generateRn(self):
-        k1_sz = len(global_data.incar.k_points[0])
-        k2_sz = len(global_data.incar.k_points[1])
         B = global_data.incar.band_calc_num
         b_sz = len(global_data.incar.composition_of_b)
 
-        self.rn = np.zeros((2, B), dtype=complex)
-        for i in range(k1_sz):
-            for j in range(k2_sz):
-                for b in range(b_sz):
-                    mM = global_data.m_set.get(i, j, b)
-                    for n in range(B):
-                        self.rn[:, n] -= global_data.incar.wb[b] * global_data.incar.b_vectors[b, :] * np.imag(np.log(mM[n, n]))
-        self.rn = self.rn / (k1_sz * k2_sz)
+        self.rn = np.zeros((global_data.incar.kdim, B), dtype=complex)
+        for i, j, k in global_data.state_collection.k_indices():
+            for b in range(b_sz):
+                mM = global_data.m_set.get(i, j, k, b)
+                for n in range(B):
+                    self.rn[:, n] -= global_data.incar.wb[b] * global_data.incar.b_vectors[b, :] * np.imag(np.log(mM[n, n]))
+        self.rn = self.rn / global_data.state_collection.get_k_num()
         return self.rn
 
     def update(self):
-        k1_sz = len(global_data.incar.k_points[0])
-        k2_sz = len(global_data.incar.k_points[1])
         B = global_data.incar.band_calc_num
         b_sz = len(global_data.incar.composition_of_b)
 
         self.generateRn()
         self.omega = [0, 0, 0]
 
-        for i in range(k1_sz):
-            for j in range(k2_sz):
-                for b in range(b_sz):
-                    mM = global_data.m_set.get(i, j, b)
+        for i, j, k in global_data.state_collection.k_indices():
+            for b in range(b_sz):
+                mM = global_data.m_set.get(i, j, k, b)
 
-                    temp_I = B
-                    temp_OD = 0
-                    temp_D = 0
-                    for m in range(B):
-                        for n in range(B):
-                            temp_I = temp_I - np.abs(mM[m, n]) ** 2
-                            if m != n:
-                                temp_OD += np.abs(mM[m, n]) ** 2
-                        temp_D += (-np.imag(np.log(mM[m, m])) - np.dot(global_data.incar.b_vectors[b, :], self.rn[:, m])) ** 2
-                    self.omega[0] += temp_I * global_data.incar.wb[b]
-                    self.omega[1] += temp_OD * global_data.incar.wb[b]
-                    self.omega[2] += temp_D * global_data.incar.wb[b]
-        self.omega = np.real(self.omega) / (k1_sz * k2_sz)
+                temp_I = B
+                temp_OD = 0
+                temp_D = 0
+                for m in range(B):
+                    for n in range(B):
+                        temp_I = temp_I - np.abs(mM[m, n]) ** 2
+                        if m != n:
+                            temp_OD += np.abs(mM[m, n]) ** 2
+                    temp_D += (-np.imag(np.log(mM[m, m])) - np.dot(global_data.incar.b_vectors[b, :], self.rn[:, m])) ** 2
+                self.omega[0] += temp_I * global_data.incar.wb[b]
+                self.omega[1] += temp_OD * global_data.incar.wb[b]
+                self.omega[2] += temp_D * global_data.incar.wb[b]
+        self.omega = np.real(self.omega) / global_data.state_collection.get_k_num()
 
     def set_center(self, center):
         self.generateRn()
-        phase = np.zeros((len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])), dtype=object)
-        for i in range(len(global_data.incar.k_points[0])):
-            for j in range(len(global_data.incar.k_points[1])):
-                r = (self.rn.T - center) @ np.array(global_data.incar.real_lattice_vectors) * global_data.incar.lattice_const
-                k = WannierTools.get_kx_ky([i, j])
-                sign = 1
-                if global_data.incar.dataset_type.lower() == 'comsol':
-                    sign = -1
-                phase[i, j] = np.diag(np.exp(-1j * sign * np.dot(k, r.T)))
-                self.U[i][j] = phase[i, j] @ self.U[i][j]
+        phase = global_data.state_collection.gen_zeros_matrxi(dtype=object)
+        for i, j, k in global_data.state_collection.k_indices():
+            r = (self.rn.T - center) @ np.array(global_data.incar.real_lattice_vectors) * global_data.incar.lattice_const
+            kxyz = WannierTools.get_kxyz([i, j, k])
+            sign = 1
+            if global_data.incar.dataset_type.lower() == 'comsol':
+                sign = -1
+            phase[i, j, k] = np.diag(np.exp(-1j * sign * np.dot(kxyz[:global_data.incar.kdim], r.T)))
+            self.U[i][j][k] = phase[i, j, k] @ self.U[i][j][k]
         global_data.m_set.update(self.U)
         return phase
     
     def save_as(self, filename):
-        IO.save_to_txt(filename, self.U, (len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+        IO.save_to_txt(filename, self.U, self.U.shape)
 
 
     @staticmethod

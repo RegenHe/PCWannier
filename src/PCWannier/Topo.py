@@ -11,7 +11,7 @@ from .Utils import global_data
 
 from .Utils import WannierTools, FieldData
 
-class Topo:
+class Topo2D:
     def __init__(self):
         self.U = None
     

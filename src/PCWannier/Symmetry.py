@@ -10,7 +10,7 @@ import spgrep.representation
 from .Log import Logger
 from .Timer import Timer, timer
 from .IO import IO
-from .Interpolator import CachedInterpolator
+from .Interpolator import CachedInterpolator2D
 
 from .GlobalData import global_data
 from .Utils import FieldData, WannierTools, StateCollection, Mesh
@@ -33,7 +33,8 @@ class Symmetry:
         symprec: float = 1.0e-5,
     ) -> None:
         if lattice2d.shape != (2, 2):
-            raise ValueError("lattice2d must be 2x2 for a 2-D system.")
+            Logger.error("lattice2d must be 2x2 for a 2-D system.")
+            raise
 
         self.lattice3d = np.zeros((3, 3), dtype=float)
         self.lattice3d[:2, :2] = lattice2d
@@ -144,7 +145,8 @@ class Symmetry:
         gsize = chars.size
         proj = (chi_irreps.conj() @ chars) / gsize
         if not np.allclose(proj.imag, 0.0, atol=atol):
-            raise ValueError("Imaginary parts too large: check character tables.")
+            Logger.error("Imaginary parts too large: check character tables.")
+            raise
         proj = proj.real
 
         n_vec = np.rint(proj).astype(int)
@@ -163,7 +165,8 @@ class Symmetry:
         if kvec.shape == (2,):
             kvec = np.pad(kvec, (0, 1), mode='constant')
         elif kvec.shape != (3,):
-            raise ValueError("kvec must be length-2 or length-3.")
+            Logger.error("kvec must be length-2 or length-3.")
+            raise
         n_beta = next(iter(irrep_map.values())).shape[0]
         Nw = n_beta * len(orbit)
         Dall: List[np.ndarray] = []
@@ -172,7 +175,7 @@ class Symmetry:
             for j in range(len(orbit)):
                 jp, T = mapping[(g_idx, j)]
                 S = orbit[jp].Rj.T @ R @ orbit[j].Rj
-                k = WannierTools.get_kx_ky(kvec)
+                k = WannierTools.get_kxyz(kvec)
                 phase = np.exp(-1j * (R[:2, :2] @ k) @ T[:2])
                 D[jp*n_beta:(jp+1)*n_beta, j*n_beta:(j+1)*n_beta] = phase * irrep_map[tuple(S.flatten())]
             Dall.append(D)
@@ -232,7 +235,8 @@ class Symmetry:
     
     def get_D_matrices(self, R: np.ndarray, v: np.ndarray, kvec: np.ndarray) -> List[np.ndarray]:
         if not hasattr(self, "all_D_matrices"):
-            raise ValueError("D matrices not built yet. Call build_D_matrices_over_k first.")
+            Logger.error("D matrices not built yet. Call build_D_matrices_over_k first.")
+            raise
         return self.all_D_matrices[kvec[0], kvec[1]][self.find_idx(R, v)]
     
 
@@ -247,7 +251,8 @@ class Symmetry:
         elif kvec.shape == (3,):
             kf = kvec.copy()
         else:
-            raise ValueError("kvec must be length-2 or length-3 in fractional coords.")
+            Logger.error("kvec must be length-2 or length-3 in fractional coords.")
+            raise
         kf = np.array([global_data.incar.k_points[0][kf[0]], global_data.incar.k_points[0][kf[1]], 0])
 
         keep_R, keep_v = [], []
@@ -261,7 +266,8 @@ class Symmetry:
     
     def get_Rv(self, idx: int) -> Tuple[np.ndarray, np.ndarray]:
         if not (0 <= idx < len(self.rotations)):
-            raise IndexError("Index out of range for symmetry rotations.")
+            Logger.error("Index out of range for symmetry rotations.")
+            raise
         return self.rotations[idx][:2, :2], self.translations[idx][:2]
     
     def get_all_Rv(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -273,7 +279,8 @@ class Symmetry:
     
     def _q_from_idx(self, q_idx: int) -> np.ndarray:
         if not (0 <= q_idx < len(self.positions3d)):
-            raise IndexError("q_idx out of range")
+            Logger.error("q_idx out of range")
+            raise
         return self.positions3d[q_idx]
     
     def find_idx(self, R, v) -> int:
@@ -323,12 +330,12 @@ class RotationOverlap:
         self.AinvT = np.linalg.inv(self.lattice.T)
         self.frac = (state_collection.mesh.vertices - self.origin) @ self.AinvT
 
-        self.interp = CachedInterpolator(self.state_collection.mesh.vertices, self.state_collection.mesh.elements)
+        self.interp = CachedInterpolator2D(self.state_collection.mesh.vertices, self.state_collection.mesh.elements)
 
         self._n_k1 = len(state_collection.field)
         self._n_k2 = len(state_collection.field[0])
 
-        kv_list = [(i, j, WannierTools.get_kx_ky([i, j])) for i in range(self._n_k1 + 1) for j in range(self._n_k2 + 1)]
+        kv_list = [(i, j, WannierTools.get_kxyz([i, j])) for i in range(self._n_k1 + 1) for j in range(self._n_k2 + 1)]
 
         self._k_to_index: dict[tuple[float, float], tuple[int, int]] = {
             (round(kv[0], 12), round(kv[1], 12)): (i % self._n_k1, j % self._n_k2) for (i, j, kv) in kv_list
@@ -361,7 +368,7 @@ class RotationOverlap:
 
         for i in range(n_kx):
             for j in range(n_ky):
-                kvec = WannierTools.get_kx_ky([i, j])
+                kvec = WannierTools.get_kxyz([i, j])
                 k_rot = (R @ kvec)
                 self.k_rot_grid[i, j] = k_rot
                 
@@ -400,7 +407,8 @@ class RotationOverlap:
                 dblock[mu_p, mu] = WannierTools.integrate_over_mesh(fd)
 
         if np.isnan(dblock).any():
-            raise ValueError(f"Overlap NaN at k={k_idx}, R={R}, v={v}")
+            Logger.error(f"Overlap NaN at k={k_idx}, R={R}, v={v}")
+            raise
 
         return dblock
 
@@ -418,7 +426,8 @@ class RotationOverlap:
     
     def get_d_matrix(self, idx, k_idx: tuple[int, int]) -> np.ndarray:
         if not hasattr(self, "all_d_matrices"):
-            raise ValueError("D matrices not built yet. Call build_all_d_matrices first.")
+            Logger.error("D matrices not built yet. Call build_all_d_matrices first.")
+            raise
         return self.all_d_matrices[k_idx[0], k_idx[1]][idx]
 
 

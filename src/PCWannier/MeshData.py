@@ -38,7 +38,8 @@ def load_comsol_mesh(filename: str) -> Mesh:
                         ncoords = int(tokens[0])
                         coords = np.empty((ncoords, 2), dtype=float)
                     except Exception as e:
-                        raise RuntimeError(f"Failed to parse the number of coords: {line_str}") from e
+                        Logger.error(f"Failed to parse the number of coords: {line_str}")
+                        raise
                 continue
 
             if line_str.startswith("# Mesh vertex coordinates"):
@@ -54,7 +55,8 @@ def load_comsol_mesh(filename: str) -> Mesh:
                             coords[lines_read, 0] = float(tokens[0])
                             coords[lines_read, 1] = float(tokens[1])
                         except Exception as e:
-                            raise RuntimeError("Error handling: invalid line in vertex block") from e
+                            Logger.error(f"Failed to parse vertex coordinates: {line_str}")
+                            raise
                     lines_read += 1
                 else:
                     in_vertex_block = False
@@ -69,7 +71,8 @@ def load_comsol_mesh(filename: str) -> Mesh:
                         ndege = int(tokens[0])
                         edg_elements = np.empty((ndege, 2), dtype=int)
                     except Exception as e:
-                        raise RuntimeError(f"Failed to parse the number of elements: {line_str}") from e
+                        Logger.error(f"Failed to parse the number of elements: {line_str}")
+                        raise
                 continue
 
             if line_str.startswith("# Elements") and (edg_elements_block or tri_elements_block):
@@ -85,9 +88,11 @@ def load_comsol_mesh(filename: str) -> Mesh:
                             edg_elements[lines_read, 0] = int(tokens[0])
                             edg_elements[lines_read, 1] = int(tokens[1])
                         except Exception as e:
-                            raise RuntimeError(f"Failed to parse edge indices: {line_str}") from e
+                            Logger.error(f"Failed to parse edge indices: {line_str}")
+                            raise
                     else:
-                        raise RuntimeError(f"Not enough integers in the line: {line_str}")
+                        Logger.error(f"Not enough integers in the line: {line_str}")
+                        raise
                     lines_read += 1
                 else:
                     in_block = False
@@ -105,7 +110,8 @@ def load_comsol_mesh(filename: str) -> Mesh:
                         nelems = int(tokens[0])
                         elements = np.empty((nelems, 3), dtype=int)
                     except Exception as e:
-                        raise RuntimeError(f"Failed to parse the number of elements: {line_str}") from e
+                        Logger.error(f"Failed to parse the number of elements: {line_str}")
+                        raise
                 continue
 
             if in_block and tri_elements_block and line_str:
@@ -117,9 +123,11 @@ def load_comsol_mesh(filename: str) -> Mesh:
                             elements[lines_read, 1] = int(tokens[1])
                             elements[lines_read, 2] = int(tokens[2])
                         except Exception as e:
-                            raise RuntimeError(f"Failed to parse triangle indices: {line_str}") from e
+                            Logger.error(f"Failed to parse triangle indices: {line_str}")
+                            raise
                     else:
-                        raise RuntimeError(f"Not enough integers in the line: {line_str}")
+                        Logger.error(f"Not enough integers in the line: {line_str}")
+                        raise
                     lines_read += 1
                 else:
                     in_block = False
@@ -127,7 +135,8 @@ def load_comsol_mesh(filename: str) -> Mesh:
 
 
     if coords is None or elements is None:
-        raise RuntimeError("Failed to load mesh: coords or elements data is missing.")
+        Logger.error("Failed to load mesh: coords or elements data is missing.")
+        raise
 
     return Mesh(coords, elements, edg_elements)
 
@@ -150,9 +159,11 @@ def load_comsol_data(filename: str) -> RawData:
                         points.append(point)
                         values.append(value)
                     except Exception as e:
-                        raise RuntimeError(f"Failed to parse data: {line_str}") from e
+                        Logger.error(f"Failed to parse data: {line_str}")
+                        raise
                 else:
-                    raise RuntimeError(f"Not enough data in the line: {line_str}")
+                    Logger.error(f"Not enough data in the line: {line_str}")
+                    raise
 
     point_matrix = np.array(points, dtype=float)
     value_matrix = np.array(values, dtype=complex)
@@ -207,76 +218,121 @@ def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = 
 
 def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
     if global_data.incar is None:
-        raise RuntimeError("Incar data is not initialized.")
+        Logger.error("Incar data is not initialized.")
+        raise
     
-    bw = global_data.incar.band_window
+    gd = global_data.incar
+    bw = gd.band_window
+    kdim = int(getattr(gd, "kdim", 2))
+
+    Nk = [
+        len(gd.k_points[0]) if kdim >= 1 else 1,
+        len(gd.k_points[1]) if kdim >= 2 else 1,
+        len(gd.k_points[2]) if kdim >= 3 else 1,
+    ]
+    Nv = data.value_matrix.shape[0]
+    order = list(gd.dataset_order)
 
     if isinstance(bw, EnergyWindow):
-        k1_sz = len(global_data.incar.k_points[0])
-        k2_sz = len(global_data.incar.k_points[1])
-        Nv    = data.value_matrix.shape[0]
+        size_map = {"k1": Nk[0], "k2": Nk[1], "k3": Nk[2]}
+        shape_core = tuple(size_map[d] for d in order)
+        has_E = ("E" in order)
+        if has_E:
+            shape_in = (Nv,) + tuple(Nk[0] if d == "k1" else Nk[1] if d == "k2" else Nk[2] if d == "k3" else -1 for d in order)
+            pos = {dim: (order.index(dim) + 1) for dim in order}
+        else:
+            shape_in = (Nv,) + shape_core + (-1,)
+            pos = {dim: (order.index(dim) + 1) for dim in order}
+            pos["E"] = 1 + len(order)
 
-        d0, d1 = global_data.incar.dataset_order[0], global_data.incar.dataset_order[1]
-        n0 = len(global_data.incar.k_points[0]) if d0 == "k1" else len(global_data.incar.k_points[1])
-        n1 = len(global_data.incar.k_points[0]) if d1 == "k1" else len(global_data.incar.k_points[1])
-        base = data.value_matrix.reshape((Nv, n0, n1, -1), order='C')
-
-        pos = {dim: i for i, dim in enumerate(global_data.incar.dataset_order)}
-        ax_k1 = pos["k1"] + 1
-        ax_k2 = pos["k2"] + 1
+        base = data.value_matrix.reshape(shape_in, order='C')
 
         E_idx = getattr(global_data.state_collection, "E_idx", None)
         Eall = getattr(data, "energy_matrix", None)
         if Eall is None:
             Eall = getattr(global_data, "energy_matrix", None)
+        if E_idx is None and Eall is None:
+            Logger.error("energy_matrix is required for EnergyWindow but not found.")
+            raise
 
-        fields = [[[] for _ in range(k2_sz)] for _ in range(k1_sz)]
-        for i in range(k1_sz):
-            for j in range(k2_sz):
-                if E_idx is not None:
-                    sel_list = E_idx[i][j]
-                else:
-                    sel_list = np.where((Eall[i, j] >= bw.emin) & (Eall[i, j] <= bw.emax))[0].tolist()
-                if not sel_list:
-                    continue
-                if ax_k1 == 1 and ax_k2 == 2:
+        fields = [[[[] for _ in range(Nk[2])] for _ in range(Nk[1])] for _ in range(Nk[0])]
+
+        for i in range(Nk[0]):
+            for j in range(Nk[1]):
+                for k in range(Nk[2]):
+                    if E_idx is not None:
+                        sel_list = E_idx[i][j][k]
+                    else:
+                        if Eall.ndim == 3:
+                            eline = Eall[i, j, :]
+                        elif Eall.ndim == 4:
+                            eline = Eall[i, j, k, :]
+                        else:
+                            Logger.error(f"Unsupported energy_matrix ndim={Eall.ndim}")
+                            raise
+                        sel_list = np.where((eline >= bw.emin) & (eline <= bw.emax))[0].tolist()
+
+                    if not sel_list:
+                        continue
+
                     for b in sel_list:
-                        fields[i][j].append(base[:, i, j, b])
-                else:
-                    for b in sel_list:
-                        fields[i][j].append(base[:, j, i, b])
+                        idx = [slice(None)] * (1 + (len(order) if has_E else len(order) + 1))
+                        if "k1" in pos: idx[pos["k1"]] = i
+                        if "k2" in pos: idx[pos["k2"]] = j
+                        if "k3" in pos: idx[pos["k3"]] = k
+                        idx[pos["E"]] = b
+                        vec = base[tuple(idx)]
+                        if vec.ndim != 1 or vec.shape[0] != Nv:
+                            Logger.error(f"Unexpected vec shape {vec.shape} at (i,j,k,b)=({i},{j},{k},{b}); expect ({Nv},)")
+                            raise
+                        fields[i][j][k].append(vec)
 
         global_data.state_collection.field = fields
         Logger.info("distribute data finished (energy-window, ragged E)")
-    else:
-        sizes = {
-            "k1": len(global_data.incar.k_points[0]),
-            "k2": len(global_data.incar.k_points[1]),
-            "E": len(global_data.incar.band_window)
-        }
-        shape = tuple(sizes[dim] for dim in global_data.incar.dataset_order)
 
+    else:
+        sizes = {"k1": Nk[0], "k2": Nk[1], "k3": Nk[2]}
+        bw_idx = np.asarray(gd.band_window, dtype=int)
+
+        has_E = ("E" in order)
+        if has_E:
+            shape_in = (Nv,) + tuple((sizes[d] if d in sizes else -1) for d in order)
+            ax_E = order.index("E") + 1
+        else:
+            shape_in = (Nv,) + tuple(sizes[d] for d in order) + (-1,)
+            ax_E = 1 + len(order)
+
+        t_all = data.value_matrix.reshape(shape_in, order='C')
+        t_sel = np.take(t_all, bw_idx, axis=ax_E)
+
+        target = [d for d in ("k1", "k2", "k3") if d in order] + (["E"] if has_E else [])
+        pos = {dim: (order.index(dim) + 1) for dim in order}
+        if not has_E:
+            pos["E"] = ax_E
+        axes = (0,) + tuple(pos[d] for d in ("k1", "k2", "k3") if d in pos) + (pos["E"],)
+        t_reordered = np.transpose(t_sel, axes=axes)
+
+        t_reordered = np.reshape(t_reordered, (Nv, Nk[0], Nk[1], Nk[2], -1), order='C')
+
+        Nb = t_reordered.shape[-1]
         fields = [
             [
-                [np.zeros(data.value_matrix.shape[0], dtype=complex) for _ in range(shape[2])]
-                for _ in range(shape[1])
+                [
+                    [np.zeros(Nv, dtype=complex) for _ in range(Nb)]
+                    for _ in range(Nk[2])
+                ]
+                for _ in range(Nk[1])
             ]
-            for _ in range(shape[0])
+            for _ in range(Nk[0])
         ]
-        t_fields = np.zeros((data.value_matrix.shape[0],) + shape, dtype=complex)
-
-        for p in range(data.value_matrix.shape[0]):
-            t_fields[p] = data.value_matrix[p].reshape((shape[0], shape[1], -1), order='C')[:, :, global_data.incar.band_window]
-
-        desired_order = ["k1", "k2", "E"]
-        indices = [global_data.incar.dataset_order.index(dim) for dim in desired_order]
-        t_fields = np.transpose(t_fields, axes=(0, indices[0] + 1, indices[1] + 1, indices[2] + 1))
-
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                for k in range(shape[2]):
-                    fields[i][j][k] = t_fields[:, i, j, k]
+        for i in range(Nk[0]):
+            for j in range(Nk[1]):
+                for k in range(Nk[2]):
+                    for b in range(Nb):
+                        fields[i][j][k][b] = t_reordered[:, i, j, k, b]
 
         global_data.state_collection.field = fields
         Logger.info("distribute data finished")
+
     return global_data.state_collection
+

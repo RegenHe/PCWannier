@@ -36,8 +36,8 @@ class Logger:
         Logger._instance.logger.warning(message)
 
     @staticmethod
-    def error(message: str):
-        Logger._instance.logger.error(message)
+    def error(message: str, exc_info=True):
+        Logger._instance.logger.error(message, exc_info=exc_info)
 
     @staticmethod
     def debug(message: str):

@@ -18,7 +18,7 @@ from .Utils import global_data
 
 from .Utils import WannierTools, FieldData
 
-class Finite:
+class Finite2D:
     def __init__(self, nx: int, ny: int, gen_hopping, neighbors_half):
         self.nx = nx
         self.ny = ny
@@ -73,7 +73,8 @@ class Finite:
         elif (self.nx is None) and (self.ny is not None):
             axis, layers = 'y', int(self.ny)
         else:
-            raise ValueError("build_stripe_H only supports one direction finite or two directions finite.")
+            Logger.error("build_stripe_H only supports one direction finite or two directions finite.")
+            raise
         
         norb, nlayer = self.norb, layers
         n = norb * nlayer
@@ -96,7 +97,8 @@ class Finite:
     
     def build_finite_H(self):
         if (self.nx is None) or (self.ny is None):
-            raise ValueError("build_finite_H only supports two directions finite.")
+            Logger.error("build_finite_H only supports two directions finite.")
+            raise
 
         n = self.norb * self.nx * self.ny
 
@@ -140,7 +142,8 @@ class Finite:
             nlayer = self.nx * self.ny
             k_list = None
         else:
-            raise ValueError("build_stripe_H only supports one direction finite or two direction finite.")
+            Logger.error("build_stripe_H only supports one direction finite or two directions finite.")
+            raise
 
         n = int(nlayer) * self.norb
         # use_sparse = (sp is not None) and (n >= 512)
@@ -209,7 +212,8 @@ class Finite:
         elif (self.nx is None) and (self.ny is not None):
             axis = 'y'
         else:
-            raise ValueError("build_stripe_H only supports one direction finite or two directions finite.")
+            Logger.error("build_stripe_H only supports one direction finite or two directions finite.")
+            raise
         
         return self._half_blocks_with_layer(axis, k, int(layernum))
     

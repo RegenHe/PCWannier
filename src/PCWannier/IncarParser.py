@@ -9,7 +9,8 @@ def evaluate_math_expression(expr: str) -> float:
     try:
         return eval(expr, {"__builtins__": None}, vars(math))
     except Exception as e:
-        raise ValueError(f"Invalid expression: '{expr}'. Error: {e}")
+        Logger.error(f"Failed to evaluate math expression '{expr}': {e}")
+        raise
 
 class EnergyWindow(NamedTuple):
     emin: float
@@ -21,6 +22,7 @@ class IncarData:
         self.lattice_const: float = None
         self.real_lattice_vectors: list = None
         self.reciprocal_lattice_vectors: list = None
+        self.kdim: int = None
         self.k_points: list = None
         self.dataset_type: str = None
         self.dataset_file: str = None
@@ -112,9 +114,8 @@ class IncarData:
     def validate(self):
         missing = [k for k, v in vars(self).items() if v is None]
         if missing:
-            err_msg = f"Missing required IncarData fields: {', '.join(missing)}"
-            Logger.error(err_msg)
-            raise ValueError(err_msg)
+            Logger.error(f"Missing required IncarData fields: {', '.join(missing)}")
+            raise
 
 class IncarParser:
     DEFAULTS = {
@@ -211,7 +212,8 @@ class IncarParser:
                     start, step, stop = map(float, tokens)
                     ranges.append(np.arange(start, stop, step))
                 else:
-                    raise ValueError(f"Invalid k_points range format: '{part}'")
+                    Logger.error(f"Invalid k_points range format: '{part}'")
+                    raise
             return ranges
         elif key in ["hopping_state"]:
             parts = value.split(',')
@@ -223,7 +225,8 @@ class IncarParser:
                     start, stop = map(int, tokens)
                     ranges.append(np.arange(start, stop))
                 else:
-                    raise ValueError(f"Invalid hopping_state range format: '{part}'")
+                    Logger.error(f"Invalid hopping_state range format: '{part}'")
+                    raise
             return ranges
         elif key in ["band_window", "band_calc", "inner_window"]:
             v = value.strip()
@@ -240,7 +243,8 @@ class IncarParser:
                 if emin > emax:
                     emin, emax = emax, emin
                 return EnergyWindow(emin, emax)
-            raise ValueError(f"Invalid band_window format: '{v}'")
+            Logger.error(f"Invalid band_window format: '{v}'")
+            raise
         # elif key == "finite_DOS_range":
         #     v = value.strip()
         #     if ',' in v:
@@ -297,23 +301,28 @@ class IncarParser:
             def _parse_linear_combo(token: str):
                 blocks = _extract_brace_blocks(token)
                 if len(blocks) != 2:
-                    raise ValueError(f"Invalid linear-combo block: '{token}'")
+                    Logger.error(f"Invalid linear-combo block: '{token}'")
+                    raise
                 state_groups = _extract_bracket_groups(blocks[0])
                 if not state_groups:
-                    raise ValueError(f"Empty states in linear-combo: '{token}'")
+                    Logger.error(f"Empty states in linear-combo: '{token}'")
+                    raise
                 lc_states = []
                 for g in state_groups:
                     term = [t.strip() for t in g.split(",")]
                     if len(term) != 3:
-                        raise ValueError(f"State must be [n,l,z]: '[{g}]'")
+                        Logger.error(f"State must be [n,l,z]: '[{g}]'")
+                        raise
                     n = int(term[0]); l = int(term[1]); z = float(evaluate_math_expression(term[2]))
                     lc_states.append([n, l, z])
                 coeff_strs = [c.strip() for c in blocks[1].split(",") if c.strip()]
                 if not coeff_strs:
-                    raise ValueError(f"Empty coeffs in linear-combo: '{token}'")
+                    Logger.error(f"Empty coeffs in linear-combo: '{token}'")
+                    raise
                 lc_coeffs = [_complex(c) for c in coeff_strs]
                 if len(lc_coeffs) != len(lc_states):
-                    raise ValueError(f"#coeffs != #states in linear-combo: '{token}'")
+                    Logger.error(f"#coeffs != #states in linear-combo: '{token}'")
+                    raise
                 return {"lc_states": lc_states, "lc_coeffs": lc_coeffs}
             
             projections = []
@@ -335,7 +344,8 @@ class IncarParser:
                         elif i == 1:
                             groups = _extract_bracket_groups(parts[i].strip())
                             if len(groups) != 1:
-                                raise ValueError(f"Invalid positon in projections: '{parts[i].strip()}'")
+                                Logger.error(f"Invalid frac_position in projections: '{parts[i].strip()}'")
+                                raise
                             term = groups[0]
                             projections_dict['frac_position'] = [float(evaluate_math_expression(v.strip())) for v in term.split(',')]
                         elif i == 2:
@@ -347,15 +357,18 @@ class IncarParser:
                             elif token.startswith('['):
                                 groups = _extract_bracket_groups(token)
                                 if len(groups) != 1:
-                                    raise ValueError(f"Invalid state block: '{token}'")
+                                    Logger.error(f"Invalid state block in projections: '{token}'")
+                                    raise
                                 g = groups[0]
                                 vals = [t.strip() for t in g.split(',')]
                                 if len(vals) != 3:
-                                    raise ValueError(f"State must be [n,l,z]: '[{g}]'")
+                                    Logger.error(f"State must be [n,l,z]: '[{g}]'")
+                                    raise
                                 n = int(vals[0]); l = int(vals[1]); z = float(evaluate_math_expression(vals[2]))
                                 state_list.append([n, l, z])
                             else:
-                                raise ValueError(f"Invalid states in projections: '{token}'")
+                                Logger.error(f"Invalid states in projections: '{token}'")
+                                raise
 
                     projections_dict['states'] = state_list
                     projections.append(projections_dict)
@@ -410,7 +423,8 @@ class IncarParser:
                 else:
                     n = int(t)
                     if n < 1:
-                        raise ValueError("finite ≥ 1")
+                        Logger.error("finite must be ≥ 1")
+                        raise
                     out.append(n)
             return tuple(out)
         else:

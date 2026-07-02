@@ -288,12 +288,16 @@ class StateCollection:
     def __init__(self, name: str, mesh: Mesh, kdim: int) -> None:
         self.name: str = name
         self.mesh: Mesh = mesh
-        self.field: list = []
+        self.Rfield: list = []
+        self.Lfield: list = []
         self.epsilon: np.array = None
         self.normalization: float = 0.0
 
-        self.transform: np.ndarray = None
-        self.transform_: np.ndarray = None
+        self.transform_R: np.ndarray = None
+        self.transform_R_: np.ndarray = None
+        self.transform_L: np.ndarray = None
+        self.transform_L_: np.ndarray = None
+        self.O_matrix: np.ndarray = None
         self.raw_field: list = None
 
         self.is_normalized = False
@@ -322,7 +326,7 @@ class StateCollection:
         
     def n_indices(self, *idx) -> Iterator[int]:
         i, j, k, _ = self._norm_ijkn(*(list(idx) + [0]))
-        blk = self.field[i][j][k]
+        blk = self.Rfield[i][j][k]
         if blk is None:
             return
         yield from range(len(blk))
@@ -374,17 +378,22 @@ class StateCollection:
 
         return i, j, k, n
     
-    def get(self, *idx):
+    def get(self, *idx, left: bool=False):
         i, j, k, n = self._norm_ijkn(*idx)
         try:
-            return self.field[i][j][k][n]
+            if left and global_data.incar.hermitian is False:
+                return self.Lfield[i][j][k][n]
+            return self.Rfield[i][j][k][n]
         except Exception as e:
             Logger.error(f"Failed to access field[{i}][{j}][{k}][{n}]: {e}")
             raise
 
-    def get_block(self, *kidx):
+    def get_block(self, *kidx, left: bool=False):
         i, j, k, _ = self._norm_ijkn(*(kidx + (0,)))
-        blk = self.field[i][j][k]
+        if left and global_data.incar.hermitian is False:
+            blk = self.Lfield[i][j][k]
+        else:
+            blk = self.Rfield[i][j][k]
         if blk is None:
             Logger.error(f"empty block at k=({i},{j},{k})")
             raise
@@ -396,34 +405,51 @@ class StateCollection:
 
 
     @timer("Orthogonalize - ")
-    def orthogonalize(self, tol_rel: float = 1e-6, atol_abs: float = 1e-12) -> None:
+    def orthogonalize(self, tol_rel: float = 1e-6, atol_abs: float = 1e-12, hermitian: bool=True) -> None:
         Logger.info("Orthogonalizing states...")
-        if self.field is None:
+        if self.Rfield is None:
             Logger.error("Field data is not initialized")
             raise
 
-        if 'O' in global_data.incar.use_cached_data:
-            Logger.info("using cache data - O")
-            self.transform = IO.load_cell_matrix(global_data.incar.O_file, self.k_shape)
+        if 'S' in global_data.incar.use_cached_data:
+            Logger.info("using cache data - S")
+            S_all = IO.load_cell_matrix(global_data.incar.S_file, self.k_shape)
+            
             self.is_orthogonalized = True
             self.is_normalized = True
-            self.transform_ = self.gen_matrix_on_kmesh(lambda *_: None)
+            self.transform_R =self.gen_matrix_on_kmesh(lambda *_: None)
+            self.transform_R_ = self.gen_matrix_on_kmesh(lambda *_: None)
             for i, j, k in self.k_indices():
-                T_diag = np.diag(np.diag(self.transform[i][j][k]))
-                for n in range(len(self.field[i][j][k])):
+                w, V = np.linalg.eigh(S_all[i][j][k])
+                lam = w.real
+                lam_max = np.max(lam)
+                tau = max(tol_rel*lam_max, atol_abs)
+                invsqrt = 1.0/np.sqrt(np.maximum(lam, tau))
+                T_full = V @ np.diag(invsqrt) @ V.conj().T
+
+                self.transform_R[i][j][k] = T_full
+
+                T_diag = np.diag(np.diag(T_full))
+                for n in range(len(self.Rfield[i][j][k])):
                     if T_diag[n, n] == 0.0:
                         Logger.error(f"Normalization failed for field ({i}, {j}, {k}, {n})")
                         raise
-                    self.field[i][j][k][n] *= T_diag[n, n]
-                self.transform_[i][j][k] = np.linalg.inv(T_diag) @ self.transform[i][j][k]
+                    self.Rfield[i][j][k][n] *= T_diag[n, n]
+                    if global_data.incar.hermitian is False:
+                        self.Lfield[i][j][k][n] *= T_diag[n, n]
+                self.transform_R_[i][j][k] = np.linalg.inv(T_diag) @ self.transform_R[i][j][k]
             return
         
         Nv = self.mesh.vertices.shape[0]
 
         eps = np.asarray(self.epsilon)
 
-        self.transform = self.gen_matrix_on_kmesh(lambda *_: None)
-        self.transform_ = self.gen_matrix_on_kmesh(lambda *_: None)
+        self.S = self.gen_matrix_on_kmesh(lambda *_: None)
+
+        self.transform_R = self.gen_matrix_on_kmesh(lambda *_: None)
+        self.transform_R_ = self.gen_matrix_on_kmesh(lambda *_: None)
+        self.transform_L = self.gen_matrix_on_kmesh(lambda *_: None)
+        self.transform_L_ = self.gen_matrix_on_kmesh(lambda *_: None)
         for i, j, k in self.k_indices():
             W = np.asarray(self.get_block(i, j, k))
             Nwin = len(W)
@@ -438,52 +464,76 @@ class StateCollection:
 
             S = np.empty((Nwin, Nwin), dtype=np.complex128)
             for a in self.n_indices(i, j, k):
-                wa = self.get(i, j, k, a)
+                wa = self.get(i, j, k, a, left=True)
 
-                right = np.conj(wa) * eps
-                F = (right[:, None] * W.T).astype(np.complex128, copy=False)
+                left = np.conj(wa) * eps
+                F = (left[:, None] * W.T).astype(np.complex128, copy=False)
                 fd = FieldData("S", self.mesh, F)
                 vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
 
                 # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
                 # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
                 # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
-                if vals.ndim == 0:
-                    vals = np.asarray([vals])
+                vals = np.atleast_1d(vals)
+                S[a, :] = vals[:]
+            if hermitian:
+                w, V = np.linalg.eigh(S)
+                lam = w.real
+                lam_max = np.max(lam)
+                tau = max(tol_rel*lam_max, atol_abs)
+                invsqrt = 1.0/np.sqrt(np.maximum(lam, tau))
+                T_corr = V @ np.diag(invsqrt) @ V.conj().T
+                T_corr = T_corr
+                # block orth then total orth maybe better
+                T_full = T_corr
 
-                S[a, a:] = vals[a:]
-                S[a:, a] = vals[a:].conjugate()
+                T_diag = np.diag(np.diag(T_full))
 
-            S = 0.5*(S + S.conj().T)
-            w, V = np.linalg.eigh(S)
-            lam = w.real
-            lam_max = np.max(lam)
-            tau = max(tol_rel*lam_max, atol_abs)
-            invsqrt = 1.0/np.sqrt(np.maximum(lam, tau))
-            T_corr = V @ np.diag(invsqrt) @ V.conj().T
-            T_corr = 0.5*(T_corr + T_corr.conj().T)
-            # block orth then total orth maybe better
-            T_full = T_corr
+                for n in range(len(self.Rfield[i][j][k])):
+                    if T_diag[n, n] == 0.0:
+                        Logger.error(f"Normalization failed for field ({i}, {j}, {k}, {n})")
+                        raise
+                    self.Rfield[i][j][k][n] *= T_diag[n, n]
+                    if global_data.incar.hermitian is False:
+                        self.Lfield[i][j][k][n] *= T_diag[n, n]
 
-            T_diag = np.diag(np.diag(T_full))
+                self.transform_R[i][j][k] = T_full
+                self.transform_R_[i][j][k] = np.linalg.inv(T_diag) @ T_full
+            else:
+                U, S_, Vh = np.linalg.svd(S)
+                sigma = S_
+                sigma_max = np.max(sigma)
+                tau = max(tol_rel * sigma_max, atol_abs)
+                
+                Sigma_inv_sqrt = np.diag(1.0 / np.sqrt(np.maximum(sigma, tau)))
 
-            for n in range(len(self.field[i][j][k])):
-                if T_diag[n, n] == 0.0:
-                    Logger.error(f"Normalization failed for field ({i}, {j}, {k}, {n})")
-                    raise
-                self.field[i][j][k][n] *= T_diag[n, n]
+                T_R = Vh.conj().T @ Sigma_inv_sqrt 
+                T_L = U @ Sigma_inv_sqrt
 
-            self.transform[i][j][k] = T_full
-            self.transform_[i][j][k] = np.linalg.inv(T_diag) @ T_full
+                T_diag_R = np.diag(np.diag(T_R))
+                self.transform_R[i][j][k] = T_R
+                self.transform_R_[i][j][k] = np.linalg.inv(T_diag_R) @ T_R
+
+                T_diag_L = np.diag(np.diag(T_L))
+                self.transform_L[i][j][k] = T_L
+                self.transform_L_[i][j][k] = np.linalg.inv(T_diag_L) @ T_L
+
+                for n in range(len(self.Rfield[i][j][k])):
+                    if T_diag_R[n, n] == 0.0 or T_diag_L[n, n] == 0.0:
+                        Logger.error(f"Normalization failed for field ({i}, {j}, {k}, {n})")
+                        raise
+                    self.Rfield[i][j][k][n] *= T_diag_R[n, n]
+                    self.Lfield[i][j][k][n] *= T_diag_L[n, n]
+            self.S[i][j][k] = S
         self.is_orthogonalized = True
         self.is_normalized = True
 
-        if not global_data.incar.O_file.lower == "false":
-            IO.save_to_txt(global_data.incar.O_file, self.transform, self.k_shape)
+        if not global_data.incar.S_file.lower == "false":
+            IO.save_to_txt(global_data.incar.S_file, self.S, self.k_shape)
 
 
     @timer("Orthogonality Check - ")
-    def check_orthogonality(self) -> Tuple[np.ndarray, bool]:
+    def check_orthogonality(self, hermitian: bool=True) -> Tuple[np.ndarray, bool]:
         """
         report: 
             [0] herm_res     = ||S - S^†||_F
@@ -493,7 +543,7 @@ class StateCollection:
             [4] lambda_min   = min eig(S_H)
             [5] cond         = cond(S_H) = lam_max / lam_min
         """
-        if self.field is None:
+        if self.Rfield is None:
             Logger.error("Field data is not initialized")
             raise
         
@@ -518,23 +568,24 @@ class StateCollection:
 
             S = np.empty((Nwin, Nwin), dtype=np.complex128)
             for a in self.n_indices(i, j, k):
-                wa = self.get(i, j, k, a)
+                wa = self.get(i, j, k, a, left=True)
 
-                right = np.conj(wa) * eps
-                F = (right[:, None] * W.T).astype(np.complex128, copy=False)
+                left = np.conj(wa) * eps
+                F = (left[:, None] * W.T).astype(np.complex128, copy=False)
                 fd = FieldData("S", self.mesh, F)
                 vals = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
-                if vals.ndim == 0:
-                    vals = np.asarray([vals])
                 # A = FieldData("A", self.mesh, np.broadcast_to(np.conj(wa[None, :]), (Nwin, Nv)).astype(np.complex128, copy=False))
                 # B = FieldData("B", self.mesh, (W.T * eps[:, None]).astype(np.complex128, copy=False))
                 # vals = WannierTools.integrate_over_mesh(A, other=B, chunk_size=2048)
-                S[a, a:] = vals[a:]
-                S[a:, a] = vals[a:].conjugate()
-                # S[a, a] = np.real(S[a, a])
+                vals = np.atleast_1d(vals)
+
+                S[a, :] = vals[:]
                 
             if self.is_orthogonalized:
-                S = self.transform_[i][j][k].conj().T @ S @ self.transform_[i][j][k]
+                if hermitian:
+                    S = self.transform_R_[i][j][k].conj().T @ S @ self.transform_R_[i][j][k]
+                else:
+                    S = self.transform_L_[i][j][k].conj().T @ S @ self.transform_R_[i][j][k]
 
             herm_res = float(np.linalg.norm(S - S.conj().T, ord='fro'))
             diag = np.real(np.diag(S))
@@ -542,10 +593,10 @@ class StateCollection:
             offdiag = S - np.diag(np.diag(S))
             offdiag_max = float(np.max(np.abs(offdiag))) if Nwin > 1 else 0.0
             
-            S_H = 0.5 * (S + S.conj().T)
-            frob_res = float(np.linalg.norm(S_H - np.eye(Nwin), ord='fro'))
 
-            evals = np.linalg.eigvalsh(S_H)
+            frob_res = float(np.linalg.norm(S - np.eye(Nwin), ord='fro'))
+
+            evals = np.linalg.eigvalsh(S)
             lam_min = float(np.min(evals))
             lam_max = float(np.max(evals))
 
@@ -564,10 +615,11 @@ class StateCollection:
                 Logger.warning(f"[OrthChk] k=({i},{j},{k}): herm={herm_res:.3e}, "
                             f"diag_max_err={diag_max_err:.3e}, offdiag_max={offdiag_max:.3e}, "
                             f"frob={frob_res:.3e}, lam_min={lam_min:.3e}, cond={cond:.2e}")
+                
         return report, need_orth
         
     def turn_to_Bloch(self) -> None:
-        if self.field is None:
+        if self.Rfield is None:
             Logger.error("Field data is not initialized")
             raise
         
@@ -579,13 +631,24 @@ class StateCollection:
         for i, j, k in self.k_indices():
             phase = self.get_phase(i, j, k)
             for n in self.n_indices(i, j, k):
-                self.field[i][j][k][n] = np.conj(phase) * self.field[i][j][k][n]
+                self.Rfield[i][j][k][n] = np.conj(phase) * self.Rfield[i][j][k][n]
+        if global_data.incar.hermitian is False:
+            for i, j, k in self.k_indices():
+                phase = self.get_phase(i, j, k)
+                for n in self.n_indices(i, j, k):
+                    self.Lfield[i][j][k][n] = np.conj(phase) * self.Lfield[i][j][k][n]
     
-    def get_transform(self, zero=False) -> np.ndarray:
-        if self.is_orthogonalized and self.transform_ is not None and not zero:
-            return self.transform_
+    def get_transform(self, zero=False, left: bool=False) -> np.ndarray:
+        if left:
+            if self.is_orthogonalized and self.transform_L_ is not None and not zero:
+                return self.transform_L_
+            else:
+                return [[[np.identity(self.transform_L_[i][j][k].shape[0], dtype=self.transform_L_[i][j][k].dtype) for k in range(len(self.Lfield[i][j]))] for j in range(len(self.Lfield[i]))] for i in range(len(self.Lfield))]
         else:
-            return [[[np.identity(self.transform_[i][j][k].shape[0], dtype=self.transform_[i][j][k].dtype) for k in range(len(self.field[i][j]))] for j in range(len(self.field[i]))] for i in range(len(self.field))]
+            if self.is_orthogonalized and self.transform_R_ is not None and not zero:
+                return self.transform_R_
+            else:
+                return [[[np.identity(self.transform_R_[i][j][k].shape[0], dtype=self.transform_R_[i][j][k].dtype) for k in range(len(self.Rfield[i][j]))] for j in range(len(self.Rfield[i]))] for i in range(len(self.Rfield))]
     
     def get_phase(self, i: int, j: int, k: int):
         if global_data.incar.dataset_type.lower() == 'comsol':
@@ -617,12 +680,14 @@ class StateCollection:
         if self.epsilon is not None:
             self.get_extention_epsilon()
     
-    def get_extention_field(self, *idx) -> List:
+    def get_extention_field(self, *idx, left: bool=False) -> List:
         i, j, k, n = self._norm_ijkn(*idx)
         if self.extention_mesh is None:
             Logger.error("The field has not been extended")
             raise
-        return np.array([self.field[i][j][k][n][p] / np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1]) for p in self.space_to_original_mapping])
+        if left and global_data.incar.hermitian is False:
+            return np.array([self.Lfield[i][j][k][n][p] / np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1]) for p in self.space_to_original_mapping])
+        return np.array([self.Rfield[i][j][k][n][p] / np.sqrt(global_data.incar.extension[0] * global_data.incar.extension[1]) for p in self.space_to_original_mapping])
     
     def get_extention_epsilon(self) -> List:
         if self.extention_mesh is None:
@@ -645,7 +710,7 @@ class StateCollection:
         fig, ax = plt.subplots()
         triang = Triangulation(self.mesh.vertices[:, 0], self.mesh.vertices[:, 1], self.mesh.elements)
 
-        plt.tricontourf(triang, np.real(self.field[i][j][k][n]), levels=255, cmap='jet')
+        plt.tricontourf(triang, np.real(self.Rfield[i][j][k][n]), levels=255, cmap='jet')
         plt.colorbar(label='Real Part')
         ax.set_aspect('equal')
         ax.set_xlabel('X')
@@ -714,7 +779,7 @@ class StateCollection:
 
     def __deepcopy__(self, memo=None):
         sc = StateCollection(copy.deepcopy(self.name, memo), copy.deepcopy(self.mesh, memo))
-        sc.field = copy.deepcopy(self.field)
+        sc.Rfield = copy.deepcopy(self.Rfield)
         sc.epsilon = copy.deepcopy(self.epsilon)
         sc.normalization = copy.deepcopy(self.normalization)
 
@@ -723,7 +788,7 @@ class StateCollection:
         return sc
     
     def __repr__(self) -> str:
-        return f"StateCollection(point_matrix={self.mesh}, field_number={len(self.field)})"
+        return f"StateCollection(point_matrix={self.mesh}, field_number={len(self.Rfield)})"
 
 
 

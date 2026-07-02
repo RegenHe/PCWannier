@@ -193,7 +193,6 @@ def load_comsol_data(filename: str) -> RawData:
 def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
     if mesh.vertices.shape[1] != data.point_matrix.shape[1] or mesh.vertices.shape[0] != data.value_matrix.shape[0]:
         Logger.warning("Mesh and data dimensions do not match.")
-    data.value_matrix
     tree = cKDTree(mesh.vertices)
     dists, mesh_idxs = tree.query(data.point_matrix, k=1)
 
@@ -208,7 +207,7 @@ def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = 
 
     for m_idx, lst in enumerate(buckets):
         if lst:
-            avg_val = float(np.mean(comp_vals[lst]))
+            avg_val = np.mean(comp_vals[lst])
             best_data_i = max(lst, key=lambda i: comp_vals[i])
             comp_vals[best_data_i] = avg_val
             mesh_to_data_idx[m_idx] = best_data_i
@@ -216,7 +215,7 @@ def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = 
 
     return mesh_to_data_idx, mesh_dists
 
-def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
+def distribute_data(mesh: Mesh, data: RawData, left: bool=False) -> StateCollection:
     if global_data.incar is None:
         Logger.error("Incar data is not initialized.")
         raise
@@ -235,12 +234,13 @@ def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
 
     if isinstance(bw, EnergyWindow):
         size_map = {"k1": Nk[0], "k2": Nk[1], "k3": Nk[2]}
-        shape_core = tuple(size_map[d] for d in order)
+        
         has_E = ("E" in order)
         if has_E:
             shape_in = (Nv,) + tuple(Nk[0] if d == "k1" else Nk[1] if d == "k2" else Nk[2] if d == "k3" else -1 for d in order)
             pos = {dim: (order.index(dim) + 1) for dim in order}
         else:
+            shape_core = tuple(size_map[d] for d in order)
             shape_in = (Nv,) + shape_core + (-1,)
             pos = {dim: (order.index(dim) + 1) for dim in order}
             pos["E"] = 1 + len(order)
@@ -287,7 +287,10 @@ def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
                             raise
                         fields[i][j][k].append(vec)
 
-        global_data.state_collection.field = fields
+        if left:
+            global_data.state_collection.Lfield = fields
+        else:
+            global_data.state_collection.Rfield = fields
         Logger.info("distribute data finished (energy-window, ragged E)")
 
     else:
@@ -331,7 +334,10 @@ def distribute_data(mesh: Mesh, data: RawData) -> StateCollection:
                     for b in range(Nb):
                         fields[i][j][k][b] = t_reordered[:, i, j, k, b]
 
-        global_data.state_collection.field = fields
+        if left:
+            global_data.state_collection.Lfield = fields
+        else:
+            global_data.state_collection.Rfield = fields
         Logger.info("distribute data finished")
 
     return global_data.state_collection

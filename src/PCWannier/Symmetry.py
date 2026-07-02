@@ -332,8 +332,8 @@ class RotationOverlap:
 
         self.interp = CachedInterpolator2D(self.state_collection.mesh.vertices, self.state_collection.mesh.elements)
 
-        self._n_k1 = len(state_collection.field)
-        self._n_k2 = len(state_collection.field[0])
+        self._n_k1 = len(state_collection.Rfield)
+        self._n_k2 = len(state_collection.Rfield[0])
 
         kv_list = [(i, j, WannierTools.get_kxyz([i, j])) for i in range(self._n_k1 + 1) for j in range(self._n_k2 + 1)]
 
@@ -360,9 +360,9 @@ class RotationOverlap:
 
         L_cart = L_frac @ self.lattice.T
 
-        n_kx = len(self.state_collection.field)
-        n_ky = len(self.state_collection.field[0])
-        n_bnd = len(self.state_collection.field[0][0])
+        n_kx = len(self.state_collection.Rfield)
+        n_ky = len(self.state_collection.Rfield[0])
+        n_bnd = len(self.state_collection.Rfield[0][0])
         self.rot_psi = np.empty((n_kx, n_ky, n_bnd), dtype=object)
         self.k_rot_grid = np.empty((n_kx, n_ky, 2), dtype=float)
 
@@ -377,7 +377,7 @@ class RotationOverlap:
                 phase_shift = np.conj(self.state_collection.get_phase_k_r(kvec, v_cart))[0]
 
                 for m in range(n_bnd):
-                    u_k = self.state_collection.field[i][j][m]
+                    u_k = self.state_collection.Rfield[i][j][m]
 
                     u_rot = (bary * u_k[verts]).sum(axis=1)
                     self.rot_psi[i, j, m] = phase_shift * phase_wrap * u_rot
@@ -394,7 +394,7 @@ class RotationOverlap:
 
         k_key = (round(self.k_rot_grid[i, j, 0], 12), round(self.k_rot_grid[i, j, 1], 12))
         iR, jR = self._k_to_index[k_key]
-        psi_Rk = np.stack(self.state_collection.field[iR][jR])
+        psi_Rk = np.stack(self.state_collection.Rfield[iR][jR])
 
         n_bnd  = psi_Rk.shape[0]
         dblock = np.empty((n_bnd, n_bnd), dtype=complex)
@@ -476,12 +476,12 @@ class Orthogonalizer:
     def build_orthogonalization_matrix(self, state_collection: StateCollection) -> np.ndarray:
         if 'O' in global_data.incar.use_cached_data:
             Logger.info(f"using cache data - O")
-            self.transform = IO.load_cell_matrix(global_data.incar.O_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
+            self.transform = IO.load_cell_matrix(global_data.incar.S_file, shape=(len(global_data.incar.k_points[0]), len(global_data.incar.k_points[1])))
             return self.transform
 
-        self.transform = [[None for _ in range(len(state_collection.field[0]))] for _ in range(len(state_collection.field))]
-        for i in range(len(state_collection.field)):
-            for j in range(len(state_collection.field[i])):
+        self.transform = [[None for _ in range(len(state_collection.Rfield[0]))] for _ in range(len(state_collection.Rfield))]
+        for i in range(len(state_collection.Rfield)):
+            for j in range(len(state_collection.Rfield[i])):
                 group = self.group_eigenmodes(state_collection.E[i][j])
 
                 T = np.eye(len(state_collection.E[i][j]), dtype=complex)
@@ -489,7 +489,7 @@ class Orthogonalizer:
                     if len(g) == 1:
                         continue
 
-                    S = self.overlap_matrix(g, state_collection.field[i][j], state_collection.mesh, state_collection.epsilon)
+                    S = self.overlap_matrix(g, state_collection.Rfield[i][j], state_collection.mesh, state_collection.epsilon)
                     T_block = self.lowdin_orthogonalize_group(g, S)
                     idx = np.ix_(g, g)
                     T[idx] = T_block

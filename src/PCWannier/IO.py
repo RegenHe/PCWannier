@@ -311,35 +311,63 @@ class IO:
     def save_dict(filename: str, d: dict):
         try:
             with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"# dict_size={len(d)}\n")
+
                 for k, v in d.items():
-                    f.write(f"{k}\n")
+                    if isinstance(k, tuple):
+                        key_str = ", ".join(str(x) for x in k)
+                    else:
+                        key_str = str(k)
+
+                    f.write(f"CELL({key_str}) ")
+
                     if isinstance(v, np.ndarray):
                         arr = v
+                        f.write(f"shape={arr.shape}:\n")
+
                         if arr.ndim == 0:
                             f.write(IO._fmt_c(arr.item()) + "\n")
+
                         elif arr.ndim == 1:
                             f.write(IO._fmt_c(arr) + "\n")
+
                         else:
                             for i in range(arr.shape[0]):
                                 f.write(IO._fmt_c(arr[i]) + "\n")
 
                     elif isinstance(v, (list, tuple)):
                         if len(v) > 0 and isinstance(v[0], (list, tuple, np.ndarray)):
+                            nrows = len(v)
+                            try:
+                                ncols = len(v[0])
+                            except TypeError:
+                                ncols = "?"
+                            f.write(
+                                f"# type=list2d rows={nrows} cols={ncols}\n"
+                            )
                             for row in v:
                                 row = np.asarray(row)
                                 f.write(IO._fmt_c(row) + "\n")
                         else:
+                            f.write(
+                                f"# type=list1d len={len(v)}\n"
+                            )
                             f.write(IO._fmt_c(v) + "\n")
 
                     else:
+                        f.write(
+                            f"# type=scalar python_type={type(v).__name__}\n"
+                        )
                         f.write(f"{repr(v)}\n")
 
                     f.write("\n")
+
         except Exception as e:
             Logger.error(f"Error saving dict to {filename}: {e}")
             raise
         else:
             Logger.info(f"Dict saved to {filename}")
+
 
 
     @staticmethod

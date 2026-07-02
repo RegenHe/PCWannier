@@ -40,8 +40,6 @@ class StateInitializer:
     @timer("State Initialize iter - ")
     def iter(self, err_diff: float, max_iter: int):
         Logger.info('Starting state initialization iteration')
-        k1_sz = len(global_data.incar.k_points[0])
-        k2_sz = len(global_data.incar.k_points[1])
         E_idx = global_data.state_collection.E_idx
         B = global_data.incar.band_calc_num
 
@@ -199,7 +197,7 @@ class StateInitializer:
                 G = G.T
 
             for m in range(len(E_idx[i][j][k])):
-                field = global_data.state_collection.get_extention_field(i, j, k, m)
+                field = global_data.state_collection.get_extention_field(i, j, k, m, left=True)
                 
                 base = global_data.state_collection.extention_epsilon * np.conj(phase * field)
 

@@ -27,13 +27,14 @@ class IncarData:
         self.dataset_type: str = None
         self.dataset_file: str = None
         self.dataset_order: list = None
+        self.left_dataset_file: str = None
         self.dielectric_file: str = None
         self.N_file: str = None
         self.U_file: str = None
         self.V_file: str = None
         self.M_file: str = None
         self.A_file: str = None
-        self.O_file: str = None
+        self.S_file: str = None
         self.hermitian: bool = None
         self.E_file: str = None
         self.band_file: str = None
@@ -121,6 +122,7 @@ class IncarParser:
     DEFAULTS = {
         "name": "Wannier",
         "reciprocal_lattice_vectors": np.array([[0, 0], [0, 0]]),
+        "left_dataset_file": False,
         "dataset_type":  "comsol",
         "dataset_order": ["k1", "k2", "E"],
         "N_file" :  "./N.txt",
@@ -128,7 +130,7 @@ class IncarParser:
         "V_file": "./V.txt",
         "M_file": "./M.txt",
         "A_file": "./A.txt",
-        "O_file": "./O.txt",
+        "S_file": "./S.txt",
         "disable_orth": True,
         "hermitian": True,
         "band_file": "./band.txt",
@@ -183,7 +185,7 @@ class IncarParser:
 
     def parse_value(self, key: str, value: str):
         value = value.strip()
-        if key in ["name", "dataset_type", "dataset_file", "dielectric_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file", "finite_band_figure", "finite_band_file", "finite_wavefunction_file", "finite_DOS_file", "finite_DOS_figure"]:
+        if key in ["name", "dataset_type", "dataset_file", "left_dataset_file", "dielectric_file", "S_file", "U_file", "V_file", "A_file", "hopping_file", "wannier_file", "wannier_figure", "mesh_file", "M_file", "E_file", "band_figure", "band_file", "N_file", "topo_output", "eff_file", "decompose_file", "finite_band_figure", "finite_band_file", "finite_wavefunction_file", "finite_DOS_file", "finite_DOS_figure"]:
             return value
         elif key in ["epsilon", "err_diff", "DOS_eps", "finite_DOS_eps"]:
             return float(evaluate_math_expression(value.strip()))

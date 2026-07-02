@@ -59,10 +59,10 @@ class Fatband:
         for p in range(self.raw_data.value_matrix.shape[0]):
             t_feild[p] = self.raw_data.value_matrix[p].reshape((self.incar.kpoint_num, -1), order='C')
 
-        self.state_collection.field = [[None for _ in range(self.raw_data.value_matrix.shape[1] // self.incar.kpoint_num)] for _ in range(self.incar.kpoint_num)]
+        self.state_collection.Rfield = [[None for _ in range(self.raw_data.value_matrix.shape[1] // self.incar.kpoint_num)] for _ in range(self.incar.kpoint_num)]
         for i in range(self.incar.kpoint_num):
             for k in range(self.raw_data.value_matrix.shape[1] // self.incar.kpoint_num):
-                self.state_collection.field[i][k] = t_feild[:, i, k]
+                self.state_collection.Rfield[i][k] = t_feild[:, i, k]
 
         self.state_collection.E = self.E_raw_data.value_matrix[0].reshape((self.incar.kpoint_num, -1), order='C')
         
@@ -128,7 +128,7 @@ class Fatband:
                 G = G.T
 
             for m in range(self.raw_data.value_matrix.shape[1] // self.incar.kpoint_num):
-                field = np.array([self.state_collection.field[i][m][k] for k in self.state_collection.space_to_original_mapping])
+                field = np.array([self.state_collection.Rfield[i][m][k] for k in self.state_collection.space_to_original_mapping])
                 
                 base = self.state_collection.extention_epsilon * np.conj(field)
 
@@ -181,16 +181,16 @@ class Fatband:
             return
         self.is_bloch = True
 
-        for i in range(len(self.state_collection.field)):
-            for n in range(len(self.state_collection.field[0])):
+        for i in range(len(self.state_collection.Rfield)):
+            for n in range(len(self.state_collection.Rfield[0])):
                 phase = self.get_phase(i)
-                self.state_collection.field[i][n] = np.conj(phase) * self.state_collection.field[i][n]
+                self.state_collection.Rfield[i][n] = np.conj(phase) * self.state_collection.Rfield[i][n]
 
     def normalize(self) -> None:
-        self.normalization = [[None for _ in range(len(self.state_collection.field[0]))] for _ in range(len(self.state_collection.field))]
+        self.normalization = [[None for _ in range(len(self.state_collection.Rfield[0]))] for _ in range(len(self.state_collection.Rfield))]
 
         Nv = self.mesh.vertices.shape[0]
-        arr0 = np.asarray(self.state_collection.field[0][0])
+        arr0 = np.asarray(self.state_collection.Rfield[0][0])
         if arr0.ndim == 1:
             arr0 = arr0[None, :]
         elif arr0.ndim == 2 and arr0.shape[1] != Nv:
@@ -205,8 +205,8 @@ class Fatband:
             else:
                 raise ValueError(f"epsilon shape {eps.shape} != field shape {arr0.shape}")
         
-        for i in range(len(self.state_collection.field)):
-            arr = np.asarray(self.state_collection.field[i])
+        for i in range(len(self.state_collection.Rfield)):
+            arr = np.asarray(self.state_collection.Rfield[i])
             F = (np.abs(arr)**2 * eps).T
 
             fd = FieldData(self.state_collection.name, self.mesh, F.astype(np.complex128, copy=False))
@@ -219,11 +219,11 @@ class Fatband:
             self.normalization[i][:vals.shape[0]] = vals
         
         self.is_normalized = True
-        for i in range(len(self.state_collection.field)):
-            for n in range(len(self.state_collection.field[0])):
+        for i in range(len(self.state_collection.Rfield)):
+            for n in range(len(self.state_collection.Rfield[0])):
                 if self.normalization[i][n] == 0.0:
                     raise ValueError(f"Normalization failed for field ({i}, {n})")
-                self.state_collection.field[i][n] /= np.sqrt(self.normalization[i][n])
+                self.state_collection.Rfield[i][n] /= np.sqrt(self.normalization[i][n])
     
     def turn_to_Bloch(self) -> None:
         if self.is_bloch:
@@ -231,10 +231,10 @@ class Fatband:
             return
         self.is_bloch = True
 
-        for i in range(len(self.state_collection.field)):
-            for n in range(len(self.state_collection.field[0])):
+        for i in range(len(self.state_collection.Rfield)):
+            for n in range(len(self.state_collection.Rfield[0])):
                 phase = self.get_phase(i)
-                self.state_collection.field[i][n] = np.conj(phase) * self.state_collection.field[i][n]
+                self.state_collection.Rfield[i][n] = np.conj(phase) * self.state_collection.Rfield[i][n]
     def get_kx_ky(self, k1, k2) -> Tuple[float, float]:
         kx = self.incar.reciprocal_lattice_vectors[0, 0] * k1 + self.incar.reciprocal_lattice_vectors[1, 0] * k2
         ky = self.incar.reciprocal_lattice_vectors[0, 1] * k1 + self.incar.reciprocal_lattice_vectors[1, 1] * k2

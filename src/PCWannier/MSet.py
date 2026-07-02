@@ -19,8 +19,6 @@ class MSet:
     @timer("M matrix initialize - ")
     def init_M0(self, state_collection: StateCollection):
         Logger.info('Starting to M Matrix initialization')
-        k1_sz = len(global_data.incar.k_points[0])
-        k2_sz = len(global_data.incar.k_points[1])
 
         B = global_data.incar.band_calc_num
         E_idx = global_data.state_collection.E_idx
@@ -43,7 +41,7 @@ class MSet:
         for i, j, k in global_data.state_collection.k_indices():
             Nv = state_collection.mesh.vertices.shape[0]
 
-            left_arr = np.asarray(global_data.state_collection.get_block(i, j, k))
+            left_arr = np.asarray(global_data.state_collection.get_block(i, j, k, left=True))
             if left_arr.ndim == 1:
                 left_arr = left_arr[None, :]
             elif left_arr.shape[1] != Nv:
@@ -52,7 +50,7 @@ class MSet:
 
             for b in range(b_sz_half):
                 ik, k_ = WannierTools.neighbor_reciprocal_lattice_vectors([i, j, k], b)
-                right_arr = np.asarray(global_data.state_collection.field[ik[0]][ik[1]][ik[2]])
+                right_arr = np.asarray(global_data.state_collection.get_block(ik[0], ik[1], ik[2]))
                 if right_arr.ndim == 1:
                     right_arr = right_arr[None, :]
                 elif right_arr.shape[1] != Nv:

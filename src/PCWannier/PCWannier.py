@@ -21,13 +21,14 @@ from . import MeshData
 from . import MSet
 from . import StateInitializer
 from . import Gradient
-from . import TBAModal
+from . import TBAModel
 from . import Topo
 from . import Fatband
 
 class PCWannier:
     def __init__(self):
         self.wanniers: dict = {}
+        self.left_wanniers: dict = {}
 
     @timer("PCWannier run - ")
     def run(self, args):
@@ -50,7 +51,7 @@ class PCWannier:
         self._parse_input(args)
 
         if args.cache:
-            global_data.incar.use_cached_data = ['U', 'V', 'M', 'O', 'A']
+            global_data.incar.use_cached_data = ['U', 'V', 'M', 'S', 'A']
         
         self._load_data()
         self._prepare_state_collection()
@@ -78,6 +79,8 @@ class PCWannier:
         if global_data.incar.dataset_type.lower() == "comsol":
             self.mesh = MeshData.load_comsol_mesh(global_data.incar.mesh_file)
             self.raw_data = MeshData.load_comsol_data(global_data.incar.dataset_file)
+            if global_data.incar.hermitian is False:
+                self.Left_raw_data = MeshData.load_comsol_data(global_data.incar.left_dataset_file)
             self.epsilon = MeshData.load_comsol_data(global_data.incar.dielectric_file)
             self.epsilon.value_matrix = self.epsilon.value_matrix.flatten()
             if global_data.incar.E_file.lower() != 'false':
@@ -96,20 +99,24 @@ class PCWannier:
 
         idxs, _ = MeshData.match_data_to_mesh(self.mesh, self.raw_data)
         self.raw_data.value_matrix = self.raw_data.value_matrix[idxs]
+        MeshData.distribute_data(self.mesh, self.raw_data)
+
+        if global_data.incar.hermitian is False:
+            L_idxs, _ = MeshData.match_data_to_mesh(self.mesh, self.Left_raw_data)
+            self.Left_raw_data.value_matrix = self.Left_raw_data.value_matrix[L_idxs]
+            MeshData.distribute_data(self.mesh, self.Left_raw_data, left=True)
         
         idxs, _ = MeshData.match_data_to_mesh(self.mesh, self.epsilon)
-        MeshData.distribute_data(self.mesh, self.raw_data)
-        
         global_data.state_collection.epsilon = self.epsilon.value_matrix[idxs].flatten()
         global_data.state_collection.turn_to_Bloch()
 
-        _, need_orth = global_data.state_collection.check_orthogonality()
+        _, need_orth = global_data.state_collection.check_orthogonality(global_data.incar.hermitian)
         
         if need_orth:
             Logger.warning("Need to orthogonalize states")
-            global_data.state_collection.orthogonalize()
+            global_data.state_collection.orthogonalize(hermitian=global_data.incar.hermitian)
 
-            _, need_orth = global_data.state_collection.check_orthogonality()
+            _, need_orth = global_data.state_collection.check_orthogonality(hermitian=global_data.incar.hermitian)
             if need_orth:
                 Logger.error("Orthogonalization failed")
                 raise
@@ -215,7 +222,7 @@ class PCWannier:
         Logger.info("Try to orthogonalize eigenvalues")
         self.orthogonalizer = Orthogonalizer()
         Transform = self.orthogonalizer.build_orthogonalization_matrix(global_data.state_collection)
-        self.orthogonalizer.save_as(global_data.incar.O_file)
+        self.orthogonalizer.save_as(global_data.incar.S_file)
         global_data.state_collection.set_transform(Transform)
 
         seen = {}
@@ -261,7 +268,10 @@ class PCWannier:
         
 
     def _generate_output(self):
-        self.gen_wannier()
+        if global_data.incar.hermitian is False:
+            self.gen_non_Hermitian_wannier()
+        else:
+            self.gen_wannier()
         
         if not global_data.incar.M_in:
             global_data.m_set.save_as(global_data.incar.M_file)
@@ -269,7 +279,7 @@ class PCWannier:
         global_data.state_initializer.save_as(global_data.incar.V_file, global_data.incar.A_file)
         global_data.gradient.save_as(global_data.incar.U_file)
 
-        self.TBA = TBAModal.TBAModal()
+        self.TBA = TBAModel.TBAModal()
         
         if global_data.incar.hopping_file.lower() != "false":
             self.TBA.save_hoppings(global_data.incar.hopping_file)
@@ -316,8 +326,7 @@ class PCWannier:
                 interp_imag = Interpolator2D(global_data.state_collection.extention_mesh.vertices, global_data.state_collection.extention_mesh.elements, np.imag(wannier))
                 real = interp_real.batch_evaluate(mesh_point)
                 imag = interp_imag.batch_evaluate(mesh_point)
-                vals.append(real)
-                vals.append(imag)
+                vals.append(real + 1j * imag)
             if interp_wannier is None:
                 IO.save_points_with_values(f"{os.path.splitext(interp_path)[0]}-interp-wannier.txt", mesh_point, vals)
             else:
@@ -399,6 +408,86 @@ class PCWannier:
                     fdn = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[(r[0], r[1])][n])
                     fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-real.png", real=True)
                     fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-imag.png", real=False)
+    
+    @timer("Generate non-Hermitian Wannier - ")
+    def gen_non_Hermitian_wannier(self, r: list=[0, 0, 0], out: bool=True):
+        a0 = global_data.incar.lattice_const
+
+        avec = np.asarray(global_data.incar.real_lattice_vectors)
+        D = avec.shape[1]
+        r_use = list(r) + [0, 0, 0]
+        r_cart = np.zeros(D)
+        for a in range(global_data.incar.kdim):
+            r_cart += r_use[a] * avec[a, :]
+        r_cart *= a0
+
+        if out:
+            Logger.info(f"Generating Wannier Functions - r = {tuple(r_use[:global_data.incar.kdim])}")
+
+        B = global_data.incar.band_calc_num
+        E_idx = global_data.state_collection.E_idx
+
+        Nv = global_data.state_collection.extention_mesh.vertices.shape[0]
+
+        Wsum = np.zeros((Nv, B), dtype=np.complex128)
+        LWsum = np.zeros((Nv, B), dtype=np.complex128)
+        if global_data.incar.disable_orth:
+            if out:
+                Logger.info("Disable orthogonalization as requested")
+            T = global_data.state_collection.get_transform(True)
+        else:
+            T = global_data.state_collection.get_transform()
+        
+        sign = -1 if global_data.incar.dataset_type.lower() == 'comsol' else 1
+        for i, j, k in global_data.state_collection.k_indices():
+            phase_vec = global_data.state_collection.get_extention_phase(i, j, k)
+            k_vec = WannierTools.get_kxyz([i, j, k])[:D]
+            phase_scalar = np.exp(1j * (-(sign) * np.dot(k_vec, r_cart)))
+            P = phase_vec * phase_scalar
+
+            fields_ijk = [global_data.state_collection.get_extention_field(i, j, k, m) for m in range(len(E_idx[i][j][k]))]
+            E = np.column_stack(fields_ijk).astype(np.complex128, copy=False)
+            C = (T[i][j][k] @ global_data.state_initializer.matV[i][j][k] @ global_data.gradient.U[i][j][k])
+
+            U_ijk = E @ C
+
+            Wsum += U_ijk * P[:, None]
+
+            Lfields_ijk = [global_data.state_collection.get_extention_field(i, j, k, m, left=True) for m in range(len(E_idx[i][j][k]))]
+            LE = np.column_stack(Lfields_ijk).astype(np.complex128, copy=False)
+            LC = np.linalg.inv(C).conj().T
+
+            U_ijk = LE @ LC
+
+            LWsum += U_ijk * P[:, None]
+
+        Wsum /= np.sqrt(float(global_data.state_collection.get_k_num()))
+        LWsum /= np.sqrt(float(global_data.state_collection.get_k_num()))
+
+        self.wanniers[tuple(r_use[:global_data.incar.kdim])] = [Wsum[:, n] for n in range(B)]
+        self.left_wanniers[tuple(r_use[:global_data.incar.kdim])] = [LWsum[:, n] for n in range(B)]
+
+        if out:
+            Fnorm = (np.conj(LWsum) * Wsum ** 2) * global_data.state_collection.extention_epsilon[:, None]
+            fd = FieldData('wannier', global_data.state_collection.extention_mesh, Fnorm.astype(np.complex128, copy=False))
+            norms = WannierTools.integrate_over_mesh(fd, chunk_size=2048)
+            if norms.ndim == 0:
+                norms = np.array([norms])
+            for n in range(B):
+                norm = norms[n]
+                Logger.info(f"Check wannier function norm = {norm}")
+                if not np.isclose(np.abs(norm), 1.0, atol=1e-3):
+                    warn = (f"Normalization ({np.abs(norm)}) not equal to 1 in Wannier State - {n}, "
+                            f"err = {np.abs(1 - np.abs(norm))}")
+                    Logger.warning(warn)
+                if global_data.incar.wannier_figures.lower() != "false":
+                    fdn = FieldData('wannier', global_data.state_collection.extention_mesh, self.wanniers[(r[0], r[1])][n])
+                    fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-real.png", real=True)
+                    fdn.save_fig(global_data.incar.wannier_figures + f"/wannier-{n}-imag.png", real=False)
+
+                    fdn = FieldData('wannier', global_data.state_collection.extention_mesh, self.left_wanniers[(r[0], r[1])][n])
+                    fdn.save_fig(global_data.incar.wannier_figures + f"/left-wannier-{n}-real.png", real=True)
+                    fdn.save_fig(global_data.incar.wannier_figures + f"/left-wannier-{n}-imag.png", real=False)
     
     def get_wannier(self, r: list = [0, 0, 0]):
         kdim = global_data.incar.kdim

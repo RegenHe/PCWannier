@@ -55,11 +55,17 @@ class TBAModal:
         return hopping
 
     def save_hoppings(self, filename: str):
-        hoppings = [[None for _ in range(len(global_data.incar.hopping_state[1]))] for _ in range(len(global_data.incar.hopping_state[0]))]
-        for i in range(len(global_data.incar.hopping_state[0])):
-            for j in range(len(global_data.incar.hopping_state[1])):
-                hoppings[i][j] = self.gen_hopping([global_data.incar.hopping_state[0][i], global_data.incar.hopping_state[1][j]])
-        IO.save_to_txt(filename, hoppings, (len(global_data.incar.hopping_state[0]), len(global_data.incar.hopping_state[1])))
+        hoppings_dict = {}
+        hoppings_dict[(0, 0, 0)] = self.gen_hopping()
+        if global_data.incar.neighbor is None or len(global_data.incar.neighbor) == 0:
+            global_data.incar.neighbor = self.R_half_rect(global_data.state_collection.k_shape)
+
+        for idx, R in enumerate(global_data.incar.neighbor):
+            R3 = (*R[:3], 0, 0, 0)[:3]
+            hoppings_dict[(int(R3[0]), int(R3[1]), int(R3[2]))] = self.gen_hopping(R)
+        
+        IO.save_dict(filename, hoppings_dict)
+
 
     @timer("Generate High Symmetry Point Band Structure - ")
     def gen_hs_bands(self):
@@ -400,30 +406,33 @@ class TBAModal:
 
         self.H_eff = {}
 
-        Rlist = np.asarray(global_data.incar.neighbor, dtype=float)
-        Rint  = Rlist.astype(int, copy=False)
+        Rlist = np.asarray(global_data.incar.neighbor, dtype=float)[:, 0:global_data.incar.kdim]
+        Rint = Rlist.astype(int, copy=False)
         Tlist = np.stack(self.hoppings, axis=0).astype(np.complex128)
-        axes  = self._axis_names(Rlist.shape[1])
 
-        D = Rlist.shape[1]
+        D = global_data.incar.kdim
+        axes = self._axis_names(D)
+
         Nks = [len(global_data.incar.k_points[d]) for d in range(D)]
 
-        ra = np.mod(Rint, Nks)
-        cond_even = (Nks % 2 == 0)
-        even_ok = np.mod(2 * ra, Nks) == 0
-        odd_ok = ra == 0
-        per_dim_ok = np.where(cond_even, even_ok, odd_ok)
-        nyq_mask = per_dim_ok.all(axis=1) & (ra.any(axis=1))
+        def is_nyquist_vectorized(Rint, Nks):
+            mask = np.ones(Rint.shape[0], dtype=bool)
+            for d in range(Rint.shape[1]):
+                Nd = Nks[d]
+                if Nd % 2 != 0:
+                    mask &= False
+                else:
+                    mask &= ((2 * Rint[:, d]) % Nd == 0)
+            return mask
+
+        nyq_mask = is_nyquist_vectorized(Rint, Nks)
+        int_mask = ~nyq_mask
 
         if np.any(nyq_mask):
             Tn = Tlist[nyq_mask]
             Tlist[nyq_mask] = 0.5 * (Tn + np.conjugate(Tn).transpose(0, 2, 1))
 
-        int_mask = ~nyq_mask
-
-        eff_k = np.asarray(global_data.incar.eff_k, dtype=float).reshape(-1)
-
-        phase = np.exp(1j * 2 * np.pi * (Rlist @ eff_k))
+        phase = np.exp(1j * 2 * np.pi * (Rlist @ np.asarray(global_data.incar.eff_k, dtype=float)))
 
         WT  = phase[:, None, None] * Tlist
         WTd = np.conjugate(WT).transpose(0, 2, 1)

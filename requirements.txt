@@ -1,7 +1,0 @@
-matplotlib
-numpy
-scipy
-setuptools
-spglib
-spgrep
-numba

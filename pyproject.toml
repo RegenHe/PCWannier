@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcwannier"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = [
+  "matplotlib>=3.10",
+  "numpy>=2.0",
+  "scipy>=1.15",
+]
+
+[project.optional-dependencies]
+numba = [
+  "numba>=0.61",
+]
+
+[project.scripts]
+pcwannier = "pcwannier.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pcwannier*"]

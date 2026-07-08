@@ -9,13 +9,15 @@ import scipy.sparse.csgraph
 from ..data import BandResult
 from .context import CalculationContext
 from .kspace import get_kxyz
+from .parallel import parallel_map
 
 
 class TBAModel:
-    def __init__(self, ctx: CalculationContext):
+    def __init__(self, ctx: CalculationContext, threads: int = 1):
         self.ctx = ctx
         self.config = ctx.config
         self.state = ctx.state
+        self.threads = max(1, int(threads))
         self.hoppings: list[np.ndarray] | None = None
 
     def gen_hopping(self, r: list[int] | tuple[int, ...] | None = None) -> np.ndarray:
@@ -50,10 +52,15 @@ class TBAModel:
     def collect_hoppings(self) -> dict[tuple[int, int, int], np.ndarray]:
         if not self.config.neighbor:
             self.config.neighbor = self.R_half_rect(self.state.k_shape).tolist()
-        out = {(0, 0, 0): self.gen_hopping([0, 0, 0])}
-        for r in self.config.neighbor:
-            r3 = tuple((list(r) + [0, 0, 0])[:3])
-            out[tuple(int(x) for x in r3)] = self.gen_hopping(r)
+
+        r_list = [(0, 0, 0)] + [tuple((list(r) + [0, 0, 0])[:3]) for r in self.config.neighbor]
+
+        def calc_r(r3):
+            return tuple(int(x) for x in r3), self.gen_hopping(r3)
+
+        out = {}
+        for key, hopping in parallel_map(r_list, calc_r, self.threads):
+            out[key] = hopping
         return out
 
     def gen_hs_bands(self, hoppings: dict[tuple[int, int, int], np.ndarray]) -> BandResult:

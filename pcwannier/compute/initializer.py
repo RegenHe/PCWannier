@@ -4,9 +4,8 @@ import logging
 
 import numpy as np
 
-from ..data import FieldData
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_over_mesh
+from .integration import integrate_weighted_columns
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .matrix import MSet
 from .parallel import parallel_map
@@ -219,10 +218,11 @@ class StateInitializer:
                 h_columns.append(self.state.extention_mesh.rfunc(fn, cart_position, projection["xaxis_angluar"]))
 
         hmat = np.column_stack(h_columns)
-        norm_field = (np.abs(hmat) ** 2 * self.state.extention_epsilon[:, None]).astype(np.complex128, copy=False)
         norms = np.atleast_1d(
-            integrate_over_mesh(
-                FieldData("basis", self.state.extention_mesh, norm_field),
+            integrate_weighted_columns(
+                self.state.extention_mesh,
+                self.state.extention_epsilon,
+                np.abs(hmat) ** 2,
                 chunk_size=2048,
                 backend=self.state.compute_backend,
             )
@@ -238,8 +238,10 @@ class StateInitializer:
                 field = self.state.get_extention_field(i, j, k, m)
                 base = self.state.extention_epsilon * np.conj(phase * field)
                 vals = np.atleast_1d(
-                    integrate_over_mesh(
-                        FieldData("A", self.state.extention_mesh, base[:, None] * gmat),
+                    integrate_weighted_columns(
+                        self.state.extention_mesh,
+                        base,
+                        gmat,
                         chunk_size=2048,
                         backend=self.state.compute_backend,
                     )
@@ -302,38 +304,51 @@ class StateInitializer:
 
     def update_Z(self) -> None:
         b_count = len(self.config.composition_of_b)
-        for i, j, k in self.state.k_indices():
-            self.matZ[i, j, k] = np.zeros((len(self.O_idx[i, j, k]), len(self.O_idx[i, j, k])), dtype=np.complex128)
+
+        def calc_idx(idx):
+            i, j, k = idx
+            zmat = np.zeros((len(self.O_idx[i, j, k]), len(self.O_idx[i, j, k])), dtype=np.complex128)
             diag_ii = 0.0
             for b in range(b_count):
                 mmat = self.mset.get_M0(i, j, k, b)
                 ik, _ = neighbor_reciprocal_lattice_vectors(self.config, [i, j, k], b)
                 cb = mmat @ self.matV[ik]
                 cb_o = cb[self.O_idx[i, j, k], :]
-                self.matZ[i, j, k] += self.config.wb[b] * (cb_o @ cb_o.conj().T)
+                zmat += self.config.wb[b] * (cb_o @ cb_o.conj().T)
                 if self.I_idx[i, j, k].size > 0:
                     ci = cb[self.I_idx[i, j, k], :]
                     diag_ii += self.config.wb[b] * np.sum(np.abs(ci) ** 2)
-            self.diagII_sum[i, j, k] = diag_ii
-            self.matZ[i, j, k] = 0.5 * (self.matZ[i, j, k] + self.matZ[i, j, k].conj().T)
+            zmat = 0.5 * (zmat + zmat.conj().T)
             if self.last_matZ[i, j, k] is None:
-                self.last_matZ[i, j, k] = self.matZ[i, j, k]
+                next_last = zmat
             else:
-                self.matZ[i, j, k] = self.alpha * self.matZ[i, j, k] + (1 - self.alpha) * self.last_matZ[i, j, k]
-                self.last_matZ[i, j, k] = self.matZ[i, j, k]
+                zmat = self.alpha * zmat + (1 - self.alpha) * self.last_matZ[i, j, k]
+                next_last = zmat
+            return idx, zmat, next_last, diag_ii
+
+        for idx, zmat, next_last, diag_ii in parallel_map(self.state.k_indices(), calc_idx, self.threads):
+            self.matZ[idx] = zmat
+            self.last_matZ[idx] = next_last
+            self.diagII_sum[idx] = diag_ii
 
     def sort_Z(self) -> None:
         band_count = int(self.config.band_calc_num)
-        for i, j, k in self.state.k_indices():
+
+        def calc_idx(idx):
+            i, j, k = idx
             evals, vecs = np.linalg.eigh(self.matZ[i, j, k])
             p = band_count - len(self.I_idx[i, j, k])
             vp = vecs[:, -p:] if p > 0 else np.zeros((self.matZ[i, j, k].shape[0], 0), dtype=np.complex128)
-            self.lambda_[i, j, k] = float(np.sum(evals[-p:])) if p > 0 else 0.0
+            lambda_value = float(np.sum(evals[-p:])) if p > 0 else 0.0
             n_k = len(self.state.E_idx[i, j, k])
             uopt = np.zeros((n_k, p), dtype=np.complex128)
             uopt[self.O_idx[i, j, k], :] = vp
             ei = np.eye(n_k, dtype=np.complex128)[:, self.I_idx[i, j, k]] if self.I_idx[i, j, k].size else np.zeros((n_k, 0), dtype=np.complex128)
-            self.matV[i, j, k] = np.concatenate([ei, uopt], axis=1)[:, :band_count]
+            return idx, lambda_value, np.concatenate([ei, uopt], axis=1)[:, :band_count]
+
+        for idx, lambda_value, matv in parallel_map(self.state.k_indices(), calc_idx, self.threads):
+            self.lambda_[idx] = lambda_value
+            self.matV[idx] = matv
 
     def get_omega_I(self):
         total = 0.0

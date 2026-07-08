@@ -99,11 +99,18 @@ class Gradient:
         band_count = int(self.config.band_calc_num)
         b_count = len(self.config.composition_of_b)
         rn = np.zeros((self.config.kdim, band_count), dtype=np.complex128)
-        for i, j, k in self.state.k_indices():
+
+        def calc_idx(idx):
+            i, j, k = idx
+            local = np.zeros((self.config.kdim, band_count), dtype=np.complex128)
             for b in range(b_count):
                 mmat = self.mset.get(i, j, k, b)
                 for n in range(band_count):
-                    rn[:, n] -= self.config.wb[b] * self.config.b_vectors[b, :] * np.imag(np.log(mmat[n, n]))
+                    local[:, n] -= self.config.wb[b] * self.config.b_vectors[b, :] * np.imag(np.log(mmat[n, n]))
+            return local
+
+        for local in parallel_map(self.state.k_indices(), calc_idx, self.threads):
+            rn += local
         self.rn = rn / self.state.get_k_num()
         return self.rn
 
@@ -112,7 +119,10 @@ class Gradient:
         b_count = len(self.config.composition_of_b)
         self.generateRn()
         omega = np.zeros(3, dtype=np.complex128)
-        for i, j, k in self.state.k_indices():
+
+        def calc_idx(idx):
+            i, j, k = idx
+            local = np.zeros(3, dtype=np.complex128)
             for b in range(b_count):
                 mmat = self.mset.get(i, j, k, b)
                 temp_i = band_count
@@ -126,9 +136,13 @@ class Gradient:
                     temp_d += (
                         -np.imag(np.log(mmat[m, m])) - np.dot(self.config.b_vectors[b, :], self.rn[:, m])
                     ) ** 2
-                omega[0] += temp_i * self.config.wb[b]
-                omega[1] += temp_od * self.config.wb[b]
-                omega[2] += temp_d * self.config.wb[b]
+                local[0] += temp_i * self.config.wb[b]
+                local[1] += temp_od * self.config.wb[b]
+                local[2] += temp_d * self.config.wb[b]
+            return local
+
+        for local in parallel_map(self.state.k_indices(), calc_idx, self.threads):
+            omega += local
         self.omega = np.real(omega) / self.state.get_k_num()
 
     def set_center(self, center):

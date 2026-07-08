@@ -12,6 +12,7 @@ from .initializer import StateInitializer
 from .matrix import MSet
 from .state import StateCollection
 from .tba import TBAModel
+from .threading import blas_thread_limit, threadpool_summary
 from .topology import calculate_topology
 from .wannier import generate_wannier
 
@@ -19,17 +20,23 @@ LOGGER = logging.getLogger(__name__)
 
 
 def run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
+    with blas_thread_limit(threads):
+        return _run_calculation(bundle, threads=threads, backend=backend)
+
+
+def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
     config = bundle.config
     resolved_backend = resolve_backend(backend or config.compute_backend)
     LOGGER.info(
-        "Calculation setup: threads=%s backend=%s k_shape=%s mesh_vertices=%s mesh_triangles=%s",
+        "Calculation setup: threads=%s backend=%s blas=%s k_shape=%s mesh_vertices=%s mesh_triangles=%s",
         threads,
         resolved_backend,
+        threadpool_summary(),
         bundle.fields.shape,
         bundle.mesh.vertices.shape[0],
         bundle.mesh.elements.shape[0],
     )
-    state = StateCollection(bundle, backend=resolved_backend)
+    state = StateCollection(bundle, backend=resolved_backend, threads=threads)
     with timed_step("check orthogonality", LOGGER):
         report, need_orth = state.check_orthogonality()
     LOGGER.info(
@@ -83,7 +90,7 @@ def run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | Non
         float(np.max(np.real(norms))),
         float(np.max(np.abs(np.imag(norms)))),
     )
-    tba = TBAModel(ctx)
+    tba = TBAModel(ctx, threads=threads)
     with timed_step("collect hopping matrices", LOGGER):
         hoppings = tba.collect_hoppings()
     LOGGER.info("Hopping matrices collected: count=%s", len(hoppings))

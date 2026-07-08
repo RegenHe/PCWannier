@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..data import FieldData
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_over_mesh
+from .integration import integrate_weighted_columns
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .parallel import parallel_map
 from .state import StateCollection
@@ -67,12 +66,14 @@ class MSet:
                     phase2 = self.state.get_phase(*k_raw)
                     right = right * (phase1 * np.conj(phase2))[None, :]
                 mat = np.zeros((left.shape[0], right.shape[0]), dtype=np.complex128)
+                right_t = right.T
                 for m in range(left.shape[0]):
                     base = np.conj(left[m]) * self.state.epsilon
-                    fmat = (right * base[None, :]).T.astype(np.complex128, copy=False)
                     mat[m, :] = np.atleast_1d(
-                        integrate_over_mesh(
-                            FieldData("M0", self.state.mesh, fmat),
+                        integrate_weighted_columns(
+                            self.state.mesh,
+                            base,
+                            right_t,
                             chunk_size=2048,
                             backend=self.state.compute_backend,
                         )

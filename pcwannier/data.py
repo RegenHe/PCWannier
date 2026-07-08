@@ -53,27 +53,17 @@ class Mesh:
 
         original_vertices = self.vertices.copy()
         original_elements = self.elements.copy()
-        space_to_original_mapping: np.ndarray = np.arange(len(original_vertices), dtype=np.intp)
+        nv = original_vertices.shape[0]
+        ne = original_elements.shape[0]
+        tile_offsets = self._extension_offsets(n, real_lattice_vectors, lattice_const)
 
-        for i in range(n[0]):
-            for j in range(n[1]):
-                if i == 0 and j == 0:
-                    continue
-                offset_x = (real_lattice_vectors[0][0] * i + real_lattice_vectors[1][0] * j) * lattice_const
-                offset_y = (real_lattice_vectors[0][1] * i + real_lattice_vectors[1][1] * j) * lattice_const
-                new_elements = original_elements + int(np.max(self.elements)) + 1
-                new_vertices = original_vertices + np.array([offset_x, offset_y])
+        tiled_vertices = (original_vertices[None, :, :] + tile_offsets[:, None, :]).reshape(-1, original_vertices.shape[1])
+        tiled_elements = (
+            original_elements[None, :, :] + (np.arange(tile_offsets.shape[0], dtype=np.intp) * nv)[:, None, None]
+        ).reshape(tile_offsets.shape[0] * ne, original_elements.shape[1])
+        tiled_mapping = np.tile(np.arange(nv, dtype=np.intp), tile_offsets.shape[0])
 
-                idx_new, idx_existing = self.match(new_vertices, self.vertices)
-                for new_idx, old_idx in zip(idx_new, idx_existing):
-                    new_elements[new_elements == (new_idx + int(np.max(self.elements)) + 1)] = old_idx
-
-                self.elements = np.vstack((self.elements, new_elements))
-                self.vertices = np.vstack((self.vertices, new_vertices))
-                space_to_original_mapping = np.hstack(
-                    (space_to_original_mapping, np.arange(len(original_vertices), dtype=np.intp))
-                )
-                _, space_to_original_mapping = self.rebuild_index(space_to_original_mapping)
+        raw_to_unique, unique_raw = self._merge_extension_vertices(tiled_vertices, nv)
 
         offset_x = (
             real_lattice_vectors[0][0] * np.floor((n[0] - 1) / 2)
@@ -83,9 +73,80 @@ class Mesh:
             real_lattice_vectors[0][1] * np.floor((n[0] - 1) / 2)
             + real_lattice_vectors[1][1] * np.floor((n[1] - 1) / 2)
         ) * lattice_const
-        self.vertices = self.vertices - np.array([offset_x, offset_y])
+        self.vertices = tiled_vertices[unique_raw] - np.array([offset_x, offset_y])
+        self.elements = raw_to_unique[tiled_elements]
+        self.edge = None
         self._precompute_tri_weights()
-        return np.asarray(space_to_original_mapping, dtype=np.intp)
+        return tiled_mapping[unique_raw]
+
+    def _extension_offsets(
+        self,
+        n: list[int],
+        real_lattice_vectors: list[list[float]],
+        lattice_const: float,
+    ) -> np.ndarray:
+        a1 = np.asarray(real_lattice_vectors[0], dtype=float) * lattice_const
+        a2 = np.asarray(real_lattice_vectors[1], dtype=float) * lattice_const
+        offsets = np.empty((int(n[0]) * int(n[1]), 2), dtype=float)
+        pos = 0
+        for i in range(int(n[0])):
+            for j in range(int(n[1])):
+                offsets[pos] = i * a1 + j * a2
+                pos += 1
+        return offsets
+
+    def _merge_extension_vertices(self, vertices: np.ndarray, original_vertex_count: int) -> tuple[np.ndarray, np.ndarray]:
+        raw_count = vertices.shape[0]
+        parent = np.arange(raw_count, dtype=np.intp)
+        boundary_mask = self._boundary_vertex_mask(original_vertex_count)
+        candidates = np.flatnonzero(np.tile(boundary_mask, raw_count // original_vertex_count))
+
+        threshold = max(float(self.mindist) * 0.5, 1e-12)
+        if candidates.size > 1:
+            tree = cKDTree(vertices[candidates])
+            for local_a, local_b in tree.query_pairs(threshold):
+                self._union_min(parent, int(candidates[local_a]), int(candidates[local_b]))
+
+        reps = np.fromiter((self._find(parent, idx) for idx in range(raw_count)), dtype=np.intp, count=raw_count)
+        unique_raw, raw_to_unique = np.unique(reps, return_inverse=True)
+        return raw_to_unique.astype(np.intp, copy=False), unique_raw.astype(np.intp, copy=False)
+
+    def _boundary_vertex_mask(self, original_vertex_count: int) -> np.ndarray:
+        mask = np.zeros(original_vertex_count, dtype=bool)
+        if self.edge is not None and self.edge.size:
+            mask[np.unique(np.asarray(self.edge, dtype=np.intp).reshape(-1))] = True
+            return mask
+
+        elems = np.asarray(self.elements, dtype=np.intp)
+        edges = np.vstack((elems[:, [0, 1]], elems[:, [1, 2]], elems[:, [2, 0]]))
+        edges.sort(axis=1)
+        unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+        boundary_edges = unique_edges[counts == 1]
+        if boundary_edges.size:
+            mask[np.unique(boundary_edges.reshape(-1))] = True
+        return mask
+
+    @staticmethod
+    def _find(parent: np.ndarray, idx: int) -> int:
+        root = idx
+        while parent[root] != root:
+            root = int(parent[root])
+        while parent[idx] != idx:
+            nxt = int(parent[idx])
+            parent[idx] = root
+            idx = nxt
+        return root
+
+    @classmethod
+    def _union_min(cls, parent: np.ndarray, a: int, b: int) -> None:
+        root_a = cls._find(parent, a)
+        root_b = cls._find(parent, b)
+        if root_a == root_b:
+            return
+        if root_a < root_b:
+            parent[root_b] = root_a
+        else:
+            parent[root_a] = root_b
 
     def match(self, new_vertices: np.ndarray, vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         tree = cKDTree(new_vertices)

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
-from ..data import FieldData, InputBundle, Mesh
-from .integration import integrate_over_mesh
+from ..data import InputBundle, Mesh
+from .integration import integrate_weighted_columns
 from .kspace import get_kxyz
+from .parallel import parallel_map
 
 
 class StateCollection:
-    def __init__(self, bundle: InputBundle, *, backend: str = "python"):
+    def __init__(self, bundle: InputBundle, *, backend: str = "python", threads: int = 1):
         self.config = bundle.config
         self.compute_backend = backend
+        self.threads = max(1, int(threads))
         self.mesh = bundle.mesh
         self.fields = bundle.fields
         self.epsilon = np.asarray(bundle.epsilon)
@@ -82,71 +82,43 @@ class StateCollection:
         self.S = self.gen_matrix_on_kmesh(lambda *_: None)
         self.transform = self.gen_matrix_on_kmesh(lambda *_: None)
         self.transform_correction = self.gen_matrix_on_kmesh(lambda *_: None)
-        eps = np.asarray(self.epsilon)
-        nv = self.mesh.vertices.shape[0]
 
-        for i, j, k in self.k_indices():
-            wblock = self.get_block(i, j, k)
-            if wblock.ndim == 1:
-                wblock = wblock[None, :]
-            elif wblock.shape[1] != nv:
-                wblock = wblock.T
-            nwin = wblock.shape[0]
-            smat = np.empty((nwin, nwin), dtype=np.complex128)
-            for a in self.n_indices(i, j, k):
-                left = np.conj(self.get(i, j, k, a)) * eps
-                fmat = (left[:, None] * wblock.T).astype(np.complex128, copy=False)
-                vals = np.atleast_1d(
-                    integrate_over_mesh(
-                        FieldData("S", self.mesh, fmat),
-                        chunk_size=2048,
-                        backend=self.compute_backend,
-                    )
-                )
-                smat[a, :] = vals[:]
-
+        def calc_idx(idx):
+            i, j, k = idx
+            smat = self._overlap_matrix(i, j, k)
             evals, vecs = np.linalg.eigh(smat)
             lam = evals.real
             tau = max(tol_rel * np.max(lam), atol_abs)
             invsqrt = 1.0 / np.sqrt(np.maximum(lam, tau))
             tfull = vecs @ np.diag(invsqrt) @ vecs.conj().T
             tdiag = np.diag(np.diag(tfull))
+            scaled = []
             for n in range(len(self.fields[i, j, k])):
                 if tdiag[n, n] == 0.0:
                     raise ValueError(f"Normalization failed at ({i}, {j}, {k}, {n}).")
-                self.fields[i, j, k][n] *= tdiag[n, n]
+                scaled.append(self.fields[i, j, k][n] * tdiag[n, n])
+            return idx, smat, tfull, np.linalg.inv(tdiag) @ tfull, scaled
+
+        for idx, smat, tfull, tcorr, scaled in parallel_map(self.k_indices(), calc_idx, self.configured_threads):
+            i, j, k = idx
+            for n, field in enumerate(scaled):
+                self.fields[i, j, k][n] = field
             self.S[i, j, k] = smat
             self.transform[i, j, k] = tfull
-            self.transform_correction[i, j, k] = np.linalg.inv(tdiag) @ tfull
+            self.transform_correction[i, j, k] = tcorr
         self.is_orthogonalized = True
 
     def check_orthogonality(self) -> tuple[np.ndarray, bool]:
-        eps = np.asarray(self.epsilon)
         report = np.zeros(self.k_shape + (6,), dtype=float)
         need_orth = False
-        nv = self.mesh.vertices.shape[0]
-        for i, j, k in self.k_indices():
-            wblock = self.get_block(i, j, k)
-            if wblock.ndim == 1:
-                wblock = wblock[None, :]
-            elif wblock.shape[1] != nv:
-                wblock = wblock.T
-            nwin = wblock.shape[0]
-            smat = np.empty((nwin, nwin), dtype=np.complex128)
-            for a in self.n_indices(i, j, k):
-                left = np.conj(self.get(i, j, k, a)) * eps
-                fmat = (left[:, None] * wblock.T).astype(np.complex128, copy=False)
-                vals = np.atleast_1d(
-                    integrate_over_mesh(
-                        FieldData("S", self.mesh, fmat),
-                        chunk_size=2048,
-                        backend=self.compute_backend,
-                    )
-                )
-                smat[a, :] = vals[:]
+
+        def calc_idx(idx):
+            i, j, k = idx
+            smat = self._overlap_matrix(i, j, k)
             if self.is_orthogonalized and self.transform_correction is not None:
                 tcorr = self.transform_correction[i, j, k]
                 smat = tcorr.conj().T @ smat @ tcorr
+            nwin = smat.shape[0]
             herm_res = float(np.linalg.norm(smat - smat.conj().T, ord="fro"))
             diag = np.real(np.diag(smat))
             diag_max_err = float(np.max(np.abs(diag - 1.0))) if nwin > 0 else 0.0
@@ -157,10 +129,42 @@ class StateCollection:
             lam_min = float(np.min(evals))
             lam_max = float(np.max(evals))
             cond = float(lam_max / max(lam_min, 1e-16)) if lam_max > 0 else np.inf
-            report[i, j, k] = [herm_res, diag_max_err, offdiag_max, frob_res, lam_min, cond]
-            if herm_res > 1e-8 or diag_max_err > 1e-3 or offdiag_max > 1e-3 or lam_min < -1e-6:
-                need_orth = True
+            row = np.array([herm_res, diag_max_err, offdiag_max, frob_res, lam_min, cond], dtype=float)
+            local_need = herm_res > 1e-8 or diag_max_err > 1e-3 or offdiag_max > 1e-3 or lam_min < -1e-6
+            return idx, row, local_need
+
+        for idx, row, local_need in parallel_map(self.k_indices(), calc_idx, self.configured_threads):
+            report[idx] = row
+            need_orth = need_orth or local_need
         return report, need_orth
+
+    @property
+    def configured_threads(self) -> int:
+        return self.threads
+
+    def _overlap_matrix(self, i: int, j: int, k: int) -> np.ndarray:
+        eps = np.asarray(self.epsilon)
+        nv = self.mesh.vertices.shape[0]
+        wblock = self.get_block(i, j, k)
+        if wblock.ndim == 1:
+            wblock = wblock[None, :]
+        elif wblock.shape[1] != nv:
+            wblock = wblock.T
+        nwin = wblock.shape[0]
+        smat = np.empty((nwin, nwin), dtype=np.complex128)
+        right = wblock.T
+        for a in self.n_indices(i, j, k):
+            left = np.conj(self.get(i, j, k, a)) * eps
+            smat[a, :] = np.atleast_1d(
+                integrate_weighted_columns(
+                    self.mesh,
+                    left,
+                    right,
+                    chunk_size=2048,
+                    backend=self.compute_backend,
+                )
+            )
+        return smat
 
     def turn_to_bloch(self) -> None:
         if self.is_bloch:
@@ -201,13 +205,13 @@ class StateCollection:
     def get_extention_field(self, i: int, j: int, k: int, n: int) -> np.ndarray:
         if self.extention_mesh is None or self.space_to_original_mapping is None:
             raise ValueError("The field has not been extended.")
-        scale = math.sqrt(float(np.prod(self.config.extension[: self.config.kdim])))
+        scale = np.sqrt(float(np.prod(self.config.extension[: self.config.kdim])))
         base = self.fields[i, j, k][n]
-        return np.asarray([base[p] / scale for p in self.space_to_original_mapping], dtype=np.complex128)
+        return np.asarray(base, dtype=np.complex128)[self.space_to_original_mapping] / scale
 
     def get_extention_epsilon(self) -> np.ndarray:
         if self.extention_mesh is None or self.space_to_original_mapping is None:
             raise ValueError("The field has not been extended.")
         if self.extention_epsilon is None:
-            self.extention_epsilon = np.asarray([self.epsilon[p] for p in self.space_to_original_mapping])
+            self.extention_epsilon = np.asarray(self.epsilon)[self.space_to_original_mapping]
         return self.extention_epsilon

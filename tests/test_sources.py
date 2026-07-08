@@ -1,7 +1,7 @@
 import numpy as np
 
 from pcwannier import load_config
-from pcwannier.compute import integrate_over_mesh, is_numba_available
+from pcwannier.compute import integrate_over_mesh, integrate_weighted_columns, is_numba_available
 from pcwannier.data import FieldData, Mesh
 from pcwannier.sources.comsol import load_comsol_data, load_comsol_mesh, load_input, match_data_to_mesh
 
@@ -50,3 +50,81 @@ def test_match_data_to_mesh_and_integral_formula():
     idxs, dists = match_data_to_mesh(load_comsol_mesh(str(cfg.input_path(cfg.mesh_file))), raw)
     assert len(idxs) == 499
     assert np.min(np.abs(dists)) <= 1e-6
+
+
+def test_weighted_columns_matches_explicit_integral_matrix():
+    vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    elements = np.array([[0, 1, 2], [1, 3, 2]])
+    mesh = Mesh(vertices, elements)
+    left = np.array([1.0 + 1.0j, 2.0, -0.5j, 3.0 - 2.0j])
+    right = np.array(
+        [
+            [1.0, 2.0 - 1.0j],
+            [0.5j, -2.0],
+            [3.0, 0.25],
+            [-1.0 + 1.0j, 0.75j],
+        ],
+        dtype=np.complex128,
+    )
+
+    expected = integrate_over_mesh(FieldData("explicit", mesh, left[:, None] * right), backend="python")
+    actual = integrate_weighted_columns(mesh, left, right, backend="python")
+
+    assert np.allclose(actual, expected)
+    if is_numba_available():
+        assert np.allclose(integrate_weighted_columns(mesh, left, right, backend="numba"), expected)
+
+
+def test_mesh_extension_matches_legacy_incremental_algorithm():
+    vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    elements = np.array([[0, 1, 2], [1, 3, 2]])
+    edge = np.array([[0, 1], [1, 3], [3, 2], [2, 0]])
+    avec = [[1.0, 0.0], [0.0, 1.0]]
+
+    for ext in ([1, 1], [2, 2], [3, 2]):
+        new_mesh = Mesh(vertices.copy(), elements.copy(), edge.copy())
+        new_mapping = new_mesh.extension(ext, avec, 1.0)
+        old_mesh = Mesh(vertices.copy(), elements.copy(), edge.copy())
+        old_mapping = _legacy_extension(old_mesh, ext, avec, 1.0)
+
+        assert np.allclose(new_mesh.vertices, old_mesh.vertices)
+        assert np.array_equal(new_mesh.elements, old_mesh.elements)
+        assert np.array_equal(new_mapping, old_mapping)
+        assert np.allclose(new_mesh.tri_weights, old_mesh.tri_weights)
+
+
+def _legacy_extension(mesh: Mesh, n, real_lattice_vectors, lattice_const):
+    original_vertices = mesh.vertices.copy()
+    original_elements = mesh.elements.copy()
+    mapping = np.arange(len(original_vertices), dtype=np.intp)
+
+    for i in range(n[0]):
+        for j in range(n[1]):
+            if i == 0 and j == 0:
+                continue
+            offset_x = (real_lattice_vectors[0][0] * i + real_lattice_vectors[1][0] * j) * lattice_const
+            offset_y = (real_lattice_vectors[0][1] * i + real_lattice_vectors[1][1] * j) * lattice_const
+            base_index = int(np.max(mesh.elements)) + 1
+            new_elements = original_elements + base_index
+            new_vertices = original_vertices + np.array([offset_x, offset_y])
+
+            idx_new, idx_existing = mesh.match(new_vertices, mesh.vertices)
+            for new_idx, old_idx in zip(idx_new, idx_existing):
+                new_elements[new_elements == (new_idx + base_index)] = old_idx
+
+            mesh.elements = np.vstack((mesh.elements, new_elements))
+            mesh.vertices = np.vstack((mesh.vertices, new_vertices))
+            mapping = np.hstack((mapping, np.arange(len(original_vertices), dtype=np.intp)))
+            _, mapping = mesh.rebuild_index(mapping)
+
+    offset_x = (
+        real_lattice_vectors[0][0] * np.floor((n[0] - 1) / 2)
+        + real_lattice_vectors[1][0] * np.floor((n[1] - 1) / 2)
+    ) * lattice_const
+    offset_y = (
+        real_lattice_vectors[0][1] * np.floor((n[0] - 1) / 2)
+        + real_lattice_vectors[1][1] * np.floor((n[1] - 1) / 2)
+    ) * lattice_const
+    mesh.vertices = mesh.vertices - np.array([offset_x, offset_y])
+    mesh._precompute_tri_weights()
+    return np.asarray(mapping, dtype=np.intp)

@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from pcwannier import EnergyWindow, load_config
+from pcwannier.config import evaluate_math_expression
 
 
 def test_load_data_incar_defaults_and_preprocess():
@@ -50,3 +52,9 @@ def test_energy_window_parser(tmp_path):
     assert cfg.band_window.emin == 0.1
     assert cfg.band_window.emax == 0.9
     assert cfg.compute_backend == "auto"
+
+
+def test_math_expression_parser_is_limited():
+    assert np.isclose(evaluate_math_expression("sqrt(4) + pi / pi"), 3.0)
+    with pytest.raises(ValueError):
+        evaluate_math_expression("__import__('os').system('echo nope')")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .context import CalculationContext
-from .integration import integrate_weighted_columns
+from .integration import integrate_weighted_abs2_columns
 from .kspace import get_kxyz
 
 
@@ -30,16 +30,15 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
         k_vec = get_kxyz(config, [i, j, k])[:dim]
         phase_scalar = np.exp(1j * (-(sign) * np.dot(k_vec, r_cart)))
         pvec = phase_vec * phase_scalar
-        fields = [state.get_extention_field(i, j, k, m) for m in range(len(state.E_idx[i, j, k]))]
-        emat = np.column_stack(fields).astype(np.complex128, copy=False)
+        emat = state.get_extention_block(i, j, k).T
         coeff = transform[i, j, k] @ ctx.initializer.matV[i, j, k] @ ctx.gradient.U[i, j, k]
         wsum += (emat @ coeff) * pvec[:, None]
     wsum /= np.sqrt(float(state.get_k_num()))
     norms = np.atleast_1d(
-        integrate_weighted_columns(
+        integrate_weighted_abs2_columns(
             state.extention_mesh,
             state.extention_epsilon,
-            np.abs(wsum) ** 2,
+            wsum,
             chunk_size=2048,
             backend=state.compute_backend,
         )

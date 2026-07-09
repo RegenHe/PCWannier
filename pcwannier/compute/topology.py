@@ -13,14 +13,11 @@ class Topology2D:
     def construct_parallel_transport(self, eigvecs: np.ndarray):
         n_k1, n_k2, dim, occ = eigvecs.shape
         self.U = np.empty((2, n_k1, n_k2, occ, occ), dtype=np.complex128)
-        for i in range(n_k1):
-            for j in range(n_k2):
-                mat = eigvecs[i, j, :, :].conj().T @ eigvecs[(i + 1) % n_k1, j, :, :]
-                u, _, vh = np.linalg.svd(mat)
-                self.U[0, i, j] = u @ vh
-                mat = eigvecs[i, j, :, :].conj().T @ eigvecs[i, (j + 1) % n_k2, :, :]
-                u, _, vh = np.linalg.svd(mat)
-                self.U[1, i, j] = u @ vh
+        mats_0 = np.einsum("ijda,ijdb->ijab", eigvecs.conj(), np.roll(eigvecs, -1, axis=0), optimize=True)
+        mats_1 = np.einsum("ijda,ijdb->ijab", eigvecs.conj(), np.roll(eigvecs, -1, axis=1), optimize=True)
+        for direction, mats in enumerate((mats_0, mats_1)):
+            u, _, vh = np.linalg.svd(mats.reshape(n_k1 * n_k2, occ, occ))
+            self.U[direction] = (u @ vh).reshape(n_k1, n_k2, occ, occ)
 
     def hybrid_Wilson_loop(self, eigvecs: np.ndarray, direction: int = 0):
         if self.U is None:
@@ -50,13 +47,14 @@ class Topology2D:
             self.construct_parallel_transport(eigvecs)
         u1 = self.U[0]
         u2 = self.U[1]
-        flux = np.zeros((n_k1, n_k2), dtype=float)
-        total = 0.0
-        for i in range(n_k1):
-            for j in range(n_k2):
-                loop = u1[i, j] @ u2[(i + 1) % n_k1, j] @ u1[i, (j + 1) % n_k2].conj().T @ u2[i, j].conj().T
-                flux[i, j] = np.angle(np.linalg.det(loop))
-                total += flux[i, j]
+        loop = (
+            u1
+            @ np.roll(u2, -1, axis=0)
+            @ np.swapaxes(np.roll(u1, -1, axis=1).conj(), -2, -1)
+            @ np.swapaxes(u2.conj(), -2, -1)
+        )
+        flux = np.angle(np.linalg.det(loop))
+        total = float(np.sum(flux))
         return flux, float(total / (2 * np.pi))
 
 

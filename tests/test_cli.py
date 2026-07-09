@@ -4,12 +4,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import pcwannier.cli as cli_module
 from pcwannier.cli import main
 from pcwannier.cli import parse_args
 from pcwannier.sources.comsol import load_comsol_mesh
 
 
-def test_cli_smoke_writes_outputs(tmp_path):
+def test_cli_smoke_writes_outputs(tmp_path, monkeypatch):
     case = tmp_path / "case"
     case.mkdir()
     for name in ["incar", "mesh.mphtxt", "Ez.txt", "eps.txt", "E.txt"]:
@@ -51,9 +52,9 @@ def test_cli_smoke_writes_outputs(tmp_path):
                 "--interp",
                 str(interp_points),
                 "--interp-wannier",
-                str(interp_wannier),
+                "interp-wannier.txt",
                 "--interp-epsilon",
-                str(interp_epsilon),
+                "interp-epsilon.txt",
             ]
         )
         == 0
@@ -79,6 +80,11 @@ def test_cli_smoke_writes_outputs(tmp_path):
     assert main(["-i", str(incar), "--out", str(out), "-t", "1", "-l", "cache-log.txt", "--cache"]) == 0
 
     base_out = tmp_path / "base-out"
+
+    def fail_load_input(_config):
+        raise AssertionError("--base should not load full field data")
+
+    monkeypatch.setattr(cli_module, "load_input", fail_load_input)
     assert main(["-i", str(incar), "--out", str(base_out), "-b", "-l", "base-log.txt"]) == 0
     assert (base_out / "base" / "base-0-real.png").exists()
 

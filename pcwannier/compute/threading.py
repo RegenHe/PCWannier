@@ -17,7 +17,7 @@ def threadpool_summary() -> str:
     try:
         from threadpoolctl import threadpool_info
     except Exception:
-        return "unavailable"
+        return "unavailable (install optional performance extra for BLAS thread info)"
     info = threadpool_info()
     if not info:
         return "none"

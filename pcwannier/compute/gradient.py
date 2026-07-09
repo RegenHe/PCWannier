@@ -69,16 +69,10 @@ class Gradient:
             gmat = np.zeros((band_count, band_count), dtype=np.complex128)
             for b in range(b_count):
                 mmat = self.mset.get(i, j, k, b)
-                mr = np.zeros((band_count, band_count), dtype=np.complex128)
-                mt = np.zeros((band_count, band_count), dtype=np.complex128)
-                for m in range(band_count):
-                    for n in range(band_count):
-                        mr[m, n] = mmat[m, n] * np.conj(mmat[n, n])
-                        mt[m, n] = (
-                            mmat[m, n]
-                            / mmat[n, n]
-                            * (np.imag(np.log(mmat[n, n])) + np.dot(self.config.b_vectors[b, :], self.rn[:, n]))
-                        )
+                diag = np.diag(mmat)
+                mr = mmat * np.conj(diag)[None, :]
+                phase = np.imag(np.log(diag)) + np.dot(self.config.b_vectors[b, :], self.rn)
+                mt = (mmat / diag[None, :]) * phase[None, :]
                 gmat += self.config.wb[b] * (self.operator_A(mr) - self.operator_S(mt))
             gmat *= 4
             dw = self.epsilon * gmat
@@ -105,8 +99,11 @@ class Gradient:
             local = np.zeros((self.config.kdim, band_count), dtype=np.complex128)
             for b in range(b_count):
                 mmat = self.mset.get(i, j, k, b)
-                for n in range(band_count):
-                    local[:, n] -= self.config.wb[b] * self.config.b_vectors[b, :] * np.imag(np.log(mmat[n, n]))
+                local -= (
+                    self.config.wb[b]
+                    * self.config.b_vectors[b, :, None]
+                    * np.imag(np.log(np.diag(mmat)))[None, :]
+                )
             return local
 
         for local in parallel_map(self.state.k_indices(), calc_idx, self.threads):
@@ -125,17 +122,17 @@ class Gradient:
             local = np.zeros(3, dtype=np.complex128)
             for b in range(b_count):
                 mmat = self.mset.get(i, j, k, b)
-                temp_i = band_count
-                temp_od = 0
-                temp_d = 0
-                for m in range(band_count):
-                    for n in range(band_count):
-                        temp_i -= np.abs(mmat[m, n]) ** 2
-                        if m != n:
-                            temp_od += np.abs(mmat[m, n]) ** 2
-                    temp_d += (
-                        -np.imag(np.log(mmat[m, m])) - np.dot(self.config.b_vectors[b, :], self.rn[:, m])
-                    ) ** 2
+                abs2 = np.abs(mmat) ** 2
+                diag_abs2 = np.abs(np.diag(mmat)) ** 2
+                temp_i = band_count - np.sum(abs2)
+                temp_od = np.sum(abs2) - np.sum(diag_abs2)
+                temp_d = np.sum(
+                    (
+                        -np.imag(np.log(np.diag(mmat)))
+                        - np.dot(self.config.b_vectors[b, :], self.rn)
+                    )
+                    ** 2
+                )
                 local[0] += temp_i * self.config.wb[b]
                 local[1] += temp_od * self.config.wb[b]
                 local[2] += temp_d * self.config.wb[b]

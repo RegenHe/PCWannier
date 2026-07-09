@@ -13,12 +13,12 @@ from pcwannier.sources.comsol import load_input
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("PCWANNIER_RUN_GOLD") != "1",
-    reason="Set PCWANNIER_RUN_GOLD=1 to run the optional v0 comparison.",
+    os.environ.get("PCWANNIER_RUN_CONSISTENCY") != "1",
+    reason="Set PCWANNIER_RUN_CONSISTENCY=1 to run the optional v0 consistency comparison.",
 )
 
 
-def test_v0_gold_smoke_comparison(tmp_path):
+def test_v0_consistency_smoke_comparison(tmp_path):
     old_src = Path("..") / "old" / "PCWannier" / "src"
     if not old_src.exists():
         pytest.skip("Old PCWannier source tree is not available.")

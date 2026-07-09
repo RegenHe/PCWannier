@@ -77,6 +77,11 @@ def load_cell_matrix(filename: str | Path, shape: tuple[int, ...] | None = None)
             if value < 0 or value >= shape[axis]:
                 raise ValueError(f"CELL index {full_idx} is out of bounds for shape {shape}.")
         data[full_idx] = matrix
+    missing = [idx for idx in np.ndindex(shape) if data[idx] is None]
+    if missing:
+        preview = ", ".join(str(idx) for idx in missing[:5])
+        suffix = "" if len(missing) <= 5 else f", ... ({len(missing)} total)"
+        raise ValueError(f"Cached matrix {path} is missing CELL entries: {preview}{suffix}.")
     return data
 
 

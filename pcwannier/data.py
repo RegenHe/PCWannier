@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 import copy
+from itertools import product
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -19,6 +20,7 @@ class Mesh:
         dists, _ = tree.query(self.vertices, k=2)
         self.mindist = float(np.min(dists[:, 1])) if len(self.vertices) > 1 else 0.0
         self.tri_weights: np.ndarray | None = None
+        self._boundary_mask_cache: np.ndarray | None = None
         self._precompute_tri_weights()
 
     def _precompute_tri_weights(self) -> None:
@@ -76,6 +78,7 @@ class Mesh:
         self.vertices = tiled_vertices[unique_raw] - np.array([offset_x, offset_y])
         self.elements = raw_to_unique[tiled_elements]
         self.edge = None
+        self._boundary_mask_cache = None
         self._precompute_tri_weights()
         return tiled_mapping[unique_raw]
 
@@ -103,18 +106,20 @@ class Mesh:
 
         threshold = max(float(self.mindist) * 0.5, 1e-12)
         if candidates.size > 1:
-            tree = cKDTree(vertices[candidates])
-            for local_a, local_b in tree.query_pairs(threshold):
-                self._union_min(parent, int(candidates[local_a]), int(candidates[local_b]))
+            self._merge_by_coordinate_hash(parent, vertices, candidates, threshold)
 
         reps = np.fromiter((self._find(parent, idx) for idx in range(raw_count)), dtype=np.intp, count=raw_count)
         unique_raw, raw_to_unique = np.unique(reps, return_inverse=True)
         return raw_to_unique.astype(np.intp, copy=False), unique_raw.astype(np.intp, copy=False)
 
     def _boundary_vertex_mask(self, original_vertex_count: int) -> np.ndarray:
+        if self._boundary_mask_cache is not None and self._boundary_mask_cache.size == original_vertex_count:
+            return self._boundary_mask_cache.copy()
+
         mask = np.zeros(original_vertex_count, dtype=bool)
         if self.edge is not None and self.edge.size:
             mask[np.unique(np.asarray(self.edge, dtype=np.intp).reshape(-1))] = True
+            self._boundary_mask_cache = mask.copy()
             return mask
 
         elems = np.asarray(self.elements, dtype=np.intp)
@@ -124,7 +129,31 @@ class Mesh:
         boundary_edges = unique_edges[counts == 1]
         if boundary_edges.size:
             mask[np.unique(boundary_edges.reshape(-1))] = True
+        self._boundary_mask_cache = mask.copy()
         return mask
+
+    @classmethod
+    def _merge_by_coordinate_hash(
+        cls,
+        parent: np.ndarray,
+        vertices: np.ndarray,
+        candidates: np.ndarray,
+        threshold: float,
+    ) -> None:
+        inv_tol = 1.0 / threshold
+        buckets: dict[tuple[int, ...], list[int]] = {}
+        dim = vertices.shape[1]
+        neighbor_offsets = list(product((-1, 0, 1), repeat=dim))
+        for raw_idx in candidates:
+            raw_idx = int(raw_idx)
+            key_arr = np.rint(vertices[raw_idx] * inv_tol).astype(np.int64)
+            key = tuple(int(x) for x in key_arr)
+            for delta in neighbor_offsets:
+                near_key = tuple(key[axis] + int(delta[axis]) for axis in range(dim))
+                for other_idx in buckets.get(near_key, ()):
+                    if np.linalg.norm(vertices[raw_idx] - vertices[other_idx]) < threshold:
+                        cls._union_min(parent, raw_idx, int(other_idx))
+            buckets.setdefault(key, []).append(raw_idx)
 
     @staticmethod
     def _find(parent: np.ndarray, idx: int) -> int:

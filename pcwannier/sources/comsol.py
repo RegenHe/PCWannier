@@ -80,30 +80,70 @@ def _read_element_block(lines: list[str], name: str, width: int, *, required: bo
     return data.reshape(count, width)
 
 
-def load_comsol_data(filename: str | Path) -> RawData:
+def load_comsol_data(filename: str | Path, *, real_only: bool = False) -> RawData:
     path = Path(filename)
     with timed_step("read COMSOL data", LOGGER, file=path):
-        rows, value_cols = _scan_data_shape(path)
-        points = np.empty((rows, 2), dtype=float)
-        values = np.empty((rows, value_cols), dtype=np.complex128)
+        if real_only:
+            try:
+                points, values = _load_real_table(path)
+                parser = "float"
+            except ValueError:
+                points, values = _load_token_table(path, real_values=True)
+                parser = "complex-real"
+            LOGGER.info(
+                "COMSOL data loaded: file=%s points=%s value_cols=%s real_only=True parser=%s",
+                path,
+                points.shape[0],
+                values.shape[1],
+                parser,
+            )
+            return RawData(points, values)
 
-        row = 0
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for raw in handle:
-                line = raw.strip()
-                if not line or line.startswith("%"):
-                    continue
-                tokens = line.split()
-                points[row, 0] = float(tokens[0])
-                points[row, 1] = float(tokens[1])
-                values[row] = np.fromiter(
-                    (complex(token.replace("i", "j")) for token in tokens[2:]),
-                    dtype=np.complex128,
-                    count=value_cols,
-                )
-                row += 1
-    LOGGER.info("COMSOL data loaded: file=%s points=%s value_cols=%s", path, rows, value_cols)
+        points, values = _load_token_table(path, real_values=False)
+    LOGGER.info("COMSOL data loaded: file=%s points=%s value_cols=%s real_only=False", path, points.shape[0], values.shape[1])
     return RawData(points, values)
+
+
+def _load_real_table(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        raw = np.loadtxt(handle, comments="%", dtype=float, ndmin=2)
+    if raw.shape[1] < 3:
+        raise ValueError(f"Not enough COMSOL data columns in {path}.")
+    return np.asarray(raw[:, :2], dtype=float), np.asarray(raw[:, 2:], dtype=float)
+
+
+def _load_token_table(path: Path, *, real_values: bool) -> tuple[np.ndarray, np.ndarray]:
+    rows, value_cols = _scan_data_shape(path)
+    points = np.empty((rows, 2), dtype=float)
+    value_dtype = float if real_values else np.complex128
+    values = np.empty((rows, value_cols), dtype=value_dtype)
+
+    row = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("%"):
+                continue
+            tokens = line.split()
+            points[row, 0] = float(tokens[0])
+            points[row, 1] = float(tokens[1])
+            parsed = np.fromiter(
+                (_parse_comsol_complex(token) for token in tokens[2:]),
+                dtype=np.complex128,
+                count=value_cols,
+            )
+            values[row] = np.real(parsed) if real_values else parsed
+            row += 1
+    return points, values
+
+
+def _parse_comsol_complex(token: str) -> complex:
+    text = token.strip().strip("'\"").replace("−", "-").replace("i", "j")
+    if text == "j":
+        text = "1j"
+    elif text == "-j":
+        text = "-1j"
+    return complex(text)
 
 
 def _scan_data_shape(path: Path) -> tuple[int, int]:
@@ -130,9 +170,18 @@ def _scan_data_shape(path: Path) -> tuple[int, int]:
     return rows, value_cols
 
 
-def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = None) -> tuple[np.ndarray, np.ndarray]:
+def match_data_to_mesh(
+    mesh: Mesh,
+    data: RawData,
+    *,
+    value_col: Optional[int] = None,
+    max_distance: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     tree = cKDTree(mesh.vertices)
     data_to_mesh_dist, data_to_mesh_idx = tree.query(data.point_matrix, k=1)
+    threshold = max_distance
+    if threshold is None:
+        threshold = max(float(mesh.mindist) * 0.5, 1e-8)
 
     order = np.lexsort((np.arange(data_to_mesh_idx.size), data_to_mesh_dist))
     mesh_to_data_idx = np.full(mesh.vertices.shape[0], -1, dtype=np.intp)
@@ -140,6 +189,8 @@ def match_data_to_mesh(mesh: Mesh, data: RawData, *, value_col: Optional[int] = 
 
     for data_idx in order:
         mesh_idx = int(data_to_mesh_idx[data_idx])
+        if data_to_mesh_dist[data_idx] > threshold:
+            continue
         if mesh_to_data_idx[mesh_idx] >= 0:
             continue
         mesh_to_data_idx[mesh_idx] = int(data_idx)
@@ -161,8 +212,8 @@ def load_input(config: IncarConfig) -> InputBundle:
 
     mesh = load_comsol_mesh(mesh_path)
     raw_data = load_comsol_data(dataset_path)
-    epsilon_raw = load_comsol_data(dielectric_path)
-    energy_raw = load_comsol_data(energy_path)
+    epsilon_raw = load_comsol_data(dielectric_path, real_only=True)
+    energy_raw = load_comsol_data(energy_path, real_only=config.E_is_real or config.hermitian)
 
     with timed_step("prepare COMSOL tensors", LOGGER):
         energy_matrix, energies, band_indices, inner_band_indices = _handle_energy_data(config, energy_raw)
@@ -205,10 +256,12 @@ def _required_input_paths(config: IncarConfig) -> tuple[Path, Path, Path, Path]:
 
 
 def _values_on_mesh(mesh: Mesh, data: RawData) -> np.ndarray:
-    idxs, _ = match_data_to_mesh(mesh, data)
+    idxs, dists = match_data_to_mesh(mesh, data)
     missing = np.where(idxs < 0)[0]
     if missing.size:
-        raise ValueError(f"{missing.size} mesh vertices could not be matched to COMSOL data.")
+        finite = dists[np.isfinite(dists)]
+        max_dist = float(np.max(finite)) if finite.size else float("nan")
+        raise ValueError(f"{missing.size} mesh vertices could not be matched to COMSOL data (max matched distance={max_dist:.6g}).")
     return data.value_matrix[idxs]
 
 
@@ -285,13 +338,14 @@ def _distribute_fields(config: IncarConfig, values: np.ndarray, band_indices: np
 
     if isinstance(config.band_window, EnergyWindow):
         for i, j, k in np.ndindex(nk1, nk2, nk3):
-            fields[i, j, k] = [tensor[:, i, j, k, int(band)].copy() for band in band_indices[i, j, k]]
+            selected = np.asarray(band_indices[i, j, k], dtype=int)
+            fields[i, j, k] = np.asarray(tensor[:, i, j, k, selected].T, dtype=np.complex128).copy()
         return fields
 
     selected = np.asarray(config.band_window, dtype=int)
     selected_tensor = tensor[:, :, :, :, selected]
     for i, j, k in np.ndindex(nk1, nk2, nk3):
-        fields[i, j, k] = [selected_tensor[:, i, j, k, band].copy() for band in range(selected_tensor.shape[-1])]
+        fields[i, j, k] = np.asarray(selected_tensor[:, i, j, k, :].T, dtype=np.complex128).copy()
     return fields
 
 

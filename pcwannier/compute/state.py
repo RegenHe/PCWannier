@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..data import InputBundle, Mesh
-from .integration import integrate_weighted_columns
+from .integration import integrate_overlap_matrix, mesh_integral_view
 from .kspace import get_kxyz
 from .parallel import parallel_map
 
@@ -15,6 +15,7 @@ class StateCollection:
         self.threads = max(1, int(threads))
         self.mesh = bundle.mesh
         self.fields = bundle.fields
+        self._normalize_field_blocks()
         self.epsilon = np.asarray(bundle.epsilon)
         self.E = bundle.energies
         self.E_idx = bundle.band_indices
@@ -29,14 +30,25 @@ class StateCollection:
         self.is_bloch = False
         self.is_orthogonalized = False
         self.extention_mesh: Mesh | None = None
+        self.integral_view = mesh_integral_view(self.mesh)
+        self.extention_integral_view = None
         self.space_to_original_mapping: np.ndarray | None = None
         self.extention_epsilon: np.ndarray | None = None
+        self._identity_transform: np.ndarray | None = None
+        self._phase_cache: dict[tuple[int, int, int], np.ndarray] = {}
+
+    def _normalize_field_blocks(self) -> None:
+        for idx in np.ndindex(self.fields.shape):
+            block = np.asarray(self.fields[idx], dtype=np.complex128)
+            if block.ndim == 1:
+                block = block.reshape(1, -1)
+            self.fields[idx] = block
 
     def k_indices(self):
         yield from np.ndindex(self.k_shape)
 
     def n_indices(self, i: int, j: int, k: int):
-        return range(len(self.fields[i, j, k]))
+        return range(self.get_block(i, j, k).shape[0])
 
     def get_k_num(self) -> int:
         nk1, nk2, nk3 = self.k_shape
@@ -62,21 +74,31 @@ class StateCollection:
 
     def get(self, *idx) -> np.ndarray:
         i, j, k, n = self.norm_ijkn(*idx)
-        return self.fields[i, j, k][n]
+        return self.get_block(i, j, k)[n]
 
     def get_block(self, i: int, j: int, k: int) -> np.ndarray:
-        block = self.fields[i, j, k]
-        if block is None:
+        raw_block = self.fields[i, j, k]
+        if raw_block is None:
             raise ValueError(f"Empty field block at k=({i}, {j}, {k}).")
-        return np.asarray(np.vstack(block), dtype=np.complex128)
+        block = np.asarray(raw_block, dtype=np.complex128)
+        if block.ndim == 1:
+            block = block.reshape(1, -1)
+        nv = self.mesh.vertices.shape[0]
+        if block.shape[1] != nv and block.shape[0] == nv:
+            block = block.T
+        if block.shape[1] != nv:
+            raise ValueError(f"Field block at k=({i}, {j}, {k}) has invalid shape {block.shape}.")
+        self.fields[i, j, k] = block
+        return block
 
     def ensure_identity_transform(self) -> None:
         if self.transform_correction is not None:
             return
-        self.transform = self.gen_matrix_on_kmesh(lambda i, j, k: np.eye(len(self.fields[i, j, k]), dtype=np.complex128))
+        self.transform = self.gen_matrix_on_kmesh(lambda i, j, k: np.eye(self.get_block(i, j, k).shape[0], dtype=np.complex128))
         self.transform_correction = self.gen_matrix_on_kmesh(
-            lambda i, j, k: np.eye(len(self.fields[i, j, k]), dtype=np.complex128)
+            lambda i, j, k: np.eye(self.get_block(i, j, k).shape[0], dtype=np.complex128)
         )
+        self._identity_transform = self.transform
 
     def orthogonalize(self, tol_rel: float = 1e-6, atol_abs: float = 1e-12) -> None:
         self.S = self.gen_matrix_on_kmesh(lambda *_: None)
@@ -92,20 +114,21 @@ class StateCollection:
             invsqrt = 1.0 / np.sqrt(np.maximum(lam, tau))
             tfull = vecs @ np.diag(invsqrt) @ vecs.conj().T
             tdiag = np.diag(np.diag(tfull))
-            scaled = []
-            for n in range(len(self.fields[i, j, k])):
+            block = self.get_block(i, j, k)
+            scaled = np.empty_like(block)
+            for n in range(block.shape[0]):
                 if tdiag[n, n] == 0.0:
                     raise ValueError(f"Normalization failed at ({i}, {j}, {k}, {n}).")
-                scaled.append(self.fields[i, j, k][n] * tdiag[n, n])
+                scaled[n] = block[n] * tdiag[n, n]
             return idx, smat, tfull, np.linalg.inv(tdiag) @ tfull, scaled
 
         for idx, smat, tfull, tcorr, scaled in parallel_map(self.k_indices(), calc_idx, self.configured_threads):
             i, j, k = idx
-            for n, field in enumerate(scaled):
-                self.fields[i, j, k][n] = field
+            self.fields[i, j, k] = scaled
             self.S[i, j, k] = smat
             self.transform[i, j, k] = tfull
             self.transform_correction[i, j, k] = tcorr
+        self._identity_transform = None
         self.is_orthogonalized = True
 
     def check_orthogonality(self) -> tuple[np.ndarray, bool]:
@@ -143,48 +166,43 @@ class StateCollection:
         return self.threads
 
     def _overlap_matrix(self, i: int, j: int, k: int) -> np.ndarray:
-        eps = np.asarray(self.epsilon)
-        nv = self.mesh.vertices.shape[0]
         wblock = self.get_block(i, j, k)
-        if wblock.ndim == 1:
-            wblock = wblock[None, :]
-        elif wblock.shape[1] != nv:
-            wblock = wblock.T
-        nwin = wblock.shape[0]
-        smat = np.empty((nwin, nwin), dtype=np.complex128)
-        right = wblock.T
-        for a in self.n_indices(i, j, k):
-            left = np.conj(self.get(i, j, k, a)) * eps
-            smat[a, :] = np.atleast_1d(
-                integrate_weighted_columns(
-                    self.mesh,
-                    left,
-                    right,
-                    chunk_size=2048,
-                    backend=self.compute_backend,
-                )
-            )
-        return smat
+        return integrate_overlap_matrix(
+            self.integral_view,
+            wblock,
+            wblock,
+            self.epsilon,
+            chunk_size=64,
+            backend=self.compute_backend,
+        )
 
     def turn_to_bloch(self) -> None:
         if self.is_bloch:
             return
         for i, j, k in self.k_indices():
             phase = self.get_phase(i, j, k)
-            for n in self.n_indices(i, j, k):
-                self.fields[i, j, k][n] = np.conj(phase) * self.fields[i, j, k][n]
+            self.fields[i, j, k] = self.get_block(i, j, k) * np.conj(phase)[None, :]
         self.is_bloch = True
 
     def get_transform(self, zero: bool = False) -> np.ndarray:
         self.ensure_identity_transform()
         if self.is_orthogonalized and self.transform_correction is not None and not zero:
             return self.transform_correction
-        return self.gen_matrix_on_kmesh(lambda i, j, k: np.eye(len(self.fields[i, j, k]), dtype=np.complex128))
+        if self._identity_transform is None:
+            self._identity_transform = self.gen_matrix_on_kmesh(
+                lambda i, j, k: np.eye(self.get_block(i, j, k).shape[0], dtype=np.complex128)
+            )
+        return self._identity_transform
 
     def get_phase(self, i: int, j: int, k: int) -> np.ndarray:
+        key = (int(i), int(j), int(k))
+        if key in self._phase_cache:
+            return self._phase_cache[key]
         sign = -1 if self.config.dataset_type.lower() == "comsol" else 1
         kvec = get_kxyz(self.config, [i, j, k])[: self.config.kdim]
-        return np.exp(1j * sign * np.dot(self.mesh.vertices, kvec))
+        phase = np.exp(1j * sign * np.dot(self.mesh.vertices, kvec))
+        self._phase_cache[key] = phase
+        return phase
 
     def get_extention_phase(self, i: int, j: int, k: int) -> np.ndarray:
         if self.extention_mesh is None:
@@ -200,14 +218,21 @@ class StateCollection:
             self.config.real_lattice_vectors,
             float(self.config.lattice_const),
         )
+        self.extention_integral_view = mesh_integral_view(self.extention_mesh)
         self.get_extention_epsilon()
 
     def get_extention_field(self, i: int, j: int, k: int, n: int) -> np.ndarray:
         if self.extention_mesh is None or self.space_to_original_mapping is None:
             raise ValueError("The field has not been extended.")
         scale = np.sqrt(float(np.prod(self.config.extension[: self.config.kdim])))
-        base = self.fields[i, j, k][n]
-        return np.asarray(base, dtype=np.complex128)[self.space_to_original_mapping] / scale
+        base = self.get_block(i, j, k)[n]
+        return base[self.space_to_original_mapping] / scale
+
+    def get_extention_block(self, i: int, j: int, k: int) -> np.ndarray:
+        if self.extention_mesh is None or self.space_to_original_mapping is None:
+            raise ValueError("The field has not been extended.")
+        scale = np.sqrt(float(np.prod(self.config.extension[: self.config.kdim])))
+        return self.get_block(i, j, k)[:, self.space_to_original_mapping] / scale
 
     def get_extention_epsilon(self) -> np.ndarray:
         if self.extention_mesh is None or self.space_to_original_mapping is None:

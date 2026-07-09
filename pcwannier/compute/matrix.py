@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_weighted_columns
+from .integration import integrate_overlap_matrix
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .parallel import parallel_map
 from .state import StateCollection
@@ -47,38 +47,25 @@ class MSet:
 
         def calc_for_index(idx):
             i, j, k = idx
-            nv = self.state.mesh.vertices.shape[0]
             left = self.state.get_block(i, j, k)
-            if left.ndim == 1:
-                left = left[None, :]
-            elif left.shape[1] != nv:
-                left = left.T
             result = []
             for b in range(b_half):
                 ik, k_raw = neighbor_reciprocal_lattice_vectors(self.config, [i, j, k], b)
                 right = self.state.get_block(*ik)
-                if right.ndim == 1:
-                    right = right[None, :]
-                elif right.shape[1] != nv:
-                    right = right.T
                 if k_raw is not None:
                     phase1 = self.state.get_phase(*ik)
                     phase2 = self.state.get_phase(*k_raw)
                     right = right * (phase1 * np.conj(phase2))[None, :]
-                mat = np.zeros((left.shape[0], right.shape[0]), dtype=np.complex128)
-                right_t = right.T
-                for m in range(left.shape[0]):
-                    base = np.conj(left[m]) * self.state.epsilon
-                    mat[m, :] = np.atleast_1d(
-                        integrate_weighted_columns(
-                            self.state.mesh,
-                            base,
-                            right_t,
-                            chunk_size=2048,
-                            backend=self.state.compute_backend,
-                        )
+                result.append(
+                    integrate_overlap_matrix(
+                        self.state.integral_view,
+                        left,
+                        right,
+                        self.state.epsilon,
+                        chunk_size=64,
+                        backend=self.state.compute_backend,
                     )
-                result.append(mat)
+                )
             return idx, result
 
         for idx, result in parallel_map(self.state.k_indices(), calc_for_index, self.threads):

@@ -144,8 +144,45 @@ class IncarConfig:
             raise ValueError(f"Missing required incar fields: {', '.join(missing)}")
 
 
+_MATH_NAMES = {name: value for name, value in vars(math).items() if not name.startswith("_")}
+_MATH_NAMES.update(
+    {
+        "abs": abs,
+        "max": max,
+        "min": min,
+        "pow": pow,
+        "round": round,
+        "math": math,
+    }
+)
+_BLOCKED_EXPR_TOKENS = (
+    "__",
+    "import",
+    "open",
+    "exec",
+    "eval",
+    "compile",
+    "globals",
+    "locals",
+    "vars",
+    "dir",
+    "getattr",
+    "setattr",
+    "delattr",
+    "input",
+)
+
+
 def evaluate_math_expression(expr: str) -> float:
-    return float(eval(expr, {"__builtins__": None}, vars(math)))
+    """Evaluate a small math expression used by incar numeric fields."""
+    expr = str(expr).strip()
+    lowered = expr.lower()
+    if any(token in lowered for token in _BLOCKED_EXPR_TOKENS):
+        raise ValueError(f"Invalid numeric expression: {expr!r}")
+    try:
+        return float(eval(expr, {"__builtins__": {}}, _MATH_NAMES))
+    except Exception as exc:
+        raise ValueError(f"Invalid numeric expression: {expr!r}") from exc
 
 
 class IncarParser:
@@ -257,7 +294,7 @@ class IncarParser:
         if key == "k_points":
             ranges = []
             for part in value.split(","):
-                tokens = [float(x) for x in part.strip().split(":")]
+                tokens = [float(evaluate_math_expression(x.strip())) for x in part.strip().split(":")]
                 if len(tokens) != 3:
                     raise ValueError(f"Invalid k_points range: {part!r}")
                 start, step, stop = tokens

@@ -5,7 +5,7 @@ import logging
 import numpy as np
 
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_weighted_columns
+from .integration import integrate_overlap_matrix, integrate_weighted_abs2_columns
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .matrix import MSet
 from .parallel import parallel_map
@@ -219,10 +219,10 @@ class StateInitializer:
 
         hmat = np.column_stack(h_columns)
         norms = np.atleast_1d(
-            integrate_weighted_columns(
+            integrate_weighted_abs2_columns(
                 self.state.extention_mesh,
                 self.state.extention_epsilon,
-                np.abs(hmat) ** 2,
+                hmat,
                 chunk_size=2048,
                 backend=self.state.compute_backend,
             )
@@ -233,20 +233,16 @@ class StateInitializer:
         def calc_idx(idx):
             i, j, k = idx
             phase = self.state.get_extention_phase(i, j, k)
-            amat = np.zeros_like(self.matA[i, j, k])
-            for m in range(len(self.state.E_idx[i, j, k])):
-                field = self.state.get_extention_field(i, j, k, m)
-                base = self.state.extention_epsilon * np.conj(phase * field)
-                vals = np.atleast_1d(
-                    integrate_weighted_columns(
-                        self.state.extention_mesh,
-                        base,
-                        gmat,
-                        chunk_size=2048,
-                        backend=self.state.compute_backend,
-                    )
-                )
-                amat[m, : vals.shape[0]] = vals
+            fields = self.state.get_extention_block(i, j, k)
+            fields *= phase[None, :]
+            amat = integrate_overlap_matrix(
+                self.state.extention_integral_view,
+                fields,
+                gmat.T,
+                self.state.extention_epsilon,
+                chunk_size=64,
+                backend=self.state.compute_backend,
+            )
             if self.config.proj_binarize:
                 amat = self.binarize(amat)
             u, _, vh = np.linalg.svd(amat)

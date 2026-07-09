@@ -50,7 +50,9 @@ if ($DryRun) {
     exit 0
 }
 
+$timer = [Diagnostics.Stopwatch]::StartNew()
 & $Python @argsList
+$timer.Stop()
 
 $exe = Get-ChildItem -Path $OutDir -Recurse -Filter "$Name.exe" | Select-Object -First 1
 
@@ -60,4 +62,4 @@ if ($exe) {
 } else {
     Write-Host "Build complete. Check output directory: $OutDir"
 }
-
+Write-Host ("Build time: {0:hh\:mm\:ss\.fff}" -f $timer.Elapsed)

@@ -154,7 +154,8 @@ def save_band(filename: str | Path, energies: np.ndarray, k_path: np.ndarray | N
 
 def load_interpolation_points(filename: str | Path) -> np.ndarray:
     path = Path(filename)
-    points = np.loadtxt(path, delimiter=",")
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        points = np.loadtxt(handle, delimiter=",")
     points = np.asarray(points, dtype=float)
     if points.ndim == 1:
         points = points.reshape(1, -1)
@@ -191,13 +192,14 @@ def write_interpolation_outputs(
     interp_path: str | Path,
     interp_wannier: str | Path | None = None,
     interp_epsilon: str | Path | None = None,
+    out_dir: str | Path | None = None,
 ) -> None:
     points = load_interpolation_points(interp_path)
     interp_path = Path(interp_path)
     mesh = result.extended_mesh
     triang = Triangulation(mesh.vertices[:, 0], mesh.vertices[:, 1], mesh.elements)
 
-    wannier_path = _resolve_interpolation_output(interp_path, interp_wannier, "interp-wannier")
+    wannier_path = _resolve_interpolation_output(interp_path, interp_wannier, "interp-wannier", out_dir)
     if wannier_path is not None:
         values = []
         for _, wmat in result.wanniers.items():
@@ -207,19 +209,27 @@ def write_interpolation_outputs(
         with timed_step("write interpolated Wannier data", LOGGER, file=wannier_path):
             save_points_with_values(wannier_path, points, np.asarray(values))
 
-    epsilon_path = _resolve_interpolation_output(interp_path, interp_epsilon, "interp-epsilon")
+    epsilon_path = _resolve_interpolation_output(interp_path, interp_epsilon, "interp-epsilon", out_dir)
     if epsilon_path is not None:
         epsilon = _interpolate_real(triang, result.extended_epsilon, points)
         with timed_step("write interpolated epsilon data", LOGGER, file=epsilon_path):
             save_points_with_values(epsilon_path, points, epsilon.reshape(1, -1))
 
 
-def _resolve_interpolation_output(interp_path: Path, output_path: str | Path | None, suffix: str) -> Path | None:
+def _resolve_interpolation_output(
+    interp_path: Path,
+    output_path: str | Path | None,
+    suffix: str,
+    out_dir: str | Path | None = None,
+) -> Path | None:
     if output_path is None:
         return interp_path.with_name(f"{interp_path.stem}-{suffix}.txt")
     if _is_false_path(output_path):
         return None
-    return Path(output_path)
+    path = Path(output_path)
+    if out_dir is not None and not path.is_absolute():
+        return Path(out_dir) / path
+    return path
 
 
 def _interpolate_real(triang: Triangulation, values: np.ndarray, points: np.ndarray) -> np.ndarray:

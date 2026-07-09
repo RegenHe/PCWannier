@@ -11,14 +11,14 @@ from .compute import run_calculation
 from .logging_utils import configure_logging
 from .outputs import write_base_figures, write_interpolation_outputs, write_outputs
 from .runtime_info import format_elapsed, format_memory, memory_snapshot, now, start_memory_tracking
-from .sources.comsol import load_input
+from .sources.comsol import load_comsol_mesh, load_input
 from .timing import timed_step
 
 LOGGER = logging.getLogger(__name__)
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="PCWannier v1")
+    parser = argparse.ArgumentParser(description=f"PCWannier v{__version__}")
     parser.add_argument("-i", "--input", required=True, help="Input incar file path")
     parser.add_argument("-t", "--threads", type=int, default=os.cpu_count() or 1, help="Number of worker threads")
     parser.add_argument(
@@ -78,20 +78,26 @@ def main(argv=None) -> int:
         config.compute_backend,
     )
 
-    with timed_step("load input data", LOGGER, dataset_type=config.dataset_type):
-        bundle = load_input(config)
     if args.base:
+        mesh_path = config.input_path(config.mesh_file)
+        if mesh_path is None:
+            raise ValueError("mesh_file is required when --base is used.")
+        with timed_step("load mesh for base figures", LOGGER, file=mesh_path):
+            mesh = load_comsol_mesh(mesh_path)
         with timed_step("write projection base figures", LOGGER, out_dir=out_dir or config.base_dir):
-            write_base_figures(config, bundle.mesh, out_dir)
+            write_base_figures(config, mesh, out_dir)
         _log_run_summary(started_at)
         return 0
+
+    with timed_step("load input data", LOGGER, dataset_type=config.dataset_type):
+        bundle = load_input(config)
     with timed_step("run calculation", LOGGER, threads=max(1, int(args.threads)), backend=config.compute_backend):
         result = run_calculation(bundle, threads=max(1, int(args.threads)), backend=args.backend)
     with timed_step("write outputs", LOGGER, out_dir=out_dir or config.base_dir):
         write_outputs(result, config, out_dir)
     if args.interp is not None:
         with timed_step("write interpolation outputs", LOGGER, interp=args.interp):
-            write_interpolation_outputs(result, args.interp, args.interp_wannier, args.interp_epsilon)
+            write_interpolation_outputs(result, args.interp, args.interp_wannier, args.interp_epsilon, out_dir=out_dir)
     _log_run_summary(started_at)
     return 0
 

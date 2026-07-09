@@ -19,6 +19,8 @@ class TBAModel:
         self.state = ctx.state
         self.threads = max(1, int(threads))
         self.hoppings: list[np.ndarray] | None = None
+        self._projected_hamiltonians: np.ndarray | None = None
+        self._projected_k_cart: np.ndarray | None = None
 
     def gen_hopping(self, r: list[int] | tuple[int, ...] | None = None) -> np.ndarray:
         if r is None:
@@ -35,23 +37,36 @@ class TBAModel:
         r_cart *= float(config.lattice_const)
 
         band_count = int(config.band_calc_num)
-        hopping = np.zeros((band_count, band_count), dtype=np.complex128)
         sign = -1 if config.dataset_type.lower() == "comsol" else 1
+        k_cart, projected = self._projected_k_hamiltonians()
+        phase = np.exp(1j * (-sign) * (k_cart @ r_cart))
+        return np.sum(projected * phase[:, None, None], axis=0) / state.get_k_num()
+
+    def _projected_k_hamiltonians(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._projected_hamiltonians is not None and self._projected_k_cart is not None:
+            return self._projected_k_cart, self._projected_hamiltonians
+
+        config = self.config
+        state = self.state
+        dim = np.asarray(config.real_lattice_vectors).shape[1]
+        band_count = int(config.band_calc_num)
+        k_count = state.get_k_num()
+        k_cart = np.empty((k_count, dim), dtype=float)
+        projected = np.empty((k_count, band_count, band_count), dtype=np.complex128)
         transform = state.get_transform(True if config.disable_orth else False)
-        for i, j, k in state.k_indices():
+        for pos, (i, j, k) in enumerate(state.k_indices()):
             umat = transform[i, j, k] @ self.ctx.initializer.matV[i, j, k] @ self.ctx.gradient.U[i, j, k]
-            k_vec = get_kxyz(config, [i, j, k])[:dim]
-            hopping += (
-                np.conj(umat).T
-                @ np.diag(np.asarray(state.E[i, j, k], dtype=np.complex128))
-                @ umat
-                * np.exp(1j * (-sign) * np.dot(k_vec, r_cart))
-            )
-        return hopping / state.get_k_num()
+            energy = np.asarray(state.E[i, j, k], dtype=np.complex128)
+            projected[pos] = np.conj(umat).T @ (energy[:, None] * umat)
+            k_cart[pos] = get_kxyz(config, [i, j, k])[:dim]
+        self._projected_k_cart = k_cart
+        self._projected_hamiltonians = projected
+        return k_cart, projected
 
     def collect_hoppings(self) -> dict[tuple[int, int, int], np.ndarray]:
         if not self.config.neighbor:
             self.config.neighbor = self.R_half_rect(self.state.k_shape).tolist()
+        self._projected_k_hamiltonians()
 
         r_list = [(0, 0, 0)] + [tuple((list(r) + [0, 0, 0])[:3]) for r in self.config.neighbor]
 
@@ -87,7 +102,7 @@ class TBAModel:
         hops = np.asarray([hoppings[tuple((list(r) + [0, 0, 0])[:3])] for r in neigh], dtype=np.complex128)
         h_of_k = self._h_of_k_factory(h0, neigh, hops)
         hks = h_of_k(self._kfrac_to_kcart(k_path))
-        energies = np.sort(np.linalg.eigvals(hks))
+        energies = np.linalg.eigvalsh(hks) if config.hermitian else np.sort(np.linalg.eigvals(hks))
 
         dos_energy = None
         dos_components = None

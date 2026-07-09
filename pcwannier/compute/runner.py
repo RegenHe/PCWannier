@@ -9,7 +9,9 @@ from .backend import resolve_backend
 from .context import CalculationContext
 from .gradient import Gradient
 from .initializer import StateInitializer
+from .integration import numba_parallel_policy
 from .matrix import MSet
+from .parallel import ParallelExecutor
 from .state import StateCollection
 from .tba import TBAModel
 from .threading import blas_thread_limit, threadpool_summary
@@ -21,7 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 def run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
     with blas_thread_limit(threads):
-        return _run_calculation(bundle, threads=threads, backend=backend)
+        with numba_parallel_policy(max(1, int(threads)) <= 1), ParallelExecutor(threads):
+            return _run_calculation(bundle, threads=threads, backend=backend)
 
 
 def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:

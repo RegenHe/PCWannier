@@ -150,3 +150,128 @@ def integrate_weighted_columns_numba_parallel(
             ) * weights[tri]
         out[col] = total
     return out
+
+
+@njit(nogil=True)
+def integrate_weighted_abs2_columns_numba(
+    left: np.ndarray,
+    right: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    k_count = right.shape[1]
+    out = np.empty(k_count, dtype=np.complex128)
+    for col in range(k_count):
+        total = 0.0 + 0.0j
+        for tri in range(elems.shape[0]):
+            e0 = elems[tri, 0]
+            e1 = elems[tri, 1]
+            e2 = elems[tri, 2]
+            v0 = right[e0, col]
+            v1 = right[e1, col]
+            v2 = right[e2, col]
+            total += (
+                left[e0] * (v0.real * v0.real + v0.imag * v0.imag)
+                + left[e1] * (v1.real * v1.real + v1.imag * v1.imag)
+                + left[e2] * (v2.real * v2.real + v2.imag * v2.imag)
+            ) * weights[tri]
+        out[col] = total
+    return out
+
+
+@njit(nogil=True, parallel=True)
+def integrate_weighted_abs2_columns_numba_parallel(
+    left: np.ndarray,
+    right: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    k_count = right.shape[1]
+    out = np.empty(k_count, dtype=np.complex128)
+    for col in prange(k_count):
+        total = 0.0 + 0.0j
+        for tri in range(elems.shape[0]):
+            e0 = elems[tri, 0]
+            e1 = elems[tri, 1]
+            e2 = elems[tri, 2]
+            v0 = right[e0, col]
+            v1 = right[e1, col]
+            v2 = right[e2, col]
+            total += (
+                left[e0] * (v0.real * v0.real + v0.imag * v0.imag)
+                + left[e1] * (v1.real * v1.real + v1.imag * v1.imag)
+                + left[e2] * (v2.real * v2.real + v2.imag * v2.imag)
+            ) * weights[tri]
+        out[col] = total
+    return out
+
+
+@njit(nogil=True)
+def integrate_overlap_matrix_numba(
+    left: np.ndarray,
+    right: np.ndarray,
+    weights_vector: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+    conjugate_left: bool,
+) -> np.ndarray:
+    left_count = left.shape[0]
+    right_count = right.shape[0]
+    out = np.empty((left_count, right_count), dtype=np.complex128)
+    for row in range(left_count):
+        for col in range(right_count):
+            total = 0.0 + 0.0j
+            for tri in range(elems.shape[0]):
+                e0 = elems[tri, 0]
+                e1 = elems[tri, 1]
+                e2 = elems[tri, 2]
+                l0 = left[row, e0]
+                l1 = left[row, e1]
+                l2 = left[row, e2]
+                if conjugate_left:
+                    l0 = np.conj(l0)
+                    l1 = np.conj(l1)
+                    l2 = np.conj(l2)
+                total += (
+                    l0 * weights_vector[e0] * right[col, e0]
+                    + l1 * weights_vector[e1] * right[col, e1]
+                    + l2 * weights_vector[e2] * right[col, e2]
+                ) * weights[tri]
+            out[row, col] = total
+    return out
+
+
+@njit(nogil=True, parallel=True)
+def integrate_overlap_matrix_numba_parallel(
+    left: np.ndarray,
+    right: np.ndarray,
+    weights_vector: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+    conjugate_left: bool,
+) -> np.ndarray:
+    left_count = left.shape[0]
+    right_count = right.shape[0]
+    out = np.empty((left_count, right_count), dtype=np.complex128)
+    for linear in prange(left_count * right_count):
+        row = linear // right_count
+        col = linear % right_count
+        total = 0.0 + 0.0j
+        for tri in range(elems.shape[0]):
+            e0 = elems[tri, 0]
+            e1 = elems[tri, 1]
+            e2 = elems[tri, 2]
+            l0 = left[row, e0]
+            l1 = left[row, e1]
+            l2 = left[row, e2]
+            if conjugate_left:
+                l0 = np.conj(l0)
+                l1 = np.conj(l1)
+                l2 = np.conj(l2)
+            total += (
+                l0 * weights_vector[e0] * right[col, e0]
+                + l1 * weights_vector[e1] * right[col, e1]
+                + l2 * weights_vector[e2] * right[col, e2]
+            ) * weights[tri]
+        out[row, col] = total
+    return out

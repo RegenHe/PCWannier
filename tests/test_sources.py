@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from pcwannier import load_config
 from pcwannier.compute import (
@@ -72,6 +73,48 @@ def test_comsol_header_k_grid_mismatch_is_rejected():
 
     with pytest.raises(ValueError, match="COMSOL k-grid mismatch"):
         _validate_header_k_grid(cfg, raw, cfg.input_path(cfg.dataset_file))
+
+
+def test_comsol_header_validates_band_parameter_and_dataset_order(tmp_path):
+    cfg = SimpleNamespace(
+        kdim=2,
+        k_points=[np.arange(2), np.arange(3)],
+        dataset_order=["k1", "k2", "E"],
+    )
+    shape = (2, 3, 2)
+    indices = np.indices(shape)
+    parameters = {
+        "k1": indices[0].reshape(-1).astype(float),
+        "k2": indices[1].reshape(-1).astype(float),
+        "lambda": indices[2].reshape(-1).astype(float),
+    }
+    raw = RawData(np.zeros((1, 2)), np.zeros((1, np.prod(shape))), parameters)
+
+    _validate_header_k_grid(cfg, raw, tmp_path / "E.txt")
+
+    raw.column_parameters = {**parameters, "k2": np.roll(parameters["k2"], 2)}
+    with pytest.raises(ValueError, match="dataset_order"):
+        _validate_header_k_grid(cfg, raw, tmp_path / "E.txt")
+
+
+def test_comsol_header_requires_complete_band_parameter(tmp_path):
+    cfg = SimpleNamespace(
+        kdim=2,
+        k_points=[np.arange(2), np.arange(2)],
+        dataset_order=["k1", "k2", "E"],
+    )
+    indices = np.indices((2, 2, 3))
+    raw = RawData(
+        np.zeros((1, 2)),
+        np.zeros((1, 12)),
+        {
+            "k1": indices[0].reshape(-1).astype(float),
+            "k2": indices[1].reshape(-1).astype(float),
+        },
+    )
+
+    with pytest.raises(ValueError, match="energy/band parameter"):
+        _validate_header_k_grid(cfg, raw, tmp_path / "E.txt")
 
 
 def test_load_input_bundle_distribution():
@@ -193,6 +236,32 @@ def test_overlap_matrix_matches_weighted_columns_rows():
     assert np.allclose(actual, expected)
     if is_numba_available():
         assert np.allclose(integrate_overlap_matrix(mesh, left, right, weights, backend="numba"), expected)
+
+
+def test_quadratic_overlap_matches_triangle_mass_matrix():
+    mesh = Mesh(np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]), np.array([[0, 1, 2]]))
+    left = np.array([[1.0 + 0.5j, -2.0j, 3.0], [0.25, 1.5 - 0.2j, -1.0]])
+    right = np.array([[2.0, -1.0j, 0.5 + 0.1j], [1.0j, 2.5, -0.75]])
+    mass = (0.5 / 12.0) * np.array([[2.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 2.0]])
+    expected = np.conj(left) @ mass @ right.T
+
+    actual = integrate_overlap_matrix(mesh, left, right, mode="quadratic", backend="python")
+
+    assert np.allclose(actual, expected, rtol=1e-13, atol=1e-13)
+    if is_numba_available():
+        numba_actual = integrate_overlap_matrix(mesh, left, right, mode="quadratic", backend="numba")
+        assert np.allclose(numba_actual, expected, rtol=1e-13, atol=1e-13)
+
+
+def test_quadratic_weighted_abs2_is_real_and_exact_for_linear_fields():
+    mesh = Mesh(np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]), np.array([[0, 1, 2]]))
+    values = np.array([[1.0 + 1.0j], [2.0 - 0.5j], [-1.0j]])
+    mass = (0.5 / 12.0) * np.array([[2.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 2.0]])
+    expected = np.array([np.conj(values[:, 0]) @ mass @ values[:, 0]])
+
+    actual = integrate_weighted_abs2_columns(mesh, np.ones(3), values, mode="quadratic", backend="python")
+
+    assert np.allclose(actual, expected, rtol=1e-13, atol=1e-13)
 
 
 def test_mesh_extension_matches_legacy_incremental_algorithm():

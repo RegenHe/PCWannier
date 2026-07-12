@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from pathlib import Path
 
 from pcwannier import EnergyWindow, load_config
 from pcwannier.config import evaluate_math_expression
@@ -19,6 +20,7 @@ def test_load_data_incar_defaults_and_preprocess():
     assert cfg.wb.shape == (4,)
     assert len(cfg.projections) == 4
     assert cfg.compute_backend == "python"
+    assert cfg.integration_mode == "nodal"
 
 
 def test_energy_window_parser(tmp_path):
@@ -58,3 +60,39 @@ def test_math_expression_parser_is_limited():
     assert np.isclose(evaluate_math_expression("sqrt(4) + pi / pi"), 3.0)
     with pytest.raises(ValueError):
         evaluate_math_expression("__import__('os').system('echo nope')")
+
+
+def test_rank_deficient_b_vectors_are_rejected(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0, 0 2",
+                "reciprocal_lattice_vectors = 0 0, 0 0",
+                "k_points = 0:0.5:1, 0:0.5:1",
+                "composition_of_b = 1 0",
+                "band_window = 0:1",
+                "dataset_file = Ez.txt",
+                "dielectric_file = eps.txt",
+                "mesh_file = mesh.mphtxt",
+                "E_file = E.txt",
+                "extension = 1, 1",
+                "projections",
+                "a; [0, 0]; 0; [1, 0, 1]",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Add independent neighbor directions"):
+        load_config(incar)
+
+
+def test_removed_w_center_input_is_rejected(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(Path("data/incar").read_text(encoding="utf-8") + "\nw_center = 0, 0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="w_center input has been removed"):
+        load_config(incar)

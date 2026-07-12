@@ -31,9 +31,10 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     config = bundle.config
     resolved_backend = resolve_backend(backend or config.compute_backend)
     LOGGER.info(
-        "Calculation setup: threads=%s backend=%s blas=%s k_shape=%s mesh_vertices=%s mesh_triangles=%s",
+        "Calculation setup: threads=%s backend=%s integration=%s blas=%s k_shape=%s mesh_vertices=%s mesh_triangles=%s",
         threads,
         resolved_backend,
+        config.integration_mode,
         threadpool_summary(),
         bundle.fields.shape,
         bundle.mesh.vertices.shape[0],
@@ -56,8 +57,19 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             report, need_orth = state.check_orthogonality()
         if need_orth:
             raise RuntimeError("Orthogonalization failed.")
+        if config.disable_orth:
+            fem_report, _ = state.check_orthogonality(apply_transform=False)
+            LOGGER.info(
+                "Orthogonalization mode: mixed (strict internally, FEM-normalized output); "
+                "output max_diag_err=%.6g max_offdiag=%.6g",
+                float(np.max(fem_report[..., 1])),
+                float(np.max(fem_report[..., 2])),
+            )
+        else:
+            LOGGER.info("Orthogonalization mode: strict (correction applied internally and to output)")
     else:
         state.ensure_identity_transform()
+        LOGGER.info("Orthogonalization mode: identity (input states already orthonormal)")
     with timed_step("extend mesh", LOGGER, extension=config.extension):
         state.extention(config.extension)
     LOGGER.info(
@@ -75,23 +87,27 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     gradient = Gradient(state, mset, threads=threads)
     with timed_step("gradient optimization", LOGGER, max_iter=config.max_iter, epsilon=config.epsilon):
         gradient.iter(config.err_diff, config.max_iter, config.epsilon)
-    LOGGER.info("Gradient result: omega=%s rn_shape=%s", gradient.omega, gradient.rn.shape)
-    if config.w_center is not False:
-        with timed_step("set Wannier center", LOGGER, center=config.w_center):
-            for _ in range(10):
-                gradient.set_center(config.w_center)
-            gradient.generateRn()
+    LOGGER.info(
+        "Gradient result: omega=%s omega_I=%s omega_OD=%s omega_D=%s rn_shape=%s",
+        float(np.sum(gradient.omega)),
+        float(gradient.omega[0]),
+        float(gradient.omega[1]),
+        float(gradient.omega[2]),
+        gradient.rn.shape,
+    )
 
     ctx = CalculationContext(config, state, mset, initializer, gradient)
     with timed_step("generate Wannier functions", LOGGER):
         r_key, wannier, norms = generate_wannier(ctx)
     LOGGER.info(
-        "Wannier generated: r=%s shape=%s norm_real_min=%.6g norm_real_max=%.6g norm_imag_max=%.6g",
+        "Wannier generated: r=%s shape=%s norm_real_min=%.6g norm_real_max=%.6g "
+        "norm_imag_max=%.6g centers_rn=%s",
         r_key,
         wannier.shape,
         float(np.min(np.real(norms))),
         float(np.max(np.real(norms))),
         float(np.max(np.abs(np.imag(norms)))),
+        np.real_if_close(gradient.rn.T).tolist(),
     )
     tba = TBAModel(ctx, threads=threads)
     with timed_step("collect hopping matrices", LOGGER):

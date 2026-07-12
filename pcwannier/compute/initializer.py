@@ -5,7 +5,7 @@ import logging
 import numpy as np
 
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_overlap_matrix, integrate_weighted_abs2_columns
+from .integration import integrate_overlap_matrix, integrate_weighted_abs2_columns, validated_real
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .matrix import MSet
 from .parallel import parallel_map
@@ -136,11 +136,13 @@ class StateInitializer:
             if path is None:
                 raise ValueError("A cache requested, but A_file is disabled.")
             self.matA = load_cell_matrix(path, self.state.k_shape)
+            self._validate_cached_matrix("A", self.matA, require_semiunitary=False)
         if has_cached_v:
             path = self.config.input_path(self.config.V_file)
             if path is None:
                 raise ValueError("V cache requested, but V_file is disabled.")
             self.matV = load_cell_matrix(path, self.state.k_shape)
+            self._validate_cached_matrix("V", self.matV, require_semiunitary=True)
 
         if has_cached_a and not has_cached_v:
             band_count = int(self.config.band_calc_num)
@@ -150,7 +152,8 @@ class StateInitializer:
             self.matV = self.matC.copy()
         elif not has_cached_v:
             self.projection()
-            self.matV = self.matC.copy()
+            if self.config.inner_window is False:
+                self.matV = self.matC.copy()
 
         if has_cached_a or has_cached_v:
             self.set_window_indices()
@@ -169,15 +172,16 @@ class StateInitializer:
             if abs(omega - last_omega) < err_diff:
                 break
             last_omega = omega
-        if self.matA is None:
-            self.projection()
-        band_count = int(self.config.band_calc_num)
-        for i, j, k in self.state.k_indices():
-            tmat = np.conj(self.matV[i, j, k]).T @ self.matA[i, j, k]
-            u, _, vh = np.linalg.svd(tmat)
-            self.matV[i, j, k] = self.matV[i, j, k] @ (u @ np.eye(band_count, band_count) @ vh)
-        if self.config.v_proj:
-            self.V_projection()
+        if has_cached_a or not has_cached_v:
+            band_count = int(self.config.band_calc_num)
+            for i, j, k in self.state.k_indices():
+                tmat = np.conj(self.matV[i, j, k]).T @ self.matA[i, j, k]
+                u, _, vh = np.linalg.svd(tmat)
+                self.matV[i, j, k] = self.matV[i, j, k] @ (u @ np.eye(band_count, band_count) @ vh)
+            if self.config.v_proj:
+                self.V_projection()
+        else:
+            LOGGER.info("V-only cache: projection-gauge alignment skipped because A is unavailable")
         self.mset.initial(self.matV)
 
     def projection(self) -> None:
@@ -225,8 +229,10 @@ class StateInitializer:
                 hmat,
                 chunk_size=2048,
                 backend=self.state.compute_backend,
+                mode=self.config.integration_mode,
             )
         )
+        norms = validated_real(norms, "projection basis norms")
         norms = np.where(norms == 0, 1.0, norms)
         gmat = hmat / np.sqrt(norms)[None, :]
 
@@ -242,6 +248,7 @@ class StateInitializer:
                 self.state.extention_epsilon,
                 chunk_size=64,
                 backend=self.state.compute_backend,
+                mode=self.config.integration_mode,
             )
             if self.config.proj_binarize:
                 amat = self.binarize(amat)
@@ -380,3 +387,17 @@ class StateInitializer:
         if not lengths:
             raise ValueError("E_idx is empty.")
         return min(lengths), max(lengths)
+
+    def _validate_cached_matrix(self, name: str, matrix: np.ndarray, *, require_semiunitary: bool) -> None:
+        band_count = int(self.config.band_calc_num)
+        for idx in self.state.k_indices():
+            cell = np.asarray(matrix[idx], dtype=np.complex128)
+            expected = (len(self.state.E_idx[idx]), band_count)
+            if cell.shape != expected:
+                raise ValueError(f"Cached {name} matrix at k={idx} has shape {cell.shape}; expected {expected}.")
+            if not np.all(np.isfinite(cell)):
+                raise ValueError(f"Cached {name} matrix at k={idx} contains non-finite values.")
+            if require_semiunitary:
+                residual = np.linalg.norm(cell.conj().T @ cell - np.eye(band_count), ord="fro")
+                if residual > 1e-6:
+                    raise ValueError(f"Cached {name} matrix at k={idx} is not semi-unitary (residual={residual:.6g}).")

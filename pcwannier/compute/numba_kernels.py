@@ -46,6 +46,7 @@ def integrate_product_numba(
     out = np.empty(k_count, dtype=np.complex128)
     for col in range(k_count):
         total = 0.0 + 0.0j
+        correction = 0.0 + 0.0j
         for tri in range(elems.shape[0]):
             e0 = elems[tri, 0]
             e1 = elems[tri, 1]
@@ -64,7 +65,11 @@ def integrate_product_numba(
             b2 = b[e2, col]
             z = 2.0 * (a0 * b0 + a1 * b1 + a2 * b2)
             z += a0 * b1 + a1 * b0 + a0 * b2 + a2 * b0 + a1 * b2 + a2 * b1
-            total += 0.25 * weights[tri] * z
+            term = 0.25 * weights[tri] * z
+            compensated = term - correction
+            updated = total + compensated
+            correction = (updated - total) - compensated
+            total = updated
         out[col] = total
     return out
 
@@ -81,6 +86,7 @@ def integrate_product_numba_parallel(
     out = np.empty(k_count, dtype=np.complex128)
     for col in prange(k_count):
         total = 0.0 + 0.0j
+        correction = 0.0 + 0.0j
         for tri in range(elems.shape[0]):
             e0 = elems[tri, 0]
             e1 = elems[tri, 1]
@@ -99,7 +105,11 @@ def integrate_product_numba_parallel(
             b2 = b[e2, col]
             z = 2.0 * (a0 * b0 + a1 * b1 + a2 * b2)
             z += a0 * b1 + a1 * b0 + a0 * b2 + a2 * b0 + a1 * b2 + a2 * b1
-            total += 0.25 * weights[tri] * z
+            term = 0.25 * weights[tri] * z
+            compensated = term - correction
+            updated = total + compensated
+            correction = (updated - total) - compensated
+            total = updated
         out[col] = total
     return out
 
@@ -273,5 +283,94 @@ def integrate_overlap_matrix_numba_parallel(
                 + l1 * weights_vector[e1] * right[col, e1]
                 + l2 * weights_vector[e2] * right[col, e2]
             ) * weights[tri]
+        out[row, col] = total
+    return out
+
+
+@njit(nogil=True)
+def integrate_overlap_matrix_quadratic_numba(
+    left: np.ndarray,
+    right: np.ndarray,
+    weights_vector: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+    conjugate_left: bool,
+) -> np.ndarray:
+    left_count = left.shape[0]
+    right_count = right.shape[0]
+    out = np.empty((left_count, right_count), dtype=np.complex128)
+    for row in range(left_count):
+        for col in range(right_count):
+            total = 0.0 + 0.0j
+            correction = 0.0 + 0.0j
+            for tri in range(elems.shape[0]):
+                e0 = elems[tri, 0]
+                e1 = elems[tri, 1]
+                e2 = elems[tri, 2]
+                l0 = left[row, e0]
+                l1 = left[row, e1]
+                l2 = left[row, e2]
+                if conjugate_left:
+                    l0 = np.conj(l0)
+                    l1 = np.conj(l1)
+                    l2 = np.conj(l2)
+                l0 *= weights_vector[e0]
+                l1 *= weights_vector[e1]
+                l2 *= weights_vector[e2]
+                r0 = right[col, e0]
+                r1 = right[col, e1]
+                r2 = right[col, e2]
+                z = 2.0 * (l0 * r0 + l1 * r1 + l2 * r2)
+                z += l0 * r1 + l1 * r0 + l0 * r2 + l2 * r0 + l1 * r2 + l2 * r1
+                term = 0.25 * weights[tri] * z
+                compensated = term - correction
+                updated = total + compensated
+                correction = (updated - total) - compensated
+                total = updated
+            out[row, col] = total
+    return out
+
+
+@njit(nogil=True, parallel=True)
+def integrate_overlap_matrix_quadratic_numba_parallel(
+    left: np.ndarray,
+    right: np.ndarray,
+    weights_vector: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+    conjugate_left: bool,
+) -> np.ndarray:
+    left_count = left.shape[0]
+    right_count = right.shape[0]
+    out = np.empty((left_count, right_count), dtype=np.complex128)
+    for linear in prange(left_count * right_count):
+        row = linear // right_count
+        col = linear % right_count
+        total = 0.0 + 0.0j
+        correction = 0.0 + 0.0j
+        for tri in range(elems.shape[0]):
+            e0 = elems[tri, 0]
+            e1 = elems[tri, 1]
+            e2 = elems[tri, 2]
+            l0 = left[row, e0]
+            l1 = left[row, e1]
+            l2 = left[row, e2]
+            if conjugate_left:
+                l0 = np.conj(l0)
+                l1 = np.conj(l1)
+                l2 = np.conj(l2)
+            l0 *= weights_vector[e0]
+            l1 *= weights_vector[e1]
+            l2 *= weights_vector[e2]
+            r0 = right[col, e0]
+            r1 = right[col, e1]
+            r2 = right[col, e2]
+            z = 2.0 * (l0 * r0 + l1 * r1 + l2 * r2)
+            z += l0 * r1 + l1 * r0 + l0 * r2 + l2 * r0 + l1 * r2 + l2 * r1
+            term = 0.25 * weights[tri] * z
+            compensated = term - correction
+            updated = total + compensated
+            correction = (updated - total) - compensated
+            total = updated
         out[row, col] = total
     return out

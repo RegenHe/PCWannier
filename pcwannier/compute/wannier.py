@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .context import CalculationContext
-from .integration import integrate_weighted_abs2_columns
+from .integration import integrate_weighted_abs2_columns, validated_real
 from .kspace import get_kxyz
 
 
@@ -41,6 +41,8 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
             wsum,
             chunk_size=2048,
             backend=state.compute_backend,
+            mode=config.integration_mode,
         )
     )
+    norms = validated_real(norms, "Wannier norms")
     return tuple(r_use), wsum, norms

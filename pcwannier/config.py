@@ -31,6 +31,7 @@ class IncarConfig:
     E_file: str | bool = "./E.txt"
     E_is_real: bool = True
     compute_backend: str = "python"
+    integration_mode: str = "nodal"
 
     N_file: str = "./N.txt"
     U_file: str = "./U.txt"
@@ -62,7 +63,6 @@ class IncarConfig:
     proj_iter: bool = True
     proj_binarize: bool = False
     v_proj: bool = True
-    w_center: list[float] | bool = False
 
     epsilon: float = 0.01
     err_diff: float = 1e-6
@@ -231,6 +231,10 @@ class IncarParser:
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
+                if key == "w_center":
+                    raise ValueError(
+                        "The w_center input has been removed because forcing Wannier centers is not a physical operation."
+                    )
                 setattr(cfg, key, self.parse_value(key, value))
 
         preprocess_config(cfg)
@@ -244,6 +248,7 @@ class IncarParser:
             "name",
             "dataset_type",
             "compute_backend",
+            "integration_mode",
             "dataset_file",
             "left_dataset_file",
             "dielectric_file",
@@ -280,7 +285,7 @@ class IncarParser:
             return False if value.lower() == "false" else int(evaluate_math_expression(value))
         if key in {"extension", "k_num", "DOS_Brillouin_mesh"}:
             return [int(evaluate_math_expression(x.strip())) for x in value.split(",")]
-        if key in {"origin", "w_center", "eff_k", "finite_k"}:
+        if key in {"origin", "eff_k", "finite_k"}:
             if value.lower() == "false":
                 return False
             return [float(evaluate_math_expression(x.strip())) for x in value.split(",")]
@@ -499,6 +504,17 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
                 for k, bvec in enumerate(cfg.b_vectors):
                     mat_b[i * cfg.kdim + j, k] = bvec[i] * bvec[j]
         cfg.wb = (np.linalg.pinv(mat_b) @ mat_a).flatten()
+        reconstructed = mat_b @ cfg.wb.reshape(-1, 1)
+        residual = float(np.linalg.norm(reconstructed - mat_a) / max(np.linalg.norm(mat_a), np.finfo(float).tiny))
+        if residual > 1e-10:
+            rank = int(np.linalg.matrix_rank(mat_b))
+            raise ValueError(
+                "composition_of_b cannot reproduce the isotropic finite-difference tensor: "
+                f"relative residual={residual:.6g}, rank={rank}. Add independent neighbor directions."
+            )
+
+    if cfg.integration_mode not in {"nodal", "quadratic"}:
+        raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
 
     if cfg.projections is not None:
         cfg.band_calc_num = sum(len(p["states"]) for p in cfg.projections)

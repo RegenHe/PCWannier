@@ -77,11 +77,18 @@ def integrate_weighted_columns(
     *,
     chunk_size: int | None = None,
     backend: str | None = None,
+    mode: str = "nodal",
 ) -> np.ndarray:
     selected_backend = resolve_backend(backend)
     view = mesh_integral_view(mesh)
     left = np.asarray(weights_vector, dtype=np.complex128).reshape(view.nv)
     right = _to_nv_k(values, view.nv, "values")
+    _validate_integration_mode(mode)
+    if mode == "quadratic":
+        repeated_left = np.broadcast_to(left[:, None], right.shape)
+        if selected_backend == BACKEND_NUMBA:
+            return _integrate_product_numba(repeated_left, right, view.elements, view.tri_weights, False)
+        return _integrate_product(repeated_left, right, view.elements, view.tri_weights, False, chunk_size)
     if selected_backend == BACKEND_NUMBA:
         return _integrate_weighted_columns_numba(left, right, view.elements, view.tri_weights)
     return _integrate_weighted_columns(left, right, view.elements, view.tri_weights, chunk_size)
@@ -94,11 +101,18 @@ def integrate_weighted_abs2_columns(
     *,
     chunk_size: int | None = None,
     backend: str | None = None,
+    mode: str = "nodal",
 ) -> np.ndarray:
     selected_backend = resolve_backend(backend)
     view = mesh_integral_view(mesh)
     left = np.asarray(weights_vector, dtype=np.complex128).reshape(view.nv)
     right = _to_nv_k(values, view.nv, "values")
+    _validate_integration_mode(mode)
+    if mode == "quadratic":
+        weighted_conjugate = np.conj(right) * left[:, None]
+        if selected_backend == BACKEND_NUMBA:
+            return _integrate_product_numba(weighted_conjugate, right, view.elements, view.tri_weights, False)
+        return _integrate_product(weighted_conjugate, right, view.elements, view.tri_weights, False, chunk_size)
     if selected_backend == BACKEND_NUMBA:
         return _integrate_weighted_abs2_columns_numba(left, right, view.elements, view.tri_weights)
     return _integrate_weighted_abs2_columns(left, right, view.elements, view.tri_weights, chunk_size)
@@ -113,12 +127,33 @@ def integrate_overlap_matrix(
     conjugate_left: bool = True,
     chunk_size: int | None = None,
     backend: str | None = None,
+    mode: str = "nodal",
 ) -> np.ndarray:
     selected_backend = resolve_backend(backend)
     view = mesh_integral_view(mesh)
     lmat = _to_k_nv(left, view.nv, "left")
     rmat = _to_k_nv(right, view.nv, "right")
     weights_vector = np.ones(view.nv, dtype=np.complex128) if weights_vector is None else np.asarray(weights_vector, dtype=np.complex128).reshape(view.nv)
+    _validate_integration_mode(mode)
+    if mode == "quadratic":
+        if selected_backend == BACKEND_NUMBA:
+            return _integrate_overlap_matrix_quadratic_numba(
+                lmat,
+                rmat,
+                weights_vector,
+                view.elements,
+                view.tri_weights,
+                conjugate_left,
+            )
+        return _integrate_overlap_matrix_quadratic(
+            lmat,
+            rmat,
+            weights_vector,
+            view.elements,
+            view.tri_weights,
+            conjugate_left,
+            chunk_size,
+        )
     if selected_backend == BACKEND_NUMBA:
         return _integrate_overlap_matrix_numba(
             lmat,
@@ -142,6 +177,27 @@ def _to_nv_k(arr, nv: int, name: str) -> np.ndarray:
     if out.shape[0] != nv:
         raise ValueError(f"{name} has invalid shape {arr.shape}; expected one dimension to be {nv}.")
     return out.astype(np.complex128, copy=False)
+
+
+def _validate_integration_mode(mode: str) -> None:
+    if mode not in {"nodal", "quadratic"}:
+        raise ValueError("integration mode must be 'nodal' or 'quadratic'.")
+
+
+def validated_real(values, name: str, *, rtol: float = 1e-10, atol: float = 1e-12) -> np.ndarray:
+    array = np.asarray(values)
+    imag_max = float(np.max(np.abs(array.imag))) if np.iscomplexobj(array) and array.size else 0.0
+    scale = max(float(np.max(np.abs(array.real))) if array.size else 0.0, 1.0)
+    tolerance = atol + rtol * scale
+    if not np.isfinite(imag_max) or imag_max > tolerance:
+        raise FloatingPointError(
+            f"{name} should be real, but its imaginary residual is {imag_max:.6g} "
+            f"(tolerance={tolerance:.6g})."
+        )
+    real = np.asarray(array.real, dtype=np.float64)
+    if not np.all(np.isfinite(real)):
+        raise FloatingPointError(f"{name} contains non-finite values.")
+    return real
 
 
 def _to_k_nv(arr, nv: int, name: str) -> np.ndarray:
@@ -219,6 +275,24 @@ def _integrate_overlap_matrix_numba(
     if _NUMBA_PARALLEL_ALLOWED.get() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
         return integrate_overlap_matrix_numba_parallel(left, right, weights_vector, elems, weights, conjugate_left)
     return integrate_overlap_matrix_numba(left, right, weights_vector, elems, weights, conjugate_left)
+
+
+def _integrate_overlap_matrix_quadratic_numba(
+    left: np.ndarray,
+    right: np.ndarray,
+    weights_vector: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+    conjugate_left: bool,
+) -> np.ndarray:
+    from .numba_kernels import integrate_overlap_matrix_quadratic_numba, integrate_overlap_matrix_quadratic_numba_parallel
+
+    work_items = left.shape[0] * right.shape[0]
+    if _NUMBA_PARALLEL_ALLOWED.get() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
+        return integrate_overlap_matrix_quadratic_numba_parallel(
+            left, right, weights_vector, elems, weights, conjugate_left
+        )
+    return integrate_overlap_matrix_quadratic_numba(left, right, weights_vector, elems, weights, conjugate_left)
 
 
 def _integrate_batch(values: np.ndarray, elems: np.ndarray, weights: np.ndarray, chunk_size: int | None) -> np.ndarray:
@@ -317,6 +391,53 @@ def _integrate_overlap_matrix(
     return out
 
 
+def _integrate_overlap_matrix_quadratic(
+    left: np.ndarray,
+    right: np.ndarray,
+    weights_vector: np.ndarray,
+    elems: np.ndarray,
+    weights: np.ndarray,
+    conjugate_left: bool,
+    chunk_size: int | None,
+) -> np.ndarray:
+    left_count = left.shape[0]
+    right_count = right.shape[0]
+    if chunk_size is None:
+        chunk_size = max(1, right_count)
+    out = np.empty((left_count, right_count), dtype=np.complex128)
+    triangle_block = 4096
+    for start in range(0, right_count, chunk_size):
+        end = min(start + chunk_size, right_count)
+        total = np.zeros((left_count, end - start), dtype=np.complex128)
+        correction = np.zeros_like(total)
+        rblock = right[start:end]
+        for tri_start in range(0, elems.shape[0], triangle_block):
+            tri_end = min(tri_start + triangle_block, elems.shape[0])
+            ids = elems[tri_start:tri_end]
+            lvals = left[:, ids]
+            if conjugate_left:
+                lvals = np.conj(lvals)
+            lvals = lvals * weights_vector[ids][None, :, :]
+            rvals = rblock[:, ids]
+            tri_weight = weights[tri_start:tri_end]
+            local = 0.25 * (
+                np.einsum("ati,bti,t->ab", lvals, rvals, tri_weight, optimize=True)
+                + np.einsum(
+                    "at,bt,t->ab",
+                    np.sum(lvals, axis=2),
+                    np.sum(rvals, axis=2),
+                    tri_weight,
+                    optimize=True,
+                )
+            )
+            compensated = local - correction
+            updated = total + compensated
+            correction = (updated - total) - compensated
+            total = updated
+        out[:, start:end] = total
+    return out
+
+
 def _integrate_product(
     a: np.ndarray,
     b: np.ndarray,
@@ -331,17 +452,25 @@ def _integrate_product(
     out = np.empty(k_count, dtype=np.complex128)
     for start in range(0, k_count, chunk_size):
         end = min(start + chunk_size, k_count)
-        a0 = a[elems[:, 0], start:end]
-        a1 = a[elems[:, 1], start:end]
-        a2 = a[elems[:, 2], start:end]
-        if hermitian:
-            a0 = np.conj(a0)
-            a1 = np.conj(a1)
-            a2 = np.conj(a2)
-        b0 = b[elems[:, 0], start:end]
-        b1 = b[elems[:, 1], start:end]
-        b2 = b[elems[:, 2], start:end]
-        z = 2.0 * (a0 * b0 + a1 * b1 + a2 * b2)
-        z += a0 * b1 + a1 * b0 + a0 * b2 + a2 * b0 + a1 * b2 + a2 * b1
-        out[start:end] = np.sum(0.25 * weights[:, None] * z, axis=0)
+        total = np.zeros(end - start, dtype=np.complex128)
+        correction = np.zeros(end - start, dtype=np.complex128)
+        for tri, (e0, e1, e2) in enumerate(elems):
+            a0 = a[e0, start:end]
+            a1 = a[e1, start:end]
+            a2 = a[e2, start:end]
+            if hermitian:
+                a0 = np.conj(a0)
+                a1 = np.conj(a1)
+                a2 = np.conj(a2)
+            b0 = b[e0, start:end]
+            b1 = b[e1, start:end]
+            b2 = b[e2, start:end]
+            z = 2.0 * (a0 * b0 + a1 * b1 + a2 * b2)
+            z += a0 * b1 + a1 * b0 + a0 * b2 + a2 * b0 + a1 * b2 + a2 * b1
+            term = 0.25 * weights[tri] * z
+            compensated = term - correction
+            updated = total + compensated
+            correction = (updated - total) - compensated
+            total = updated
+        out[start:end] = total
     return out

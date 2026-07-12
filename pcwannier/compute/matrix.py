@@ -26,6 +26,7 @@ class MSet:
             if path is None:
                 raise ValueError("M cache requested, but M_file is disabled.")
             self.mM0 = load_cell_matrix(path, self.state.k_shape + (b_half,))
+            self._validate_cached_m0()
             self.mMInitial = self.state.gen_matrix_on_kmesh(
                 lambda *_: [np.zeros((band_count, band_count), dtype=np.complex128) for _ in range(b_half)]
             )
@@ -64,6 +65,7 @@ class MSet:
                         self.state.epsilon,
                         chunk_size=64,
                         backend=self.state.compute_backend,
+                        mode=self.config.integration_mode,
                     )
                 )
             return idx, result
@@ -89,7 +91,7 @@ class MSet:
             mat = np.conj(self.mM0[ik][b - b_half]).T
         transform = self.state.get_transform()
         ik, _ = neighbor_reciprocal_lattice_vectors(self.config, [i, j, k], b)
-        return transform[i, j, k] @ mat @ transform[ik]
+        return transform[i, j, k].conj().T @ mat @ transform[ik]
 
     def get(self, i: int, j: int, k: int, b: int) -> np.ndarray:
         b_half = len(self.config.composition_of_b) // 2
@@ -118,3 +120,18 @@ class MSet:
 
         for idx, out in parallel_map(self.state.k_indices(), update_idx, self.threads):
             self.mM[idx] = out
+
+    def _validate_cached_m0(self) -> None:
+        b_half = len(self.config.composition_of_b) // 2
+        for i, j, k in self.state.k_indices():
+            for b in range(b_half):
+                ik, _ = neighbor_reciprocal_lattice_vectors(self.config, [i, j, k], b)
+                matrix = np.asarray(self.mM0[i, j, k, b], dtype=np.complex128)
+                expected = (len(self.state.E_idx[i, j, k]), len(self.state.E_idx[ik]))
+                if matrix.shape != expected:
+                    raise ValueError(
+                        f"Cached M matrix at k={(i, j, k)}, direction={b} has shape {matrix.shape}; "
+                        f"expected {expected}."
+                    )
+                if not np.all(np.isfinite(matrix)):
+                    raise ValueError(f"Cached M matrix at k={(i, j, k)}, direction={b} contains non-finite values.")

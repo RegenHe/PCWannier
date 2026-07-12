@@ -12,6 +12,7 @@ class StateCollection:
     def __init__(self, bundle: InputBundle, *, backend: str = "python", threads: int = 1):
         self.config = bundle.config
         self.compute_backend = backend
+        self.integration_mode = self.config.integration_mode
         self.threads = max(1, int(threads))
         self.mesh = bundle.mesh
         self.fields = bundle.fields
@@ -131,14 +132,14 @@ class StateCollection:
         self._identity_transform = None
         self.is_orthogonalized = True
 
-    def check_orthogonality(self) -> tuple[np.ndarray, bool]:
+    def check_orthogonality(self, *, apply_transform: bool = True) -> tuple[np.ndarray, bool]:
         report = np.zeros(self.k_shape + (6,), dtype=float)
         need_orth = False
 
         def calc_idx(idx):
             i, j, k = idx
             smat = self._overlap_matrix(i, j, k)
-            if self.is_orthogonalized and self.transform_correction is not None:
+            if apply_transform and self.is_orthogonalized and self.transform_correction is not None:
                 tcorr = self.transform_correction[i, j, k]
                 smat = tcorr.conj().T @ smat @ tcorr
             nwin = smat.shape[0]
@@ -167,14 +168,23 @@ class StateCollection:
 
     def _overlap_matrix(self, i: int, j: int, k: int) -> np.ndarray:
         wblock = self.get_block(i, j, k)
-        return integrate_overlap_matrix(
+        smat = integrate_overlap_matrix(
             self.integral_view,
             wblock,
             wblock,
             self.epsilon,
             chunk_size=64,
             backend=self.compute_backend,
+            mode=self.integration_mode,
         )
+        scale = max(float(np.linalg.norm(smat, ord="fro")), 1.0)
+        residual = float(np.linalg.norm(smat - smat.conj().T, ord="fro"))
+        if not np.isfinite(residual) or residual > 1e-10 * scale:
+            raise FloatingPointError(
+                f"Overlap matrix at k={(i, j, k)} is not Hermitian "
+                f"(residual={residual:.6g}, scale={scale:.6g})."
+            )
+        return 0.5 * (smat + smat.conj().T)
 
     def turn_to_bloch(self) -> None:
         if self.is_bloch:

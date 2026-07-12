@@ -490,7 +490,8 @@ def write_topology_figures(directory: str | Path, topology: TopologyResult) -> N
         ax.set_ylabel(r"$x$")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
-        ax.set_title(f"Wilson loop (direction = {direction}, Z2 = {z2})")
+        z2_label = "unavailable" if z2 is None else str(z2)
+        ax.set_title(f"Wilson loop (direction = {direction}, Z2 = {z2_label})")
         fig.savefig(directory / f"Hybrid_Wilson_Loop-{gid}-d-{direction}.png", bbox_inches="tight", dpi=300)
         plt.close(fig)
     for key, (flux, chern) in topology.chern.items():
@@ -500,6 +501,11 @@ def write_topology_figures(directory: str | Path, topology: TopologyResult) -> N
         fig.colorbar(img, ax=ax)
         ax.set_xlabel(r"$k_1 (2\pi / a)$")
         ax.set_ylabel(r"$k_2 (2\pi / a)$")
-        ax.set_title(f"Chern number = {chern:.4f}")
+        bands = topology.chern_bands.get(key, ())
+        if bands and bands == tuple(range(bands[0], bands[-1] + 1)):
+            band_label = str(bands[0]) if len(bands) == 1 else f"{bands[0]}-{bands[-1]}"
+        else:
+            band_label = ",".join(str(band) for band in bands) or "unknown"
+        ax.set_title(f"Chern number = {chern:.4f} (bands {band_label})")
         fig.savefig(directory / f"Chern_Number-{key}.png", bbox_inches="tight", dpi=300)
         plt.close(fig)

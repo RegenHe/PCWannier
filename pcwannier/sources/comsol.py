@@ -249,6 +249,13 @@ def load_input(config: IncarConfig) -> InputBundle:
     energy_raw = load_comsol_data(energy_path, real_only=config.E_is_real or config.hermitian)
     _validate_header_k_grid(config, raw_data, dataset_path)
     _validate_header_k_grid(config, energy_raw, energy_path)
+    if energy_raw.point_matrix.shape[0] != 1:
+        raise ValueError(f"COMSOL energy file must contain exactly one spatial row; got {energy_raw.point_matrix.shape[0]}.")
+    if raw_data.value_matrix.shape[1] != energy_raw.value_matrix.shape[1]:
+        raise ValueError(
+            "COMSOL field and energy column counts differ: "
+            f"field={raw_data.value_matrix.shape[1]}, energy={energy_raw.value_matrix.shape[1]}."
+        )
 
     with timed_step("prepare COMSOL tensors", LOGGER):
         energy_matrix, energies, band_indices, inner_band_indices = _handle_energy_data(config, energy_raw)
@@ -296,18 +303,71 @@ def _validate_header_k_grid(config: IncarConfig, data: RawData, path: Path) -> N
     parameters = data.column_parameters
     if not parameters:
         return
+    k_sizes = {}
     for axis in range(int(config.kdim)):
         name = f"k{axis + 1}"
         if name not in parameters:
             continue
         header_values = np.unique(parameters[name])
         expected_count = len(config.k_points[axis])
+        k_sizes[name] = expected_count
         if header_values.size != expected_count:
             raise ValueError(
                 f"COMSOL k-grid mismatch in {path}: header {name} has {header_values.size} values "
                 f"({header_values[0]:.10g} to {header_values[-1]:.10g}), but incar k_points[{axis}] "
                 f"has {expected_count}. Check k_points and dataset_order before calculating Wannier functions."
             )
+
+    if len(k_sizes) != int(config.kdim):
+        return
+    column_count = data.value_matrix.shape[1]
+    k_count = int(np.prod(list(k_sizes.values())))
+    if column_count % k_count != 0:
+        raise ValueError(f"COMSOL column count {column_count} is incompatible with the declared k-grid in {path}.")
+    dimensions = list(config.dataset_order)
+    if "E" not in dimensions:
+        dimensions.append("E")
+    sizes = {**k_sizes, "E": column_count // k_count}
+    shape = tuple(sizes[name] for name in dimensions)
+    energy_count = sizes["E"]
+    k_names = set(k_sizes)
+    energy_parameters = [
+        name
+        for name, values in parameters.items()
+        if name not in k_names and np.unique(values).size == energy_count
+    ]
+    if energy_count > 1 and len(energy_parameters) != 1:
+        raise ValueError(
+            f"COMSOL header in {path} must contain exactly one complete energy/band parameter "
+            f"with {energy_count} unique values; found {energy_parameters}."
+        )
+    parameter_for_dimension = {name: name for name in k_names}
+    if energy_count > 1:
+        parameter_for_dimension["E"] = energy_parameters[0]
+
+    rank_columns = []
+    for dimension in dimensions:
+        name = parameter_for_dimension.get(dimension)
+        if name is None:
+            continue
+        values = parameters[name]
+        if values.size != column_count:
+            raise ValueError(
+                f"COMSOL header metadata in {path} describes {values.size} columns, but the data has {column_count}."
+            )
+        unique = np.unique(values)
+        actual = np.searchsorted(unique, values)
+        expected = np.indices(shape, sparse=False)[dimensions.index(dimension)].reshape(-1)
+        if not np.array_equal(actual, expected):
+            raise ValueError(
+                f"COMSOL column order in {path} does not match dataset_order={config.dataset_order}; "
+                f"the {name} parameter varies in a different position."
+            )
+        rank_columns.append(actual)
+    if rank_columns:
+        combinations = np.stack(rank_columns, axis=1)
+        if np.unique(combinations, axis=0).shape[0] != column_count:
+            raise ValueError(f"COMSOL header in {path} contains duplicate or missing k/band parameter combinations.")
 
 
 def _required_input_paths(config: IncarConfig) -> tuple[Path, Path, Path, Path]:

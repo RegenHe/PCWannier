@@ -84,8 +84,13 @@ class TBAModel:
         high_sym_points = []
         k_list_parts = [np.array(config.k_path[0]["point"], dtype=float)[:kdim]]
         total = 0
+        first_point = np.asarray(config.k_path[0]["point"], dtype=float)[:kdim]
+        last_point = np.asarray(config.k_path[-1]["point"], dtype=float)[:kdim]
+        endpoints_equivalent = self._periodically_equivalent(first_point, last_point)
         for idx, point in enumerate(config.k_path):
             high_sym_points.append([point["name"], total])
+            if idx == len(config.k_path) - 1 and endpoints_equivalent:
+                break
             num = int(point["num"])
             start = np.asarray(point["point"], dtype=float)[:kdim]
             stop = np.asarray(config.k_path[(idx + 1) % len(config.k_path)]["point"], dtype=float)[:kdim]
@@ -93,7 +98,8 @@ class TBAModel:
                 seg = np.stack([np.linspace(start[axis], stop[axis], num + 1)[1:] for axis in range(kdim)], axis=1)
                 k_list_parts.append(seg)
             total += num
-        high_sym_points.append([config.k_path[0]["name"], total])
+        if not endpoints_equivalent:
+            high_sym_points.append([config.k_path[0]["name"], total])
         k_path = np.vstack(k_list_parts)
         k_axis = np.arange(0, total + 1)
 
@@ -106,31 +112,55 @@ class TBAModel:
 
         dos_energy = None
         dos_components = None
-        if config.DOS in (1, 2):
-            dos_energy = np.linspace(np.min(np.real(energies)), np.max(np.real(energies)), int(config.DOS_num))
-            comp_count = 1 if config.DOS == 1 else int(config.band_calc_num)
-            dos_components = np.zeros((comp_count, int(config.DOS_num)), dtype=np.complex128)
-            ident = np.eye(int(config.band_calc_num), dtype=np.complex128)
-            for eidx, energy in enumerate(dos_energy):
-                green = np.linalg.inv(hks - (energy - 1j * config.DOS_eps) * ident)
-                diag = np.real((-1 / np.pi) * np.imag(np.diagonal(green, axis1=-2, axis2=-1)))
-                if config.DOS == 1:
-                    dos_components[0, eidx] = diag.sum()
-                else:
-                    dos_components[:, eidx] = diag.sum(axis=0)
-        elif config.DOS == 3:
-            mesh = np.array(config.DOS_Brillouin_mesh, dtype=int)[:kdim]
-            axes = [np.arange(m, dtype=float) / m for m in mesh]
-            grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, kdim)
-            hgrid = h_of_k(self._kfrac_to_kcart(grid))
-            dos_energy = np.linspace(np.min(np.real(energies)), np.max(np.real(energies)), int(config.DOS_num))
-            dos_components = np.zeros((1, int(config.DOS_num)), dtype=np.complex128)
-            ident = np.eye(int(config.band_calc_num), dtype=np.complex128)
-            for eidx, energy in enumerate(dos_energy):
-                green = np.linalg.inv(hgrid - (energy - 1j * config.DOS_eps) * ident)
-                dos_components[0, eidx] = (-1 / np.pi) * np.imag(np.diagonal(green, axis1=-2, axis2=-1)).sum()
+        if config.DOS in (1, 2, 3):
+            dos_energy, dos_components = self._calculate_dos(h_of_k, kdim)
 
         return BandResult(k_path, k_axis, high_sym_points, energies, dos_energy, dos_components)
+
+    @staticmethod
+    def _periodically_equivalent(first: np.ndarray, last: np.ndarray, atol: float = 1e-10) -> bool:
+        difference = np.asarray(last, dtype=float) - np.asarray(first, dtype=float)
+        return bool(np.allclose(difference, np.rint(difference), rtol=0.0, atol=atol))
+
+    def _calculate_dos(self, h_of_k, kdim: int) -> tuple[np.ndarray, np.ndarray]:
+        config = self.config
+        mesh = np.asarray(config.DOS_Brillouin_mesh, dtype=int)[:kdim]
+        if mesh.size != kdim or np.any(mesh <= 0):
+            raise ValueError(f"DOS_Brillouin_mesh must contain {kdim} positive integers.")
+        axes = [np.arange(int(count), dtype=float) / int(count) for count in mesh]
+        grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, kdim)
+        hgrid = h_of_k(self._kfrac_to_kcart(grid))
+        if not config.hermitian:
+            raise NotImplementedError("DOS currently supports Hermitian TBA models only.")
+        eigvals, eigvecs = np.linalg.eigh(hgrid)
+
+        eta = float(config.DOS_eps)
+        if not np.isfinite(eta) or eta <= 0.0:
+            raise ValueError("DOS_eps must be a positive finite number.")
+        energy_count = int(config.DOS_num)
+        if energy_count < 2:
+            raise ValueError("DOS_num must be at least 2.")
+        padding = 10.0 * eta
+        energy_axis = np.linspace(float(eigvals.min()) - padding, float(eigvals.max()) + padding, energy_count)
+        component_count = int(config.band_calc_num) if config.DOS == 2 else 1
+        components = np.empty((component_count, energy_count), dtype=np.float64)
+        orbital_weights = np.abs(eigvecs) ** 2
+        nk = eigvals.shape[0]
+        for eidx, energy in enumerate(energy_axis):
+            lorentz = eta / (np.pi * ((energy - eigvals) ** 2 + eta**2))
+            if config.DOS == 2:
+                components[:, eidx] = np.einsum("kob,kb->o", orbital_weights, lorentz, optimize=True) / nk
+            else:
+                components[0, eidx] = np.sum(lorentz) / nk
+        if config.DOS == 2:
+            total = np.sum(components, axis=0)
+            direct = np.array(
+                [np.sum(eta / (np.pi * ((energy - eigvals) ** 2 + eta**2))) / nk for energy in energy_axis]
+            )
+            residual = float(np.max(np.abs(total - direct)))
+            if residual > 1e-10 * max(float(np.max(np.abs(direct))), 1.0):
+                raise FloatingPointError(f"PDOS components do not sum to total DOS (residual={residual:.6g}).")
+        return energy_axis, components
 
     def gen_bz_bands(self, result: BandResult, hoppings: dict[tuple[int, int, int], np.ndarray]) -> None:
         config = self.config

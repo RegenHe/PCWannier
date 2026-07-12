@@ -241,8 +241,9 @@ class BandResult:
 
 @dataclass
 class TopologyResult:
-    wilson: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, int]] = field(default_factory=dict)
+    wilson: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, int | None]] = field(default_factory=dict)
     chern: dict[str, tuple[np.ndarray, float]] = field(default_factory=dict)
+    chern_bands: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 @dataclass

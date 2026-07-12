@@ -11,13 +11,13 @@ def test_load_data_incar_defaults_and_preprocess():
     assert cfg.dataset_type == "comsol"
     assert cfg.hermitian is True
     assert cfg.kdim == 2
-    assert [len(axis) for axis in cfg.k_points] == [10, 10]
-    assert np.array_equal(cfg.band_window, np.arange(0, 5))
+    assert [len(axis) for axis in cfg.k_points] == [16, 16]
+    assert np.array_equal(cfg.band_window, np.arange(0, 4))
     assert cfg.band_calc_num == 4
     assert len(cfg.composition_of_b) == 4
     assert cfg.b_vectors.shape == (4, 2)
     assert cfg.wb.shape == (4,)
-    assert len(cfg.projections) == 1
+    assert len(cfg.projections) == 4
     assert cfg.compute_backend == "python"
 
 

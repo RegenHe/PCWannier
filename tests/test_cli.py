@@ -20,12 +20,15 @@ def test_cli_smoke_writes_outputs(tmp_path, monkeypatch):
     text = incar.read_text(encoding="utf-8")
     replacements = {
         "max_iter = 1000": "max_iter = 0",
+        "max_iter = 2000": "max_iter = 0",
         "wannier_figures = ./wanniers/": "wannier_figures = false",
+        "wannier_figures = ./wanniers": "wannier_figures = false",
         "band_figure = ./band.png": "band_figure = false",
         "hybrid_Wilson_loop = true": "hybrid_Wilson_loop = false",
         "Chern_number = true": "Chern_number = false",
         "topo_output = ./topo/": "topo_output = false",
         "extension = 10, 10": "extension = 1, 1",
+        "extension = 8, 8": "extension = 1, 1",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)

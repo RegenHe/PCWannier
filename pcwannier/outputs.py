@@ -197,7 +197,7 @@ def write_interpolation_outputs(
     points = load_interpolation_points(interp_path)
     interp_path = Path(interp_path)
     mesh = result.extended_mesh
-    triang = Triangulation(mesh.vertices[:, 0], mesh.vertices[:, 1], mesh.elements)
+    tile_count = int(np.prod(result.config.extension[: result.config.kdim]))
 
     wannier_path = _resolve_interpolation_output(interp_path, interp_wannier, "interp-wannier", out_dir)
     if wannier_path is not None:
@@ -205,13 +205,13 @@ def write_interpolation_outputs(
         for _, wmat in result.wanniers.items():
             wmat = np.asarray(wmat)
             for band in range(wmat.shape[1]):
-                values.append(_interpolate_complex(triang, wmat[:, band], points))
+                values.append(_interpolate_complex_mesh(mesh, wmat[:, band], points, tile_count))
         with timed_step("write interpolated Wannier data", LOGGER, file=wannier_path):
             save_points_with_values(wannier_path, points, np.asarray(values))
 
     epsilon_path = _resolve_interpolation_output(interp_path, interp_epsilon, "interp-epsilon", out_dir)
     if epsilon_path is not None:
-        epsilon = _interpolate_real(triang, result.extended_epsilon, points)
+        epsilon = _interpolate_real_mesh(mesh, result.extended_epsilon, points, tile_count)
         with timed_step("write interpolated epsilon data", LOGGER, file=epsilon_path):
             save_points_with_values(epsilon_path, points, epsilon.reshape(1, -1))
 
@@ -244,6 +244,38 @@ def _interpolate_complex(triang: Triangulation, values: np.ndarray, points: np.n
     values = np.asarray(values)
     real = _interpolate_real(triang, np.real(values), points)
     imag = _interpolate_real(triang, np.imag(values), points)
+    return real + 1j * imag
+
+
+def _interpolate_real_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, tile_count: int) -> np.ndarray:
+    """Interpolate a tiled non-conforming mesh without building a global triangle finder."""
+    tile_count = max(1, int(tile_count))
+    if mesh.elements.shape[0] % tile_count != 0:
+        raise ValueError("Extended mesh element count is incompatible with its tile count.")
+    elements_per_tile = mesh.elements.shape[0] // tile_count
+    totals = np.zeros(points.shape[0], dtype=float)
+    counts = np.zeros(points.shape[0], dtype=np.intp)
+    real_values = np.asarray(np.real(values), dtype=float)
+
+    for tile in range(tile_count):
+        start = tile * elements_per_tile
+        stop = start + elements_per_tile
+        triang = Triangulation(mesh.vertices[:, 0], mesh.vertices[:, 1], mesh.elements[start:stop])
+        interpolated = _interpolate_real(triang, real_values, points)
+        valid = np.isfinite(interpolated)
+        totals[valid] += interpolated[valid]
+        counts[valid] += 1
+
+    out = np.full(points.shape[0], np.nan, dtype=float)
+    valid = counts > 0
+    out[valid] = totals[valid] / counts[valid]
+    return out
+
+
+def _interpolate_complex_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, tile_count: int) -> np.ndarray:
+    values = np.asarray(values)
+    real = _interpolate_real_mesh(mesh, np.real(values), points, tile_count)
+    imag = _interpolate_real_mesh(mesh, np.imag(values), points, tile_count)
     return real + 1j * imag
 
 

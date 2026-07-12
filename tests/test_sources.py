@@ -10,7 +10,15 @@ from pcwannier.compute import (
     is_numba_available,
 )
 from pcwannier.data import FieldData, Mesh, RawData
-from pcwannier.sources.comsol import load_comsol_data, load_comsol_mesh, load_input, match_data_to_mesh
+from pcwannier.outputs import _interpolate_real_mesh
+from pcwannier.sources.comsol import (
+    _validate_header_k_grid,
+    _values_on_mesh,
+    load_comsol_data,
+    load_comsol_mesh,
+    load_input,
+    match_data_to_mesh,
+)
 
 
 def test_comsol_data_shapes():
@@ -20,10 +28,14 @@ def test_comsol_data_shapes():
     energy = load_comsol_data(str(cfg.input_path(cfg.E_file)))
     eps = load_comsol_data(str(cfg.input_path(cfg.dielectric_file)), real_only=True)
 
-    assert mesh.vertices.shape == (499, 2)
-    assert mesh.elements.shape == (936, 3)
-    assert ez.value_matrix.shape == (499, 1200)
-    assert energy.value_matrix.shape == (1, 1200)
+    assert mesh.vertices.shape == (1329, 2)
+    assert mesh.elements.shape == (2516, 3)
+    assert ez.value_matrix.shape[0] == 1329
+    assert energy.value_matrix.shape[0] == 1
+    assert ez.value_matrix.shape[1] == energy.value_matrix.shape[1]
+    assert ez.value_matrix.shape[1] % np.prod([len(axis) for axis in cfg.k_points]) == 0
+    assert np.unique(ez.column_parameters["k1"]).size == 16
+    assert np.unique(ez.column_parameters["k2"]).size == 16
     assert eps.value_matrix.shape[1] == 1
     assert not np.iscomplexobj(eps.value_matrix)
 
@@ -53,16 +65,26 @@ def test_comsol_real_only_reader_accepts_complex_tokens(tmp_path):
     assert np.allclose(raw.value_matrix[0], [23.57556147941945, 4.0])
 
 
+def test_comsol_header_k_grid_mismatch_is_rejected():
+    cfg = load_config("data/incar")
+    raw = load_comsol_data(cfg.input_path(cfg.dataset_file))
+    cfg.k_points[0] = cfg.k_points[0][::2]
+
+    with pytest.raises(ValueError, match="COMSOL k-grid mismatch"):
+        _validate_header_k_grid(cfg, raw, cfg.input_path(cfg.dataset_file))
+
+
 def test_load_input_bundle_distribution():
     bundle = load_input(load_config("data/incar"))
 
-    assert bundle.fields.shape == (10, 10, 1)
-    assert len(bundle.fields[0, 0, 0]) == 5
-    assert bundle.fields[0, 0, 0].shape == (5, 499)
-    assert bundle.fields[0, 0, 0][0].shape == (499,)
-    assert bundle.epsilon.shape == (499,)
-    assert np.array_equal(bundle.band_indices[0, 0, 0], [0, 1, 2, 3, 4])
-    assert np.asarray(bundle.energies[0, 0, 0]).shape == (5,)
+    assert bundle.fields.shape == (16, 16, 1)
+    assert len(bundle.fields[0, 0, 0]) == 4
+    assert bundle.fields[0, 0, 0].shape == (4, 1329)
+    assert bundle.fields[0, 0, 0][0].shape == (1329,)
+    assert bundle.epsilon.shape == (1329,)
+    assert np.array_equal(bundle.band_indices[0, 0, 0], [0, 1, 2, 3])
+    assert np.asarray(bundle.energies[0, 0, 0]).shape == (4,)
+    assert np.count_nonzero(np.isclose(bundle.epsilon, 8.0)) == 159
 
 
 def test_match_data_to_mesh_and_integral_formula():
@@ -82,8 +104,23 @@ def test_match_data_to_mesh_and_integral_formula():
     cfg = load_config("data/incar")
     raw = load_comsol_data(str(cfg.input_path(cfg.dataset_file)))
     idxs, dists = match_data_to_mesh(load_comsol_mesh(str(cfg.input_path(cfg.mesh_file))), raw)
-    assert len(idxs) == 499
-    assert np.min(np.abs(dists)) <= 1e-6
+    assert len(idxs) == 1329
+    assert np.all(dists == 0.0)
+    assert np.unique(idxs).size == 1329
+
+
+def test_values_on_mesh_averages_duplicate_rows_all_columns():
+    mesh = Mesh(np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]), np.array([[0, 1, 2]]))
+    raw = RawData(
+        np.array([[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+        np.array([[1.0 + 1.0j, 2.0], [3.0 + 3.0j, 6.0], [5.0, 7.0], [9.0, 11.0]]),
+    )
+
+    mapped = _values_on_mesh(mesh, raw)
+
+    assert np.allclose(mapped[0], [2.0 + 2.0j, 4.0])
+    assert np.allclose(mapped[1], [5.0, 7.0])
+    assert np.allclose(mapped[2], [9.0, 11.0])
 
 
 def test_match_data_to_mesh_rejects_far_points():
@@ -179,11 +216,43 @@ def test_mesh_extension_matches_legacy_incremental_algorithm():
 def test_data_mesh_extension_full_size():
     cfg = load_config("data/incar")
     mesh = load_comsol_mesh(str(cfg.input_path(cfg.mesh_file)))
+    assert np.count_nonzero(mesh._boundary_vertex_mask(mesh.vertices.shape[0])) == 140
+    assert np.unique(mesh.edge).size == 299
+    base_weights = mesh.tri_weights.copy()
     mapping = mesh.extension(cfg.extension, cfg.real_lattice_vectors, float(cfg.lattice_const))
 
-    assert mesh.vertices.shape == (47101, 2)
-    assert mesh.elements.shape == (93600, 3)
-    assert mapping.shape == (47101,)
+    assert mesh.vertices.shape == (84881, 2)
+    assert mesh.elements.shape == (161024, 3)
+    assert mapping.shape == (84881,)
+    assert np.allclose(mesh.tri_weights, np.tile(base_weights, np.prod(cfg.extension)), rtol=0.0, atol=1e-14)
+
+    avec = np.asarray(cfg.real_lattice_vectors, dtype=float) * float(cfg.lattice_const)
+    base_mesh = load_comsol_mesh(str(cfg.input_path(cfg.mesh_file)))
+    base_fractional = base_mesh.vertices @ np.linalg.inv(avec)
+    base_field = np.exp(2j * np.pi * base_fractional[:, 0]) + 0.5 * np.exp(2j * np.pi * base_fractional[:, 1])
+    extended_fractional = mesh.vertices @ np.linalg.inv(avec)
+    expected = np.exp(2j * np.pi * extended_fractional[:, 0]) + 0.5 * np.exp(2j * np.pi * extended_fractional[:, 1])
+    assert np.allclose(base_field[mapping], expected, rtol=0.0, atol=1e-10)
+
+
+def test_extension_does_not_merge_nearby_nonmatching_boundary_nodes():
+    vertices = np.array(
+        [[0.0, 0.0], [1.0, 0.0], [1.0, 0.49], [1.0, 1.0], [0.0, 1.0], [0.0, 0.5], [0.5, 0.5]]
+    )
+    elements = np.array([[6, i, (i + 1) % 6] for i in range(6)])
+    mesh = Mesh(vertices, elements)
+
+    mapping = mesh.extension([2, 1], [[1.0, 0.0], [0.0, 1.0]], 1.0)
+    seam = mesh.vertices[np.isclose(mesh.vertices[:, 0], 1.0)]
+
+    assert mesh.vertices.shape[0] == 12
+    assert mapping.shape == (12,)
+    assert np.allclose(np.sort(seam[:, 1]), [0.0, 0.49, 0.5, 1.0])
+
+    values = vertices[:, 1][mapping]
+    points = np.array([[0.25, 0.25], [1.25, 0.25], [1.0, 0.5]])
+    interpolated = _interpolate_real_mesh(mesh, values, points, tile_count=2)
+    assert np.allclose(interpolated, points[:, 1], rtol=0.0, atol=1e-12)
 
 
 def _legacy_extension(mesh: Mesh, n, real_lattice_vectors, lattice_const):

@@ -104,7 +104,8 @@ class Mesh:
         boundary_mask = self._boundary_vertex_mask(original_vertex_count)
         candidates = np.flatnonzero(np.tile(boundary_mask, raw_count // original_vertex_count))
 
-        threshold = max(float(self.mindist) * 0.5, 1e-12)
+        coordinate_scale = max(float(np.max(np.abs(vertices))) if vertices.size else 0.0, 1.0)
+        threshold = max(np.finfo(float).eps * coordinate_scale * 128.0, coordinate_scale * 1e-12)
         if candidates.size > 1:
             self._merge_by_coordinate_hash(parent, vertices, candidates, threshold)
 
@@ -117,11 +118,8 @@ class Mesh:
             return self._boundary_mask_cache.copy()
 
         mask = np.zeros(original_vertex_count, dtype=bool)
-        if self.edge is not None and self.edge.size:
-            mask[np.unique(np.asarray(self.edge, dtype=np.intp).reshape(-1))] = True
-            self._boundary_mask_cache = mask.copy()
-            return mask
-
+        # COMSOL's edg block also contains material interfaces.  Triangle edges
+        # used only once are the actual exterior boundary of the integration mesh.
         elems = np.asarray(self.elements, dtype=np.intp)
         edges = np.vstack((elems[:, [0, 1]], elems[:, [1, 2]], elems[:, [2, 0]]))
         edges.sort(axis=1)
@@ -206,6 +204,7 @@ class Mesh:
 class RawData:
     point_matrix: np.ndarray
     value_matrix: np.ndarray
+    column_parameters: dict[str, np.ndarray] | None = None
 
 
 @dataclass

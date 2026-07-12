@@ -144,8 +144,10 @@ class Gradient:
 
     def set_center(self, center):
         self.generateRn()
+        avec = np.asarray(self.config.real_lattice_vectors, dtype=float)
+        center_cart = np.asarray(center, dtype=float)[: self.config.kdim] @ avec
         for i, j, k in self.state.k_indices():
-            rmat = (self.rn.T - center) @ np.asarray(self.config.real_lattice_vectors) * float(self.config.lattice_const)
+            rmat = (self.rn.T - center_cart) * float(self.config.lattice_const)
             kxyz = get_kxyz(self.config, [i, j, k])
             sign = -1 if self.config.dataset_type.lower() == "comsol" else 1
             phase = np.diag(np.exp(-1j * sign * np.dot(kxyz[: self.config.kdim], rmat.T)))

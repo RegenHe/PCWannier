@@ -160,17 +160,23 @@ class TBAModel:
         dim = avec.shape[1]
         delta_r = (neigh[:, :dim] @ avec) * float(config.lattice_const) if neigh.size else np.zeros((0, dim))
         nyq_mask = np.array([self.is_nyquist(r, self.state.k_shape) for r in neigh], dtype=bool) if neigh.size else np.array([], dtype=bool)
+        sign = -1 if config.dataset_type.lower() == "comsol" else 1
+        h0_hermitian = 0.5 * (h0 + h0.conj().T)
 
         def h_of_k(k_cart: np.ndarray) -> np.ndarray:
             if neigh.size == 0:
-                return np.broadcast_to(h0, (k_cart.shape[0], band_count, band_count)).copy()
-            phase = np.exp(1j * (k_cart @ delta_r.T))
+                return np.broadcast_to(h0_hermitian, (k_cart.shape[0], band_count, band_count)).copy()
+            phase = np.exp(1j * sign * (k_cart @ delta_r.T))
             if np.any(~nyq_mask):
                 hi = np.einsum("mn,nab->mab", phase[:, ~nyq_mask], hops[~nyq_mask])
             else:
                 hi = np.zeros((k_cart.shape[0], band_count, band_count), dtype=np.complex128)
-            hq = np.einsum("mn,nab->mab", phase[:, nyq_mask], hops[nyq_mask]) if np.any(nyq_mask) else 0.0
-            return h0 + hi + np.conjugate(np.swapaxes(hi, -2, -1)) + hq
+            if np.any(nyq_mask):
+                nyquist = np.einsum("mn,nab->mab", phase[:, nyq_mask], hops[nyq_mask])
+                hq = 0.5 * (nyquist + np.conjugate(np.swapaxes(nyquist, -2, -1)))
+            else:
+                hq = 0.0
+            return h0_hermitian + hi + np.conjugate(np.swapaxes(hi, -2, -1)) + hq
 
         return h_of_k
 
@@ -191,22 +197,19 @@ class TBAModel:
 
     @staticmethod
     def R_half_rect(kshape) -> np.ndarray:
-        ranges = []
-        for n_axis in kshape:
-            half = int(n_axis) // 2
-            lo = -half + (1 if int(n_axis) % 2 == 0 else 0)
-            ranges.append(range(lo, half + 1))
+        shape = tuple(int(n_axis) for n_axis in kshape)
         out = []
-        for coords in product(*ranges):
-            if all(c == 0 for c in coords):
+        for residues in product(*(range(n_axis) for n_axis in shape)):
+            if all(value == 0 for value in residues):
                 continue
-            keep = False
-            for coord in coords:
-                if coord != 0:
-                    keep = coord > 0
-                    break
-            if keep:
-                out.append((coords + (0, 0, 0))[:3])
+            negative = tuple((-value) % n_axis for value, n_axis in zip(residues, shape))
+            if residues != negative and residues > negative:
+                continue
+            signed = tuple(
+                value if value <= n_axis // 2 else value - n_axis
+                for value, n_axis in zip(residues, shape)
+            )
+            out.append((signed + (0, 0, 0))[:3])
         return np.asarray(out, dtype=int)
 
     @staticmethod

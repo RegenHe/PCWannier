@@ -9,6 +9,7 @@ import pytest
 
 from pcwannier import load_config, write_outputs
 from pcwannier.compute import run_calculation
+from pcwannier.matrix_io import load_cell_matrix
 from pcwannier.sources.comsol import load_input
 
 
@@ -32,7 +33,9 @@ def test_v0_consistency_smoke_comparison(tmp_path):
     text = incar.read_text(encoding="utf-8")
     replacements = {
         "max_iter = 1000": "max_iter = 0",
+        "max_iter = 2000": "max_iter = 0",
         "wannier_figures = ./wanniers/": "wannier_figures = false",
+        "wannier_figures = ./wanniers": "wannier_figures = false",
         "band_figure = ./band.png": "band_figure = false",
         "hybrid_Wilson_loop = true": "hybrid_Wilson_loop = false",
         "Chern_number = true": "Chern_number = false",
@@ -57,18 +60,18 @@ def test_v0_consistency_smoke_comparison(tmp_path):
     out = work / "new"
     write_outputs(result, cfg, out)
 
-    old_band = _load_band(work / "band.txt")
-    new_band = _load_band(out / "band.txt")
-    assert np.allclose(new_band, old_band, rtol=2e-6, atol=2e-6)
-
-    old_h0 = _load_dict_cell(work / "hopping.txt", (0, 0, 0))
-    new_h0 = _load_dict_cell(out / "hopping.txt", (0, 0, 0))
-    assert np.allclose(new_h0, old_h0, rtol=2e-6, atol=2e-6)
+    old_m0 = _dense_cells(load_cell_matrix(work / "M0.txt"))
+    new_m0 = _dense_cells(load_cell_matrix(out / "M0.txt"))
+    assert np.allclose(new_m0, old_m0, rtol=2e-6, atol=2e-6)
 
 
 def _parse_complex_token(token: str) -> complex:
     token = token.strip().replace(" ", "").replace("−", "-")
     return complex(token)
+
+
+def _dense_cells(values: np.ndarray) -> np.ndarray:
+    return np.stack(list(values.flat)).reshape(values.shape + values.flat[0].shape)
 
 
 def _load_band(path: Path) -> np.ndarray:

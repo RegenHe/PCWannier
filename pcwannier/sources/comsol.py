@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import logging
+import re
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -82,6 +83,7 @@ def _read_element_block(lines: list[str], name: str, width: int, *, required: bo
 
 def load_comsol_data(filename: str | Path, *, real_only: bool = False) -> RawData:
     path = Path(filename)
+    column_parameters = _read_column_parameters(path)
     with timed_step("read COMSOL data", LOGGER, file=path):
         if real_only:
             try:
@@ -97,11 +99,42 @@ def load_comsol_data(filename: str | Path, *, real_only: bool = False) -> RawDat
                 values.shape[1],
                 parser,
             )
-            return RawData(points, values)
+            return RawData(points, values, column_parameters)
 
         points, values = _load_token_table(path, real_values=False)
     LOGGER.info("COMSOL data loaded: file=%s points=%s value_cols=%s real_only=False", path, points.shape[0], values.shape[1])
-    return RawData(points, values)
+    return RawData(points, values, column_parameters)
+
+
+_PARAMETER_RE = re.compile(
+    r"([A-Za-z_]\w*)\s*=\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?)"
+)
+
+
+def _read_column_parameters(path: Path) -> dict[str, np.ndarray] | None:
+    header = None
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            if not raw.startswith("%"):
+                break
+            if "@" in raw and (header is None or raw.count("@") > header.count("@")):
+                header = raw
+    if header is None:
+        return None
+
+    rows = []
+    for segment in header.split("@")[1:]:
+        matches = _PARAMETER_RE.findall(segment)
+        if matches:
+            rows.append({name: float(value) for name, value in matches})
+    if not rows:
+        return None
+
+    names = set(rows[0])
+    if any(set(row) != names for row in rows):
+        LOGGER.warning("COMSOL column parameter header is inconsistent in %s; metadata validation skipped", path)
+        return None
+    return {name: np.asarray([row[name] for row in rows], dtype=float) for name in sorted(names)}
 
 
 def _load_real_table(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -214,11 +247,27 @@ def load_input(config: IncarConfig) -> InputBundle:
     raw_data = load_comsol_data(dataset_path)
     epsilon_raw = load_comsol_data(dielectric_path, real_only=True)
     energy_raw = load_comsol_data(energy_path, real_only=config.E_is_real or config.hermitian)
+    _validate_header_k_grid(config, raw_data, dataset_path)
+    _validate_header_k_grid(config, energy_raw, energy_path)
 
     with timed_step("prepare COMSOL tensors", LOGGER):
         energy_matrix, energies, band_indices, inner_band_indices = _handle_energy_data(config, energy_raw)
         fields = _distribute_fields(config, _values_on_mesh(mesh, raw_data), band_indices)
         epsilon = _values_on_mesh(mesh, epsilon_raw).reshape(-1)
+
+    periodic_residuals = _periodic_boundary_residuals(config, mesh, fields)
+    for axis, residuals in enumerate(periodic_residuals):
+        if residuals.size == 0:
+            continue
+        level = logging.WARNING if float(np.max(residuals)) > 5e-2 else logging.INFO
+        LOGGER.log(
+            level,
+            "COMSOL periodic boundary residual: axis=%s median=%.6g max=%.6g samples=%s",
+            axis + 1,
+            float(np.median(residuals)),
+            float(np.max(residuals)),
+            residuals.size,
+        )
 
     band_lengths = [len(band_indices[idx]) for idx in np.ndindex(band_indices.shape)]
     LOGGER.info(
@@ -243,6 +292,24 @@ def load_input(config: IncarConfig) -> InputBundle:
     )
 
 
+def _validate_header_k_grid(config: IncarConfig, data: RawData, path: Path) -> None:
+    parameters = data.column_parameters
+    if not parameters:
+        return
+    for axis in range(int(config.kdim)):
+        name = f"k{axis + 1}"
+        if name not in parameters:
+            continue
+        header_values = np.unique(parameters[name])
+        expected_count = len(config.k_points[axis])
+        if header_values.size != expected_count:
+            raise ValueError(
+                f"COMSOL k-grid mismatch in {path}: header {name} has {header_values.size} values "
+                f"({header_values[0]:.10g} to {header_values[-1]:.10g}), but incar k_points[{axis}] "
+                f"has {expected_count}. Check k_points and dataset_order before calculating Wannier functions."
+            )
+
+
 def _required_input_paths(config: IncarConfig) -> tuple[Path, Path, Path, Path]:
     paths = (
         config.input_path(config.mesh_file),
@@ -256,13 +323,35 @@ def _required_input_paths(config: IncarConfig) -> tuple[Path, Path, Path, Path]:
 
 
 def _values_on_mesh(mesh: Mesh, data: RawData) -> np.ndarray:
-    idxs, dists = match_data_to_mesh(mesh, data)
-    missing = np.where(idxs < 0)[0]
+    tree = cKDTree(mesh.vertices)
+    dists, mesh_idxs = tree.query(data.point_matrix, k=1)
+    threshold = max(float(mesh.mindist) * 0.5, 1e-8)
+    far = np.where(dists > threshold)[0]
+    if far.size:
+        raise ValueError(
+            f"{far.size} COMSOL data points are farther than the mesh matching tolerance "
+            f"(max distance={float(np.max(dists[far])):.6g}, tolerance={threshold:.6g})."
+        )
+
+    counts = np.bincount(mesh_idxs, minlength=mesh.vertices.shape[0])
+    missing = np.where(counts == 0)[0]
     if missing.size:
-        finite = dists[np.isfinite(dists)]
-        max_dist = float(np.max(finite)) if finite.size else float("nan")
-        raise ValueError(f"{missing.size} mesh vertices could not be matched to COMSOL data (max matched distance={max_dist:.6g}).")
-    return data.value_matrix[idxs]
+        raise ValueError(f"{missing.size} mesh vertices could not be matched to COMSOL data.")
+
+    values = np.asarray(data.value_matrix)
+    aggregated = np.zeros((mesh.vertices.shape[0], values.shape[1]), dtype=values.dtype)
+    np.add.at(aggregated, mesh_idxs, values)
+    aggregated /= counts[:, None]
+
+    duplicate_vertices = int(np.count_nonzero(counts > 1))
+    LOGGER.info(
+        "COMSOL mesh mapping: data_points=%s mesh_vertices=%s duplicates=%s max_distance=%.6g",
+        data.point_matrix.shape[0],
+        mesh.vertices.shape[0],
+        duplicate_vertices,
+        float(np.max(dists)) if dists.size else 0.0,
+    )
+    return aggregated
 
 
 def _k_shape(config: IncarConfig) -> tuple[int, int, int]:
@@ -272,6 +361,76 @@ def _k_shape(config: IncarConfig) -> tuple[int, int, int]:
         len(config.k_points[1]) if kdim >= 2 else 1,
         len(config.k_points[2]) if kdim >= 3 else 1,
     )
+
+
+def _periodic_boundary_residuals(config: IncarConfig, mesh: Mesh, fields: np.ndarray) -> list[np.ndarray]:
+    """Estimate Bloch-boundary continuity on non-conforming 2D edge meshes."""
+    if int(config.kdim or 0) != 2:
+        return []
+
+    avec = np.asarray(config.real_lattice_vectors, dtype=float) * float(config.lattice_const)
+    if avec.shape != (2, 2):
+        return []
+    fractional = mesh.vertices @ np.linalg.inv(avec)
+    sign = -1 if config.dataset_type.lower() == "comsol" else 1
+    reciprocal = np.asarray(config.reciprocal_lattice_vectors, dtype=float)
+    output: list[np.ndarray] = []
+
+    for axis in range(2):
+        coordinate = fractional[:, axis]
+        low_value = float(np.min(coordinate))
+        high_value = float(np.max(coordinate))
+        tolerance = max(np.finfo(float).eps * max(abs(low_value), abs(high_value), 1.0) * 128.0, 1e-10)
+        low_idx = np.flatnonzero(np.abs(coordinate - low_value) <= tolerance)
+        high_idx = np.flatnonzero(np.abs(coordinate - high_value) <= tolerance)
+        if low_idx.size < 2 or high_idx.size < 2:
+            output.append(np.empty(0, dtype=float))
+            continue
+
+        tangent_axis = 1 - axis
+        low_param, low_idx = _sorted_unique_boundary(fractional[low_idx, tangent_axis], low_idx)
+        high_param, high_idx = _sorted_unique_boundary(fractional[high_idx, tangent_axis], high_idx)
+        start = max(float(low_param[0]), float(high_param[0]))
+        stop = min(float(low_param[-1]), float(high_param[-1]))
+        sample = np.unique(
+            np.concatenate((low_param[(low_param >= start) & (low_param <= stop)], high_param[(high_param >= start) & (high_param <= stop)]))
+        )
+        if sample.size < 2:
+            output.append(np.empty(0, dtype=float))
+            continue
+
+        residuals = []
+        for i, j, k in np.ndindex(fields.shape):
+            block = np.asarray(fields[i, j, k], dtype=np.complex128)
+            low = _interpolate_boundary(block[:, low_idx], low_param, sample)
+            high = _interpolate_boundary(block[:, high_idx], high_param, sample)
+            k_values = [config.k_points[0][i], config.k_points[1][j]]
+            k_cart = (2.0 * np.pi / float(config.lattice_const)) * (
+                k_values[0] * reciprocal[0] + k_values[1] * reciprocal[1]
+            )
+            phase = np.exp(1j * sign * np.dot(k_cart, avec[axis]))
+            scale = max(float(np.linalg.norm(low)), float(np.linalg.norm(high)), np.finfo(float).tiny)
+            residuals.append(float(np.linalg.norm(high - low * phase) / scale))
+        output.append(np.asarray(residuals, dtype=float))
+    return output
+
+
+def _sorted_unique_boundary(parameters: np.ndarray, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    order = np.argsort(parameters, kind="stable")
+    sorted_parameters = np.asarray(parameters[order], dtype=float)
+    sorted_indices = np.asarray(indices[order], dtype=np.intp)
+    keep = np.ones(sorted_parameters.size, dtype=bool)
+    keep[1:] = np.diff(sorted_parameters) > 1e-12
+    return sorted_parameters[keep], sorted_indices[keep]
+
+
+def _interpolate_boundary(values: np.ndarray, parameters: np.ndarray, sample: np.ndarray) -> np.ndarray:
+    out = np.empty((values.shape[0], sample.size), dtype=np.complex128)
+    for row in range(values.shape[0]):
+        out[row] = np.interp(sample, parameters, values[row].real) + 1j * np.interp(
+            sample, parameters, values[row].imag
+        )
+    return out
 
 
 def _handle_energy_data(config: IncarConfig, energy_raw: RawData):

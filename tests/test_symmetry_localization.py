@@ -7,10 +7,13 @@ from pcwannier.symmetry import (
     build_symmetry_context,
     build_symmetry_stars,
     combined_target_matrix,
+    compose_symmetry_model,
     load_symmetry,
     project_target_gauge_to_stars,
     propagate_target_gauge,
     symmetrize_gradient,
+    SymmetryCalculationSpec,
+    WannierTargetSpec,
 )
 
 
@@ -49,7 +52,15 @@ wannier_targets:
 
 
 def test_symmetric_target_gauge_is_unchanged_and_random_noise_is_projected_out():
-    model = load_symmetry("symmetries/c4v.yaml")
+    model = compose_symmetry_model(
+        load_symmetry("pcwannier/symmetries/c4v.yaml"),
+        SymmetryCalculationSpec(
+            (
+                WannierTargetSpec("center_s_A1", [0.0, 0.0], "A1"),
+                WannierTargetSpec("center_p_E", [0.0, 0.0], "E"),
+            )
+        ),
+    )
     axis = np.arange(-0.5, 0.5, 0.1)
     context = build_symmetry_context(model, [axis, axis])
     stars = build_symmetry_stars(context)

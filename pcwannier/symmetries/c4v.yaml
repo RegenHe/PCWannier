@@ -1,0 +1,65 @@
+name: C4v
+dimension: 2
+tolerance: 1.0e-8
+
+operations:
+  - name: E
+    rotation: [[1, 0], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: C4
+    rotation: [[0, -1], [1, 0]]
+    translation: [0.0, 0.0]
+  - name: C2
+    rotation: [[-1, 0], [0, -1]]
+    translation: [0.0, 0.0]
+  - name: C4_inv
+    rotation: [[0, 1], [-1, 0]]
+    translation: [0.0, 0.0]
+  - name: sigma_x
+    rotation: [[-1, 0], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: sigma_y
+    rotation: [[1, 0], [0, -1]]
+    translation: [0.0, 0.0]
+  - name: sigma_d
+    rotation: [[0, 1], [1, 0]]
+    translation: [0.0, 0.0]
+  - name: sigma_d2
+    rotation: [[0, -1], [-1, 0]]
+    translation: [0.0, 0.0]
+
+irreps:
+  A1:
+    dimension: 1
+    characters: {E: 1, C4: 1, C2: 1, C4_inv: 1, sigma_x: 1, sigma_y: 1, sigma_d: 1, sigma_d2: 1}
+  A2:
+    dimension: 1
+    characters: {E: 1, C4: 1, C2: 1, C4_inv: 1, sigma_x: -1, sigma_y: -1, sigma_d: -1, sigma_d2: -1}
+  B1:
+    dimension: 1
+    characters: {E: 1, C4: -1, C2: 1, C4_inv: -1, sigma_x: 1, sigma_y: 1, sigma_d: -1, sigma_d2: -1}
+  B2:
+    dimension: 1
+    characters: {E: 1, C4: -1, C2: 1, C4_inv: -1, sigma_x: -1, sigma_y: -1, sigma_d: 1, sigma_d2: 1}
+  E:
+    dimension: 2
+    generators:
+      C4: [[0.0, -1.0], [1.0, 0.0]]
+      sigma_x: [[-1.0, 0.0], [0.0, 1.0]]
+
+subgroups:
+  C2v_axes:
+    operations: [E, C2, sigma_x, sigma_y]
+    irreps:
+      A1:
+        dimension: 1
+        characters: {E: 1, C2: 1, sigma_x: 1, sigma_y: 1}
+      A2:
+        dimension: 1
+        characters: {E: 1, C2: 1, sigma_x: -1, sigma_y: -1}
+      B1:
+        dimension: 1
+        characters: {E: 1, C2: -1, sigma_x: 1, sigma_y: -1}
+      B2:
+        dimension: 1
+        characters: {E: 1, C2: -1, sigma_x: -1, sigma_y: 1}

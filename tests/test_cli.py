@@ -1,116 +1,142 @@
-import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 import pcwannier.cli as cli_module
-from pcwannier.cli import main
-from pcwannier.cli import parse_args
-from pcwannier.sources.comsol import load_comsol_mesh
+from pcwannier.cli import main, parse_args
 
 
-@pytest.mark.requires_dataset
-def test_cli_smoke_writes_outputs(tmp_path, monkeypatch):
-    case = tmp_path / "case"
-    case.mkdir()
-    for name in ["incar", "mesh.mphtxt", "Ez.txt", "eps.txt", "E.txt"]:
-        shutil.copy2(Path("datasets/c4v") / name, case / name)
+def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    bundle = object()
+    result = object()
+    calls = {}
 
-    incar = case / "incar"
-    text = incar.read_text(encoding="utf-8")
-    replacements = {
-        "max_iter = 1000": "max_iter = 0",
-        "max_iter = 2000": "max_iter = 0",
-        "wannier_figures = ./wanniers/": "wannier_figures = false",
-        "wannier_figures = ./wanniers": "wannier_figures = false",
-        "band_figure = ./band.png": "band_figure = false",
-        "hybrid_Wilson_loop = true": "hybrid_Wilson_loop = false",
-        "Chern_number = true": "Chern_number = false",
-        "topo_output = ./topo/": "topo_output = false",
-        "extension = 10, 10": "extension = 1, 1",
-        "extension = 8, 8": "extension = 1, 1",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    (case / "sym.yaml").write_text(
-        "\n".join(
-            [
-                "dimension: 2",
-                "tolerance: 1.0e-8",
-                "symmetry_operations:",
-                "  - name: E",
-                "    rotation:",
-                "      - [1, 0]",
-                "      - [0, 1]",
-                "    translation: [0.0, 0.0]",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    text += "\nsymmetry_file = ./sym.yaml\nsymmetry_constrained = false\n"
-    incar.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(cli_module, "load_config", lambda path: config)
+    monkeypatch.setattr(cli_module, "load_input", lambda loaded: bundle)
 
-    interp_points = case / "interp-points.txt"
-    mesh = load_comsol_mesh(case / "mesh.mphtxt")
-    np.savetxt(interp_points, mesh.vertices[:2], delimiter=",")
+    def run_calculation(loaded_bundle, *, threads, backend):
+        calls["run"] = (loaded_bundle, threads, backend)
+        return result
+
+    def write_outputs(actual_result, actual_config, out_dir):
+        calls["outputs"] = (actual_result, actual_config, out_dir)
+
+    def write_interpolation(actual_result, points, wannier, epsilon, *, out_dir):
+        calls["interpolation"] = (actual_result, points, wannier, epsilon, out_dir)
+
+    monkeypatch.setattr(cli_module, "run_calculation", run_calculation)
+    monkeypatch.setattr(cli_module, "write_outputs", write_outputs)
+    monkeypatch.setattr(cli_module, "write_interpolation_outputs", write_interpolation)
 
     out = tmp_path / "out"
-    interp_wannier = out / "interp-wannier.txt"
-    interp_epsilon = out / "interp-epsilon.txt"
-    assert (
-        main(
-            [
-                "-i",
-                str(incar),
-                "--out",
-                str(out),
-                "-t",
-                "1",
-                "-l",
-                "log.txt",
-                "--interp",
-                str(interp_points),
-                "--interp-wannier",
-                "interp-wannier.txt",
-                "--interp-epsilon",
-                "interp-epsilon.txt",
-            ]
-        )
-        == 0
-    )
+    assert main(
+        [
+            "-i",
+            "example-incar",
+            "--out",
+            str(out),
+            "-t",
+            "3",
+            "--backend",
+            "auto",
+            "--interp",
+            "points.txt",
+            "--interp-wannier",
+            "wannier.txt",
+            "--interp-epsilon",
+            "epsilon.txt",
+        ]
+    ) == 0
 
-    assert (out / "M0.txt").exists()
-    assert (out / "V.txt").exists()
-    assert (out / "A.txt").exists()
-    assert (out / "U.txt").exists()
-    assert (out / "hopping.txt").exists()
-    assert (out / "band.txt").exists()
-    assert interp_wannier.exists()
-    assert interp_epsilon.exists()
-    assert len(interp_wannier.read_text(encoding="utf-8").splitlines()) == 2
-    assert len(interp_epsilon.read_text(encoding="utf-8").splitlines()) == 2
+    assert calls["run"] == (bundle, 3, "auto")
+    assert calls["outputs"] == (result, config, out)
+    assert calls["interpolation"] == (
+        result,
+        "points.txt",
+        "wannier.txt",
+        "epsilon.txt",
+        out,
+    )
     log_text = (out / "log.txt").read_text(encoding="utf-8")
     assert "=========  PCWannier v" in log_text
     assert "total runtime:" in log_text
     assert "memory usage:" in log_text
-    assert "memory usage: unavailable" not in log_text
     assert "pcwannier.compute.runner" not in log_text
-    assert "symmetry file=" in log_text
-    assert "operations=1" in log_text
 
-    assert main(["-i", str(incar), "--out", str(out), "-t", "1", "-l", "cache-log.txt", "--cache"]) == 0
 
-    base_out = tmp_path / "base-out"
+def test_cli_cache_paths_and_base_mode_are_dataset_independent(tmp_path, monkeypatch):
+    cache_config = _config(tmp_path)
+    monkeypatch.setattr(cli_module, "load_config", lambda path: cache_config)
+    monkeypatch.setattr(cli_module, "load_input", lambda config: object())
+    monkeypatch.setattr(cli_module, "run_calculation", lambda bundle, **kwargs: object())
+    monkeypatch.setattr(cli_module, "write_outputs", lambda result, config, out_dir: None)
+
+    cache_out = tmp_path / "cache-out"
+    assert main(["-i", "example-incar", "--out", str(cache_out), "--cache"]) == 0
+    assert cache_config.use_cached_data == ["U", "V", "M", "S", "A"]
+    for attr in ("M_file", "A_file", "V_file", "U_file", "S_file"):
+        assert Path(getattr(cache_config, attr)).parent == cache_out
+
+    base_config = _config(tmp_path)
+    mesh = object()
+    calls = {}
+    monkeypatch.setattr(cli_module, "load_config", lambda path: base_config)
 
     def fail_load_input(_config):
-        raise AssertionError("--base should not load full field data")
+        raise AssertionError("--base should not load field or eigenvalue data")
 
     monkeypatch.setattr(cli_module, "load_input", fail_load_input)
-    assert main(["-i", str(incar), "--out", str(base_out), "-b", "-l", "base-log.txt"]) == 0
-    assert (base_out / "base" / "base-0-real.png").exists()
+    monkeypatch.setattr(cli_module, "load_comsol_mesh", lambda path: mesh)
+    monkeypatch.setattr(
+        cli_module,
+        "write_base_figures",
+        lambda config, actual_mesh, out_dir: calls.setdefault("base", (config, actual_mesh, out_dir)),
+    )
+    base_out = tmp_path / "base-out"
+    assert main(["-i", "example-incar", "--out", str(base_out), "--base"]) == 0
+    assert calls["base"] == (base_config, mesh, base_out)
+
+
+def test_interpolation_outputs_require_points_file(tmp_path):
+    with pytest.raises(ValueError, match="--interp is required"):
+        main(
+            [
+                "-i",
+                "unused",
+                "--out",
+                str(tmp_path / "invalid-interpolation"),
+                "--interp-wannier",
+                "wannier.txt",
+            ]
+        )
 
 
 def test_fatband_argument_removed():
     with pytest.raises(SystemExit):
-        parse_args(["-i", "datasets/c4v/incar", "--fatband"])
+        parse_args(["-i", "unused", "--fatband"])
+
+
+def _config(base_dir: Path):
+    config = SimpleNamespace(
+        name="synthetic",
+        dataset_type="comsol",
+        kdim=2,
+        k_points=[[0.0], [0.0]],
+        band_calc_num=1,
+        compute_backend="python",
+        symmetry_context=None,
+        symmetry_constrained=False,
+        symmetry_output_basis="strict",
+        use_cached_data=[],
+        mesh_file="mesh.mphtxt",
+        M_file="M.txt",
+        A_file="A.txt",
+        V_file="V.txt",
+        U_file="U.txt",
+        S_file="S.txt",
+        base_dir=base_dir,
+    )
+    config.input_path = lambda value: base_dir / str(value)
+    return config

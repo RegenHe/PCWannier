@@ -26,3 +26,6 @@ pcwannier = "pcwannier.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pcwannier*"]
+
+[tool.setuptools.package-data]
+"pcwannier.symmetries" = ["*.yaml"]

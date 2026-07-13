@@ -83,12 +83,19 @@ def main(argv=None) -> int:
             f"{target.name}:{target.wannier_dimension}" for target in symmetry_model.targets
         ) or "none"
         LOGGER.info(
-            "symmetry file=%s operations=%s targets=%s target_dimensions=%s constrained_localization=%s",
-            config.input_path(config.symmetry_file),
+            "symmetry file=%s group=%s operations=%s targets=%s target_dimensions=%s "
+            "constrained_localization=%s output_basis=%s",
+            config.symmetry_resolved_path or config.input_path(config.symmetry_file),
+            (
+                symmetry_model.group_definition.name
+                if symmetry_model.group_definition is not None
+                else "legacy"
+            ),
             len(symmetry_model.group.operations),
             len(symmetry_model.targets),
             target_summary,
             config.symmetry_constrained,
+            config.symmetry_output_basis,
         )
 
     if args.base:

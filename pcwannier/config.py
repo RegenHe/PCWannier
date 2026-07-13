@@ -37,6 +37,19 @@ class IncarConfig:
     integration_mode: str = "nodal"
     symmetry_file: str | bool = False
     symmetry_constrained: bool = False
+    symmetry_output_basis: str = "strict"
+    symmetry_tolerance: float = 1.0e-8
+    symmetry_max_iter: int = 20
+    symmetry_svd_tolerance: float = 1.0e-10
+    symmetry_validate_wannier: bool = True
+    symmetry_real_space_tolerance: float = 1.0e-6
+    symmetry_minimum_retained_norm: float = 0.99
+    representation_field_kind: str = "scalar"
+    representation_degeneracy_absolute: float = 1.0e-6
+    representation_degeneracy_relative: float = 1.0e-8
+    wannier_targets: list[dict[str, Any]] | None = None
+    representation_analysis: list[dict[str, Any]] | None = None
+    symmetry_resolved_path: Path | None = field(default=None, init=False)
     disentangle_max_iter: int | None = None
     disentangle_err_diff: float | None = None
     disentangle_mixing: float = 0.5
@@ -199,8 +212,12 @@ class IncarParser:
         cfg = IncarConfig(base_dir=self.filename.resolve().parent)
         inside_projections = False
         inside_k_path = False
+        inside_wannier_targets = False
+        inside_representation_analysis = False
         projections_data: list[str] = []
         k_path_data: list[str] = []
+        wannier_targets_data: list[str] = []
+        representation_analysis_data: list[str] = []
 
         with self.filename.open("r", encoding="utf-8") as handle:
             for raw in handle:
@@ -232,6 +249,32 @@ class IncarParser:
                         k_path_data.append(line)
                     continue
 
+                if line == "wannier_targets":
+                    inside_wannier_targets = True
+                    continue
+                if inside_wannier_targets:
+                    if line == "end":
+                        inside_wannier_targets = False
+                        cfg.wannier_targets = self._parse_wannier_targets(wannier_targets_data)
+                        wannier_targets_data.clear()
+                    else:
+                        wannier_targets_data.append(line)
+                    continue
+
+                if line == "representation_analysis":
+                    inside_representation_analysis = True
+                    continue
+                if inside_representation_analysis:
+                    if line == "end":
+                        inside_representation_analysis = False
+                        cfg.representation_analysis = self._parse_representation_analysis(
+                            representation_analysis_data
+                        )
+                        representation_analysis_data.clear()
+                    else:
+                        representation_analysis_data.append(line)
+                    continue
+
                 if "=" not in line:
                     continue
                 key, value = line.split("=", 1)
@@ -245,16 +288,84 @@ class IncarParser:
                     raise ValueError("The boolean symmetry input has been removed; use symmetry_file = ./sym.yaml.")
                 setattr(cfg, key, self.parse_value(key, value))
 
+        unterminated = [
+            name
+            for name, active in (
+                ("projections", inside_projections),
+                ("k_path", inside_k_path),
+                ("wannier_targets", inside_wannier_targets),
+                ("representation_analysis", inside_representation_analysis),
+            )
+            if active
+        ]
+        if unterminated:
+            raise ValueError(f"Unterminated incar block(s): {', '.join(unterminated)}.")
+
         preprocess_config(cfg)
         cfg.validate_required()
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
-            from .symmetry import FieldKind, build_symmetry_context, cartesian_field_matrix, load_symmetry
+            from .symmetry import (
+                DegeneracyTolerance,
+                FieldKind,
+                RepresentationAnalysisSpec,
+                RepresentationPointSpec,
+                SymmetryCalculationSpec,
+                SymmetryGaugeSpec,
+                WannierTargetSpec,
+                build_symmetry_context,
+                cartesian_field_matrix,
+                compose_symmetry_model,
+                load_symmetry,
+                resolve_symmetry_file,
+            )
 
-            symmetry_path = cfg.input_path(cfg.symmetry_file)
-            if symmetry_path is None:
+            requested_symmetry_path = cfg.input_path(cfg.symmetry_file)
+            if requested_symmetry_path is None:
                 raise ValueError("symmetry_file is enabled but no path was supplied.")
+            symmetry_path = resolve_symmetry_file(str(cfg.symmetry_file), cfg.base_dir)
+            cfg.symmetry_resolved_path = symmetry_path
             model = load_symmetry(symmetry_path)
+            target_specs = None
+            if cfg.wannier_targets is not None:
+                target_specs = tuple(
+                    WannierTargetSpec(item["name"], item["center"], item["site_irrep"])
+                    for item in cfg.wannier_targets
+                )
+            analysis = None
+            if cfg.representation_analysis is not None:
+                degeneracy = DegeneracyTolerance(
+                    cfg.representation_degeneracy_absolute,
+                    cfg.representation_degeneracy_relative,
+                )
+                points = tuple(
+                    RepresentationPointSpec(
+                        item["name"],
+                        item["k"],
+                        item["bands"],
+                        item["targets"],
+                        degeneracy,
+                    )
+                    for item in cfg.representation_analysis
+                )
+                analysis = RepresentationAnalysisSpec(
+                    FieldKind(cfg.representation_field_kind), degeneracy, points
+                )
+            gauge = None
+            if cfg.symmetry_constrained:
+                gauge = SymmetryGaugeSpec(
+                    enabled=True,
+                    tolerance=cfg.symmetry_tolerance,
+                    max_iterations=cfg.symmetry_max_iter,
+                    svd_relative_tolerance=cfg.symmetry_svd_tolerance,
+                    validate_wannier=cfg.symmetry_validate_wannier,
+                    real_space_tolerance=cfg.symmetry_real_space_tolerance,
+                    minimum_retained_norm=cfg.symmetry_minimum_retained_norm,
+                )
+            model = compose_symmetry_model(
+                model,
+                SymmetryCalculationSpec(target_specs, analysis, gauge),
+            )
             if model.dimension != cfg.kdim:
                 raise ValueError(
                     f"Symmetry dimension {model.dimension} does not match incar kdim={cfg.kdim}."
@@ -273,13 +384,17 @@ class IncarParser:
                     f"define band_calc_num={cfg.band_calc_num}."
                 )
             cfg.symmetry_context = build_symmetry_context(model, cfg.k_points)
+        elif cfg.wannier_targets is not None or cfg.representation_analysis is not None:
+            raise ValueError(
+                "Symmetry calculation blocks require symmetry_file; symmetry_constrained=true also requires symmetry_file."
+            )
         if cfg.symmetry_constrained:
             if cfg.symmetry_context is None:
                 raise ValueError("symmetry_constrained=true requires symmetry_file = ./sym.yaml.")
             gauge = cfg.symmetry_context.model.symmetry_gauge
             if gauge is None or not gauge.enabled:
                 raise ValueError(
-                    "symmetry_constrained=true requires symmetry_gauge.enabled=true in the sym file."
+                    "symmetry_constrained=true requires a valid symmetry gauge configuration."
                 )
             if not cfg.symmetry_context.model.targets:
                 raise ValueError("symmetry_constrained=true requires at least one Wannier target.")
@@ -292,7 +407,9 @@ class IncarParser:
             "dataset_type",
             "compute_backend",
             "integration_mode",
+            "representation_field_kind",
             "symmetry_file",
+            "symmetry_output_basis",
             "dataset_file",
             "left_dataset_file",
             "dielectric_file",
@@ -321,9 +438,30 @@ class IncarParser:
         }
         if key in string_keys:
             return value
-        if key in {"epsilon", "err_diff", "disentangle_err_diff", "disentangle_mixing", "DOS_eps", "finite_DOS_eps"}:
+        if key in {
+            "epsilon",
+            "err_diff",
+            "disentangle_err_diff",
+            "disentangle_mixing",
+            "DOS_eps",
+            "finite_DOS_eps",
+            "symmetry_tolerance",
+            "symmetry_svd_tolerance",
+            "symmetry_real_space_tolerance",
+            "symmetry_minimum_retained_norm",
+            "representation_degeneracy_absolute",
+            "representation_degeneracy_relative",
+        }:
             return float(evaluate_math_expression(value))
-        if key in {"max_iter", "disentangle_max_iter", "DOS", "DOS_num", "eff_order", "finite_layer_num"}:
+        if key in {
+            "max_iter",
+            "disentangle_max_iter",
+            "symmetry_max_iter",
+            "DOS",
+            "DOS_num",
+            "eff_order",
+            "finite_layer_num",
+        }:
             return int(evaluate_math_expression(value))
         if key == "finite_DOS_num":
             return False if value.lower() == "false" else int(evaluate_math_expression(value))
@@ -385,6 +523,7 @@ class IncarParser:
             "v_proj",
             "E_is_real",
             "symmetry_constrained",
+            "symmetry_validate_wannier",
         }:
             return value.lower() == "true"
         if key == "neighbor":
@@ -509,6 +648,75 @@ class IncarParser:
             )
         return path
 
+    def _parse_wannier_targets(self, lines: list[str]) -> list[dict[str, Any]]:
+        if not lines:
+            raise ValueError("wannier_targets block must not be empty.")
+        output = []
+        names = set()
+        for line in lines:
+            parts = [part.strip() for part in line.split(";")]
+            if len(parts) != 3 or not all(parts):
+                raise ValueError(f"Invalid wannier_targets line: {line!r}")
+            name, center_text, site_irrep = parts
+            if name in names:
+                raise ValueError(f"Duplicate Wannier target name: {name!r}.")
+            names.add(name)
+            center = [
+                float(evaluate_math_expression(value.strip()))
+                for value in center_text.strip("[] ").split(",")
+            ]
+            output.append({"name": name, "center": center, "site_irrep": site_irrep})
+        return output
+
+    def _parse_representation_analysis(self, lines: list[str]) -> list[dict[str, Any]]:
+        if not lines:
+            raise ValueError("representation_analysis block must not be empty.")
+        output = []
+        names = set()
+        for line in lines:
+            parts = [part.strip() for part in line.split(";")]
+            if len(parts) not in {3, 4}:
+                raise ValueError(f"Invalid representation_analysis line: {line!r}")
+            name = parts[0]
+            if not name or name in names:
+                raise ValueError(f"Duplicate or empty representation-analysis point name: {name!r}.")
+            names.add(name)
+            kpoint = [
+                float(evaluate_math_expression(value.strip()))
+                for value in parts[1].strip("[] ").split(",")
+            ]
+            bands = self._parse_analysis_bands(parts[2])
+            targets = None
+            if len(parts) == 4 and parts[3]:
+                targets = tuple(value.strip() for value in parts[3].split(",") if value.strip())
+                if not targets or len(targets) != len(set(targets)):
+                    raise ValueError(f"Invalid target list in representation-analysis line: {line!r}")
+            output.append({"name": name, "k": kpoint, "bands": bands, "targets": targets})
+        return output
+
+    @staticmethod
+    def _parse_analysis_bands(value: str) -> tuple[int, ...] | None:
+        text = value.strip()
+        if text in {"", "*"}:
+            return None
+        if ":" in text:
+            parts = text.split(":")
+            if len(parts) not in {2, 3} or any(part.strip() == "" for part in parts[:2]):
+                raise ValueError(f"Invalid representation-analysis band slice: {value!r}")
+            start = int(evaluate_math_expression(parts[0].strip()))
+            stop = int(evaluate_math_expression(parts[1].strip()))
+            step = 1 if len(parts) == 2 or not parts[2].strip() else int(
+                evaluate_math_expression(parts[2].strip())
+            )
+            bands = tuple(range(start, stop, step))
+        else:
+            bands = tuple(
+                int(evaluate_math_expression(part.strip())) for part in text.split(",")
+            )
+        if not bands or any(index < 0 for index in bands) or len(bands) != len(set(bands)):
+            raise ValueError("Representation-analysis bands must be unique non-negative indices.")
+        return bands
+
 
 def preprocess_config(cfg: IncarConfig) -> IncarConfig:
     if cfg._preprocessed:
@@ -559,6 +767,9 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
 
     if cfg.integration_mode not in {"nodal", "quadratic"}:
         raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
+    cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
+    if cfg.symmetry_output_basis not in {"strict", "fem"}:
+        raise ValueError("symmetry_output_basis must be 'strict' or 'fem'.")
     if cfg.disentangle_max_iter is not None and cfg.disentangle_max_iter < 0:
         raise ValueError("disentangle_max_iter must be non-negative.")
     if cfg.disentangle_err_diff is not None and (
@@ -567,6 +778,19 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
         raise ValueError("disentangle_err_diff must be finite and non-negative.")
     if not np.isfinite(cfg.disentangle_mixing) or not 0.0 < cfg.disentangle_mixing <= 1.0:
         raise ValueError("disentangle_mixing must lie in (0, 1].")
+    if not np.isfinite(cfg.symmetry_tolerance) or cfg.symmetry_tolerance <= 0.0:
+        raise ValueError("symmetry_tolerance must be positive and finite.")
+    if cfg.symmetry_max_iter <= 0:
+        raise ValueError("symmetry_max_iter must be positive.")
+    if not np.isfinite(cfg.symmetry_svd_tolerance) or cfg.symmetry_svd_tolerance <= 0.0:
+        raise ValueError("symmetry_svd_tolerance must be positive and finite.")
+    if (
+        not np.isfinite(cfg.symmetry_real_space_tolerance)
+        or cfg.symmetry_real_space_tolerance <= 0.0
+    ):
+        raise ValueError("symmetry_real_space_tolerance must be positive and finite.")
+    if not 0.0 < cfg.symmetry_minimum_retained_norm <= 1.0:
+        raise ValueError("symmetry_minimum_retained_norm must lie in (0, 1].")
 
     if cfg.projections is not None:
         cfg.band_calc_num = sum(len(p["states"]) for p in cfg.projections)

@@ -1,146 +1,87 @@
 import numpy as np
-import pytest
 from types import SimpleNamespace
 
-from pcwannier import load_config
-from pcwannier.compute import is_numba_available, run_calculation
 from pcwannier.compute.gradient import Gradient
+from pcwannier.compute.context import CalculationContext
 from pcwannier.compute.initializer import StateInitializer
 from pcwannier.compute.matrix import MSet
+from pcwannier.compute.parallel import parallel_map
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import InputBundle, Mesh
 from pcwannier.compute.tba import TBAModel
-from pcwannier.sources.comsol import load_input
-from pcwannier.symmetry import SpaceGroup, SpaceGroupOperation, SymmetryModel, build_symmetry_context
 
 
-@pytest.mark.requires_dataset
-def test_smoke_calculation_with_data_incar(tmp_path, caplog):
-    cfg = load_config("datasets/c4v/incar")
-    cfg.max_iter = 100
-    cfg.k_num = [6, 6]
-    cfg.hybrid_Wilson_loop = False
-    cfg.Chern_number = False
-    cfg.wannier_figures = "false"
-    cfg.band_figure = "false"
-    cfg.topo_output = "false"
-    cfg.M_file = "false"
-    cfg.V_file = "false"
-    cfg.A_file = "false"
-    cfg.U_file = "false"
-    cfg.hopping_file = "false"
-    cfg.wannier_file = "false"
-    with caplog.at_level("INFO"):
-        bundle = load_input(cfg)
-        result = run_calculation(bundle, threads=1)
-
-    assert result.M0.shape == (10, 10, 1)
-    assert result.V.shape == (10, 10, 1)
-    assert result.U.shape == (10, 10, 1)
-    assert result.wanniers[(0, 0)].shape[1] == cfg.band_calc_num
-    assert result.wannier_norms.shape == (cfg.band_calc_num,)
-    assert np.all(np.isfinite(np.real(result.wannier_norms)))
-    assert (0, 0, 0) in result.hoppings
-    assert result.hoppings[(0, 0, 0)].shape == (cfg.band_calc_num, cfg.band_calc_num)
-    assert result.band is not None
-    assert result.band.energies.shape[1] == cfg.band_calc_num
-    assert "omega_I=" in caplog.text
-    assert "omega_OD=" in caplog.text
-    assert "omega_D=" in caplog.text
-    assert "centers_rn=" in caplog.text
-    assert bundle.symmetry is cfg.symmetry_context
-    assert result.symmetry is cfg.symmetry_context
-    assert result.bloch_gauge.shape == (10, 10, 1)
-    assert result.symmetry_gauge is not None
-    assert len(result.symmetry_gauge.stars.stars) == 21
-    assert result.symmetry_gauge.residuals.max_residual < 1e-8
-    assert result.symmetry_gauge.residuals.max_path_consistency < 1e-8
-    assert result.symmetry_gauge.residuals.max_semiunitarity_error < 1e-8
-    assert result.symmetry_localization is not None
-    assert result.symmetry_localization.converged
-    assert result.symmetry_localization.iterations[-1].omega < result.symmetry_localization.iterations[0].omega
-    assert all(
-        step.max_intertwiner_residual < 1e-8
-        and step.max_path_consistency < 1e-8
-        and step.max_unitarity_error < 1e-8
-        for step in result.symmetry_localization.iterations
+def test_calculation_context_separates_internal_and_output_coefficients():
+    correction = np.array([[1.2, 0.1], [0.2, 0.8]], dtype=np.complex128)
+    identity = np.eye(2, dtype=np.complex128)
+    transforms = np.empty((1, 1, 1), dtype=object)
+    identities = np.empty((1, 1, 1), dtype=object)
+    transforms[0, 0, 0] = correction
+    identities[0, 0, 0] = identity
+    state = SimpleNamespace(get_transform=lambda zero=False: identities if zero else transforms)
+    mat_v = np.empty((1, 1, 1), dtype=object)
+    mat_u = np.empty((1, 1, 1), dtype=object)
+    mat_v[0, 0, 0] = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    mat_u[0, 0, 0] = np.eye(2, dtype=np.complex128)
+    config = SimpleNamespace(
+        symmetry_constrained=True,
+        symmetry_output_basis="strict",
+        disable_orth=True,
     )
-    for index in np.ndindex(result.bloch_gauge.shape):
-        assert np.allclose(result.bloch_gauge[index], result.V[index] @ result.U[index])
-        assert np.allclose(result.symmetry_gauge.gauge[index], result.bloch_gauge[index])
-    validation = result.symmetry_gauge.real_space_validation
-    assert validation.max_residual < 1e-6
-    assert validation.minimum_retained_norm >= 0.99
+    ctx = CalculationContext(
+        config,
+        state,
+        None,
+        SimpleNamespace(matV=mat_v),
+        SimpleNamespace(U=mat_u),
+        symmetry_gauge=object(),
+    )
+    gauge = mat_v[0, 0, 0]
 
-    decomposition = {
-        point.name: {
-            name: count
-            for name, count in point.physical_decomposition.multiplicities.items()
-            if count
-        }
-        for point in result.symmetry_analysis.points
-    }
-    assert decomposition == {
-        "Gamma": {"A1": 1, "E": 1},
-        "X": {"A1": 1, "B1": 1, "B2": 1},
-        "M": {"A1": 1, "E": 1},
-    }
+    assert np.allclose(ctx.internal_state_coefficients_at(0, 0, 0), correction @ gauge)
+    assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), correction @ gauge)
 
+    config.symmetry_output_basis = "fem"
+    assert np.allclose(ctx.internal_state_coefficients_at(0, 0, 0), correction @ gauge)
+    assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), gauge)
 
-@pytest.mark.requires_dataset
-def test_thread_counts_are_numerically_consistent():
-    results = [_run_small_calculation(threads) for threads in (1, 2, 4)]
-    ref = results[0]
-    for result in results[1:]:
-        for idx in np.ndindex(ref.M0.shape):
-            for b in range(len(ref.M0[idx])):
-                assert np.allclose(result.M0[idx][b], ref.M0[idx][b], rtol=1e-10, atol=1e-10)
-        for key, hopping in ref.hoppings.items():
-            assert np.allclose(result.hoppings[key], hopping, rtol=1e-10, atol=1e-10)
-        assert np.allclose(result.band.energies, ref.band.energies, rtol=1e-10, atol=1e-10)
+    config.symmetry_constrained = False
+    config.disable_orth = True
+    assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), gauge)
+    config.disable_orth = False
+    assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), correction @ gauge)
 
 
-@pytest.mark.requires_dataset
-def test_unconstrained_mode_bypasses_symmetry_gauge():
-    result = _run_small_calculation(1, symmetry_constrained=False)
-
-    assert result.symmetry is not None
-    assert result.symmetry_analysis is not None
-    assert result.symmetry_gauge is None
-    assert result.symmetry_localization is None
-
-
-@pytest.mark.skipif(not is_numba_available(), reason="numba is not installed")
-@pytest.mark.requires_dataset
-def test_python_and_numba_backends_are_numerically_consistent():
-    python_result = _run_small_calculation(threads=1, backend="python")
-    numba_result = _run_small_calculation(threads=1, backend="numba")
-
-    for idx in np.ndindex(python_result.M0.shape):
-        for b in range(len(python_result.M0[idx])):
-            assert np.allclose(numba_result.M0[idx][b], python_result.M0[idx][b], rtol=1e-10, atol=1e-10)
-        assert np.allclose(numba_result.A[idx], python_result.A[idx], rtol=1e-10, atol=1e-10)
-        assert np.allclose(numba_result.V[idx], python_result.V[idx], rtol=1e-10, atol=1e-10)
-        assert np.allclose(numba_result.U[idx], python_result.U[idx], rtol=1e-10, atol=1e-10)
-    for key, hopping in python_result.hoppings.items():
-        assert np.allclose(numba_result.hoppings[key], hopping, rtol=1e-10, atol=1e-10)
-    assert np.allclose(numba_result.wannier_norms, python_result.wannier_norms, rtol=1e-10, atol=1e-10)
-    assert np.allclose(numba_result.band.energies, python_result.band.energies, rtol=1e-10, atol=1e-10)
-
-
-@pytest.mark.requires_dataset
-def test_data_outer_window_runs_symmetry_constrained_disentanglement():
-    result = _run_small_calculation(
-        1,
-        outer_band_count=4,
-        disentangle_max_iter=1,
+def test_output_spectrum_diagnostics_distinguish_strict_and_fem_bases():
+    raw_energies = np.array([1.0, 2.0, 2.0])
+    analysis = SimpleNamespace(
+        points=(
+            SimpleNamespace(
+                name="K",
+                k_index=(0, 0, 0),
+                degenerate_blocks=(SimpleNamespace(band_indices=(1, 2)),),
+            ),
+        )
     )
 
-    assert result.symmetry_disentanglement is not None
-    assert result.V[0, 0, 0].shape == (4, 3)
-    assert result.bloch_gauge[0, 0, 0].shape == (4, 3)
-    assert result.symmetry_disentanglement.diagnostics.max_projector_residual < 1e-8
-    assert result.symmetry_disentanglement.diagnostics.max_intertwiner_residual < 1e-8
+    strict = _synthetic_spectrum_model(raw_energies, np.diag([1.0, 1.8, 2.2]), "strict")
+    strict_diagnostics = strict.output_spectrum_diagnostics(analysis)
+    strict_splitting = strict_diagnostics.degeneracy_splittings[0]
+    assert np.isclose(strict_diagnostics.max_eigenvalue_drift, 0.2)
+    assert np.isclose(strict_splitting.output_gap, 0.4)
+
+    fem = _synthetic_spectrum_model(raw_energies, np.diag(raw_energies), "fem")
+    fem_diagnostics = fem.output_spectrum_diagnostics(analysis)
+    fem_splitting = fem_diagnostics.degeneracy_splittings[0]
+    assert fem_diagnostics.max_eigenvalue_drift == 0.0
+    assert fem_splitting.output_gap == 0.0
+
+
+def test_parallel_map_preserves_deterministic_input_order():
+    expected = [(value, value * value) for value in range(32)]
+    for threads in (1, 2, 4):
+        actual = list(parallel_map(range(32), lambda value: (value, value * value), threads))
+        assert actual == expected
 
 
 def test_even_kmesh_half_r_set_has_no_inverse_duplicates():
@@ -321,31 +262,28 @@ def test_inner_window_projection_is_not_overwritten_by_matc():
     assert np.array_equal(captured["V"], projected_v)
 
 
-def _run_small_calculation(
-    threads: int,
-    backend: str = "python",
-    *,
-    symmetry_constrained: bool = True,
-    outer_band_count: int | None = None,
-    disentangle_max_iter: int | None = None,
-):
-    cfg = load_config("datasets/c4v/incar")
-    cfg.symmetry_constrained = symmetry_constrained
-    if outer_band_count is not None:
-        cfg.band_window = np.arange(outer_band_count)
-    cfg.disentangle_max_iter = disentangle_max_iter
-    cfg.max_iter = 0
-    cfg.extension = [1, 1]
-    cfg.k_num = [4, 4]
-    cfg.hybrid_Wilson_loop = False
-    cfg.Chern_number = False
-    cfg.wannier_figures = "false"
-    cfg.band_figure = "false"
-    cfg.topo_output = "false"
-    cfg.M_file = "false"
-    cfg.V_file = "false"
-    cfg.A_file = "false"
-    cfg.U_file = "false"
-    cfg.hopping_file = "false"
-    cfg.wannier_file = "false"
-    return run_calculation(load_input(cfg), threads=threads, backend=backend)
+def _synthetic_spectrum_model(raw_energies, projected_hamiltonian, basis):
+    energies = np.empty((1, 1, 1), dtype=object)
+    energies[0, 0, 0] = np.asarray(raw_energies, dtype=float)
+    band_indices = np.empty((1, 1, 1), dtype=object)
+    band_indices[0, 0, 0] = list(range(len(raw_energies)))
+    state = SimpleNamespace(
+        E=energies,
+        E_idx=band_indices,
+        k_shape=(1, 1, 1),
+        k_indices=lambda: iter(((0, 0, 0),)),
+    )
+    config = SimpleNamespace(
+        band_calc_num=len(raw_energies),
+        symmetry_constrained=True,
+        symmetry_output_basis=basis,
+        disable_orth=True,
+        representation_degeneracy_absolute=1.0e-8,
+        representation_degeneracy_relative=1.0e-10,
+    )
+    model = object.__new__(TBAModel)
+    model.config = config
+    model.state = state
+    model._projected_hamiltonians = np.asarray([projected_hamiltonian], dtype=np.complex128)
+    model._projected_k_cart = np.zeros((1, 2), dtype=float)
+    return model

@@ -70,7 +70,16 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             report, need_orth = state.check_orthogonality()
         if need_orth:
             raise RuntimeError("Orthogonalization failed.")
-        if config.disable_orth:
+        if config.symmetry_constrained:
+            fem_report, _ = state.check_orthogonality(apply_transform=False)
+            LOGGER.info(
+                "Orthogonalization mode: strict internally, symmetry output basis=%s; "
+                "FEM-normalized basis max_diag_err=%.6g max_offdiag=%.6g",
+                config.symmetry_output_basis,
+                float(np.max(fem_report[..., 1])),
+                float(np.max(fem_report[..., 2])),
+            )
+        elif config.disable_orth:
             fem_report, _ = state.check_orthogonality(apply_transform=False)
             LOGGER.info(
                 "Orthogonalization mode: mixed (strict internally, FEM-normalized output); "
@@ -122,7 +131,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     if config.symmetry_constrained:
         if gauge_spec is None or not gauge_spec.enabled or bundle.symmetry is None:
             raise ValueError(
-                "symmetry_constrained=true requires an enabled symmetry_gauge section in the sym file."
+                "symmetry_constrained=true requires valid symmetry targets and gauge settings in incar."
             )
         if "U" in config.use_cached_data:
             raise ValueError(
@@ -263,8 +272,26 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         )
         _log_symmetry_gauge(symmetry_gauge)
         _log_symmetry_localization(symmetry_localization)
-        if config.disable_orth:
-            LOGGER.info("Symmetry-constrained output uses the internally orthonormalized Bloch basis")
+        LOGGER.info("Symmetry-constrained output basis: %s", config.symmetry_output_basis)
+        if (
+            config.symmetry_output_basis == "strict"
+            and config.disable_orth
+            and state.is_orthogonalized
+        ):
+            LOGGER.warning(
+                "disable_orth=true is overridden by symmetry_output_basis=strict; final Wannier/TBA "
+                "outputs include the non-unitary orthogonalization correction. Set "
+                "symmetry_output_basis=fem to preserve the normalized FEM spectrum."
+            )
+        elif (
+            config.symmetry_output_basis == "fem"
+            and not config.disable_orth
+            and state.is_orthogonalized
+        ):
+            LOGGER.warning(
+                "symmetry_output_basis=fem overrides disable_orth=false for final Wannier/TBA outputs; "
+                "internal symmetry calculations remain strictly orthonormalized."
+            )
     else:
         with timed_step("gradient optimization", LOGGER, max_iter=config.max_iter, epsilon=config.epsilon):
             gradient.iter(config.err_diff, config.max_iter, config.epsilon)
@@ -291,6 +318,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         np.real_if_close(gradient.rn.T).tolist(),
     )
     if symmetry_gauge is not None and gauge_spec.validate_wannier:
+        enforce_wannier_residual = config.symmetry_output_basis == "strict"
         with timed_step("validate real-space Wannier symmetry", LOGGER):
             validation = validate_wannier_symmetry(
                 ctx,
@@ -298,19 +326,35 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 zero_cell_wanniers=wannier,
                 tolerance=gauge_spec.real_space_tolerance,
                 minimum_retained_norm=gauge_spec.minimum_retained_norm,
+                enforce_residual=enforce_wannier_residual,
             )
         symmetry_gauge = replace(symmetry_gauge, real_space_validation=validation)
         ctx.symmetry_gauge = symmetry_gauge
-        LOGGER.info(
-            "Wannier symmetry: max_residual=%.6g mean_residual=%.6g minimum_retained_norm=%.6g",
+        log_wannier_symmetry = (
+            LOGGER.warning
+            if not enforce_wannier_residual and validation.max_residual > gauge_spec.real_space_tolerance
+            else LOGGER.info
+        )
+        log_wannier_symmetry(
+            "Wannier symmetry: basis=%s max_residual=%.6g mean_residual=%.6g "
+            "minimum_retained_norm=%.6g tolerance=%.6g%s",
+            config.symmetry_output_basis,
             validation.max_residual,
             validation.mean_residual,
             validation.minimum_retained_norm,
+            gauge_spec.real_space_tolerance,
+            " (diagnostic only for FEM output)" if not enforce_wannier_residual else "",
         )
     tba = TBAModel(ctx, threads=threads)
+    output_spectrum_diagnostics = tba.output_spectrum_diagnostics(symmetry_analysis)
+    _log_output_spectrum_diagnostics(output_spectrum_diagnostics, config)
     with timed_step("collect hopping matrices", LOGGER):
         hoppings = tba.collect_hoppings()
     LOGGER.info("Hopping matrices collected: count=%s", len(hoppings))
+    hopping_reconstruction_diagnostics = tba.hopping_reconstruction_diagnostics(
+        hoppings, symmetry_analysis
+    )
+    _log_hopping_reconstruction_diagnostics(hopping_reconstruction_diagnostics)
     with timed_step("calculate high-symmetry bands", LOGGER, enabled=bool(config.k_path)):
         band = tba.gen_hs_bands(hoppings) if config.k_path else None
     if band is not None and (config.Chern_number or config.hybrid_Wilson_loop):
@@ -346,6 +390,8 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         symmetry_gauge=symmetry_gauge,
         symmetry_localization=symmetry_localization,
         symmetry_disentanglement=symmetry_disentanglement,
+        output_spectrum_diagnostics=output_spectrum_diagnostics,
+        hopping_reconstruction_diagnostics=hopping_reconstruction_diagnostics,
     )
 
 
@@ -353,9 +399,11 @@ def _log_symmetry_analysis(result) -> None:
     for point in result.points:
         blocks = [tuple(band + 1 for band in block.band_indices) for block in point.degenerate_blocks]
         LOGGER.info(
-            "Symmetry point %s: k=%s bands(actual,1-based)=%s blocks=%s "
+            "Symmetry point %s: little_group=%s classes=%s k=%s bands(actual,1-based)=%s blocks=%s "
             "unitarity=%.6g leakage=%.6g composition=%.6g characters=%s",
             point.name,
+            point.little_group_name or "legacy",
+            point.conjugacy_classes,
             point.sampled_k_fractional.tolist(),
             tuple(band + 1 for band in point.band_indices),
             blocks,
@@ -373,6 +421,63 @@ def _log_symmetry_analysis(result) -> None:
                 point.compatibility.compatible if point.compatibility else None,
                 point.physical_decomposition.max_residual,
                 point.target_decomposition.max_residual if point.target_decomposition else 0.0,
+            )
+
+
+def _log_output_spectrum_diagnostics(result, config) -> None:
+    if result is None:
+        LOGGER.info("Output spectrum diagnostics unavailable for an entangled outer window")
+        return
+    LOGGER.info(
+        "Output spectrum: basis=%s max_eigenvalue_drift=%.6g worst_k_index=%s",
+        result.basis,
+        result.max_eigenvalue_drift,
+        result.worst_k_index,
+    )
+    drift_tolerance = max(
+        float(config.symmetry_tolerance),
+        float(config.representation_degeneracy_absolute),
+    )
+    if config.symmetry_constrained and result.max_eigenvalue_drift > drift_tolerance:
+        LOGGER.warning(
+            "Symmetry output basis %s changes the sampled FEM spectrum: "
+            "max_eigenvalue_drift=%.6g at k_index=%s",
+            result.basis,
+            result.max_eigenvalue_drift,
+            result.worst_k_index,
+        )
+    for splitting in result.degeneracy_splittings:
+        if splitting.broken:
+            LOGGER.warning(
+                "Output basis %s breaks FEM degeneracy at %s bands(actual,1-based)=%s: "
+                "raw_gap=%.6g output_gap=%.6g tolerance=%.6g",
+                result.basis,
+                splitting.point_name,
+                tuple(index + 1 for index in splitting.band_indices),
+                splitting.reference_gap,
+                splitting.output_gap,
+                splitting.tolerance,
+            )
+
+
+def _log_hopping_reconstruction_diagnostics(result) -> None:
+    LOGGER.info(
+        "Hopping reconstruction: max_matrix_error=%.6g max_eigenvalue_error=%.6g "
+        "worst_k_index=%s",
+        result.max_matrix_error,
+        result.max_eigenvalue_error,
+        result.worst_k_index,
+    )
+    for splitting in result.degeneracy_splittings:
+        if splitting.broken:
+            LOGGER.warning(
+                "Configured hopping set breaks output degeneracy at %s bands(actual,1-based)=%s: "
+                "direct_output_gap=%.6g reconstructed_gap=%.6g tolerance=%.6g",
+                splitting.point_name,
+                tuple(index + 1 for index in splitting.band_indices),
+                splitting.reference_gap,
+                splitting.output_gap,
+                splitting.tolerance,
             )
 
 

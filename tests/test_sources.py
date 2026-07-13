@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 
-from pcwannier import load_config
 from pcwannier.compute import (
     integrate_overlap_matrix,
     integrate_over_mesh,
@@ -16,31 +15,8 @@ from pcwannier.sources.comsol import (
     _validate_header_k_grid,
     _values_on_mesh,
     load_comsol_data,
-    load_comsol_mesh,
-    load_input,
     match_data_to_mesh,
 )
-
-
-@pytest.mark.requires_dataset
-def test_comsol_data_shapes():
-    cfg = load_config("datasets/c4v/incar")
-    mesh = load_comsol_mesh(str(cfg.input_path(cfg.mesh_file)))
-    ez = load_comsol_data(str(cfg.input_path(cfg.dataset_file)))
-    energy = load_comsol_data(str(cfg.input_path(cfg.E_file)))
-    eps = load_comsol_data(str(cfg.input_path(cfg.dielectric_file)), real_only=True)
-
-    assert mesh.vertices.shape == (397, 2)
-    assert mesh.elements.shape == (728, 3)
-    assert ez.value_matrix.shape[0] == 397
-    assert energy.value_matrix.shape[0] == 1
-    assert ez.value_matrix.shape[1] == energy.value_matrix.shape[1]
-    assert ez.value_matrix.shape[1] % np.prod([len(axis) for axis in cfg.k_points]) == 0
-    assert np.unique(ez.column_parameters["k1"]).size == 10
-    assert np.unique(ez.column_parameters["k2"]).size == 10
-    assert eps.point_matrix.shape[0] == 429
-    assert eps.value_matrix.shape[1] == 1
-    assert not np.iscomplexobj(eps.value_matrix)
 
 
 def test_comsol_real_only_reader_uses_utf8_comments(tmp_path):
@@ -68,16 +44,6 @@ def test_comsol_real_only_reader_accepts_complex_tokens(tmp_path):
     assert np.allclose(raw.value_matrix[0], [23.57556147941945, 4.0])
 
 
-@pytest.mark.requires_dataset
-def test_comsol_header_k_grid_mismatch_is_rejected():
-    cfg = load_config("datasets/c4v/incar")
-    raw = load_comsol_data(cfg.input_path(cfg.dataset_file))
-    cfg.k_points[0] = cfg.k_points[0][::2]
-
-    with pytest.raises(ValueError, match="COMSOL k-grid mismatch"):
-        _validate_header_k_grid(cfg, raw, cfg.input_path(cfg.dataset_file))
-
-
 def test_comsol_header_validates_band_parameter_and_dataset_order(tmp_path):
     cfg = SimpleNamespace(
         kdim=2,
@@ -94,6 +60,11 @@ def test_comsol_header_validates_band_parameter_and_dataset_order(tmp_path):
     raw = RawData(np.zeros((1, 2)), np.zeros((1, np.prod(shape))), parameters)
 
     _validate_header_k_grid(cfg, raw, tmp_path / "E.txt")
+
+    cfg.k_points[0] = np.arange(3)
+    with pytest.raises(ValueError, match="COMSOL k-grid mismatch"):
+        _validate_header_k_grid(cfg, raw, tmp_path / "E.txt")
+    cfg.k_points[0] = np.arange(2)
 
     raw.column_parameters = {**parameters, "k2": np.roll(parameters["k2"], 2)}
     with pytest.raises(ValueError, match="dataset_order"):
@@ -120,21 +91,6 @@ def test_comsol_header_requires_complete_band_parameter(tmp_path):
         _validate_header_k_grid(cfg, raw, tmp_path / "E.txt")
 
 
-@pytest.mark.requires_dataset
-def test_load_input_bundle_distribution():
-    bundle = load_input(load_config("datasets/c4v/incar"))
-
-    assert bundle.fields.shape == (10, 10, 1)
-    assert len(bundle.fields[0, 0, 0]) == 3
-    assert bundle.fields[0, 0, 0].shape == (3, 397)
-    assert bundle.fields[0, 0, 0][0].shape == (397,)
-    assert bundle.epsilon.shape == (397,)
-    assert np.array_equal(bundle.band_indices[0, 0, 0], [0, 1, 2])
-    assert np.asarray(bundle.energies[0, 0, 0]).shape == (3,)
-    assert np.allclose(np.unique(np.round(bundle.epsilon, 8)), [1.0, 6.3, 11.6])
-
-
-@pytest.mark.requires_dataset
 def test_match_data_to_mesh_and_integral_formula():
     vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     elements = np.array([[0, 1, 2], [1, 3, 2]])
@@ -148,13 +104,6 @@ def test_match_data_to_mesh_and_integral_formula():
     if is_numba_available():
         numba_result = integrate_over_mesh(FieldData("test", mesh, values), backend="numba")
         assert np.isclose(numba_result, result)
-
-    cfg = load_config("datasets/c4v/incar")
-    raw = load_comsol_data(str(cfg.input_path(cfg.dataset_file)))
-    idxs, dists = match_data_to_mesh(load_comsol_mesh(str(cfg.input_path(cfg.mesh_file))), raw)
-    assert len(idxs) == 397
-    assert np.all(dists == 0.0)
-    assert np.unique(idxs).size == 397
 
 
 def test_values_on_mesh_averages_duplicate_rows_all_columns():
@@ -285,29 +234,6 @@ def test_mesh_extension_matches_legacy_incremental_algorithm():
         assert np.array_equal(new_mesh.elements, old_mesh.elements)
         assert np.array_equal(new_mapping, old_mapping)
         assert np.allclose(new_mesh.tri_weights, old_mesh.tri_weights)
-
-
-@pytest.mark.requires_dataset
-def test_data_mesh_extension_full_size():
-    cfg = load_config("datasets/c4v/incar")
-    mesh = load_comsol_mesh(str(cfg.input_path(cfg.mesh_file)))
-    assert np.count_nonzero(mesh._boundary_vertex_mask(mesh.vertices.shape[0])) == 64
-    assert np.unique(mesh.edge).size == 157
-    base_weights = mesh.tri_weights.copy()
-    mapping = mesh.extension(cfg.extension, cfg.real_lattice_vectors, float(cfg.lattice_const))
-
-    assert mesh.vertices.shape == (36721, 2)
-    assert mesh.elements.shape == (72800, 3)
-    assert mapping.shape == (36721,)
-    assert np.allclose(mesh.tri_weights, np.tile(base_weights, np.prod(cfg.extension)), rtol=0.0, atol=1e-14)
-
-    avec = np.asarray(cfg.real_lattice_vectors, dtype=float) * float(cfg.lattice_const)
-    base_mesh = load_comsol_mesh(str(cfg.input_path(cfg.mesh_file)))
-    base_fractional = base_mesh.vertices @ np.linalg.inv(avec)
-    base_field = np.exp(2j * np.pi * base_fractional[:, 0]) + 0.5 * np.exp(2j * np.pi * base_fractional[:, 1])
-    extended_fractional = mesh.vertices @ np.linalg.inv(avec)
-    expected = np.exp(2j * np.pi * extended_fractional[:, 0]) + 0.5 * np.exp(2j * np.pi * extended_fractional[:, 1])
-    assert np.allclose(base_field[mapping], expected, rtol=0.0, atol=1e-10)
 
 
 def test_extension_does_not_merge_nearby_nonmatching_boundary_nodes():

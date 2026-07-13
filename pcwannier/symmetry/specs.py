@@ -42,6 +42,23 @@ class IrrepCharacterSpec:
 
 
 @dataclass(frozen=True)
+class WannierTargetSpec:
+    name: str
+    center: np.ndarray
+    site_irrep: str
+
+    def __post_init__(self) -> None:
+        center = np.asarray(self.center, dtype=float)
+        if not self.name or not self.site_irrep:
+            raise ValueError("Wannier target name and site_irrep must not be empty.")
+        if center.ndim != 1 or not np.all(np.isfinite(center)):
+            raise ValueError("Wannier target center must be a finite vector.")
+        center = center.copy()
+        center.setflags(write=False)
+        object.__setattr__(self, "center", center)
+
+
+@dataclass(frozen=True)
 class RepresentationPointSpec:
     name: str
     k_fractional: np.ndarray
@@ -95,3 +112,10 @@ class SymmetryGaugeSpec:
             raise ValueError("Wannier symmetry tolerance must be positive and finite.")
         if not 0.0 < self.minimum_retained_norm <= 1.0:
             raise ValueError("minimum_retained_norm must lie in (0, 1].")
+
+
+@dataclass(frozen=True)
+class SymmetryCalculationSpec:
+    target_specs: tuple[WannierTargetSpec, ...] | None = None
+    representation_analysis: RepresentationAnalysisSpec | None = None
+    symmetry_gauge: SymmetryGaugeSpec | None = None

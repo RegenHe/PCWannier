@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..compute.state import StateCollection
     from .bloch import StateBlochSymmetryProvider
     from .representation import SymmetryContext, WannierTargetRepresentation
+    from .definition import ResolvedLittleGroup
 
 
 def cartesian_field_matrix(
@@ -148,6 +149,8 @@ class HighSymmetryPointAnalysis:
     target_characters: dict[str, complex]
     target_decomposition: IrrepDecomposition | None
     compatibility: RepresentationCompatibility | None
+    little_group_name: str | None = None
+    conjugacy_classes: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -276,6 +279,37 @@ def decompose_characters(
     return IrrepDecomposition(raw, rounded, residuals, class_residuals)
 
 
+def decompose_little_group_characters(
+    little_group_definition: ResolvedLittleGroup,
+    physical_characters: dict[str, complex],
+) -> IrrepDecomposition:
+    table = little_group_definition.table
+    names = table.operation_names
+    if set(physical_characters) != set(names):
+        raise ValueError("Physical characters must contain every little-group operation exactly once.")
+    physical_values = np.asarray([physical_characters[name] for name in names], dtype=np.complex128)
+    raw: dict[str, complex] = {}
+    rounded: dict[str, int] = {}
+    residuals: dict[str, float] = {}
+    for irrep in little_group_definition.irreps:
+        character = np.asarray(irrep.characters, dtype=np.complex128)
+        multiplicity = np.vdot(character, physical_values) / table.order
+        nearest = int(np.rint(multiplicity.real))
+        raw[irrep.name] = complex(multiplicity)
+        rounded[irrep.name] = nearest
+        residuals[irrep.name] = float(abs(multiplicity - nearest))
+    class_residuals = {}
+    for conjugacy_class in table.conjugacy_classes:
+        class_names = tuple(
+            table.group.operations[index].name for index in conjugacy_class.operation_indices
+        )
+        values = [physical_characters[str(name)] for name in class_names]
+        average = sum(values) / len(values)
+        label = "{" + ",".join(str(name) for name in class_names) + "}"
+        class_residuals[label] = max((abs(value - average) for value in values), default=0.0)
+    return IrrepDecomposition(raw, rounded, residuals, class_residuals)
+
+
 def compare_representations(
     target_dimension: int,
     physical_dimension: int,
@@ -373,6 +407,13 @@ def _analyze_point(
 
     elements = little_group(group, point.k_fractional)
     operation_indices = tuple(element.operation_index for element in elements)
+    resolved_little_group = (
+        context.model.group_definition.resolve_little_group(
+            operation_indices, point.k_fractional
+        )
+        if context.model.group_definition is not None
+        else None
+    )
     matrices: dict[str, np.ndarray] = {}
     characters: dict[str, complex] = {}
     for element in elements:
@@ -430,17 +471,20 @@ def _analyze_point(
             ),
             default=0.0,
         )
-        decomposition = (
-            decompose_characters(
+        if resolved_little_group is not None:
+            decomposition = decompose_little_group_characters(
+                resolved_little_group, block_characters
+            )
+        elif point.irreps:
+            decomposition = decompose_characters(
                 group,
                 operation_indices,
                 block_characters,
                 point.irreps,
                 point.conjugacy_classes,
             )
-            if point.irreps
-            else None
-        )
+        else:
+            decomposition = None
         block_results.append(
             DegenerateBlock(
                 block,
@@ -452,26 +496,32 @@ def _analyze_point(
             )
         )
 
-    physical_decomposition = (
-        decompose_characters(
+    if resolved_little_group is not None:
+        physical_decomposition = decompose_little_group_characters(
+            resolved_little_group, characters
+        )
+    elif point.irreps:
+        physical_decomposition = decompose_characters(
             group, operation_indices, characters, point.irreps, point.conjugacy_classes
         )
-        if point.irreps
-        else None
-    )
+    else:
+        physical_decomposition = None
     targets = _selected_targets(context, point)
     target_characters = _target_characters(targets, operation_indices, point.k_fractional)
-    target_decomposition = (
-        decompose_characters(
+    if targets and resolved_little_group is not None:
+        target_decomposition = decompose_little_group_characters(
+            resolved_little_group, target_characters
+        )
+    elif targets and point.irreps:
+        target_decomposition = decompose_characters(
             group,
             operation_indices,
             target_characters,
             point.irreps,
             point.conjugacy_classes,
         )
-        if point.irreps and targets
-        else None
-    )
+    else:
+        target_decomposition = None
     compatibility = (
         compare_representations(
             sum(target.wannier_dimension for target in targets),
@@ -497,6 +547,18 @@ def _analyze_point(
         target_characters,
         target_decomposition,
         compatibility,
+        None if resolved_little_group is None else resolved_little_group.name,
+        (
+            ()
+            if resolved_little_group is None
+            else tuple(
+                tuple(
+                    str(group.operations[index].name)
+                    for index in conjugacy_class.operation_indices
+                )
+                for conjugacy_class in resolved_little_group.table.conjugacy_classes
+            )
+        ),
     )
 
 
@@ -563,7 +625,7 @@ def _selected_targets(
     point: RepresentationPointSpec,
 ) -> tuple[WannierTargetRepresentation, ...]:
     if point.target_names is None:
-        return context.model.targets
+        return ()
     return tuple(context.model.target(name) for name in point.target_names)
 
 

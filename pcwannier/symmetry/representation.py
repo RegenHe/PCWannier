@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from .definition import SymmetryGroupDefinition
     from .specs import RepresentationAnalysisSpec, SymmetryGaugeSpec
+    from .tables import GroupIrrep
 
 from .group import (
     CrystallographicOrbit,
@@ -225,6 +227,7 @@ class SymmetryModel:
     targets: tuple[WannierTargetRepresentation, ...]
     representation_analysis: RepresentationAnalysisSpec | None = None
     symmetry_gauge: SymmetryGaugeSpec | None = None
+    group_definition: SymmetryGroupDefinition | None = None
 
     def target(self, name: str) -> WannierTargetRepresentation:
         for target in self.targets:
@@ -261,3 +264,29 @@ def build_wannier_target(
     orbit = build_crystallographic_orbit(group, center)
     irrep = build_site_irrep(orbit, irrep_spec)
     return WannierTargetRepresentation(name, group, orbit, irrep)
+
+
+def build_wannier_target_from_group_irrep(
+    name: str,
+    group: SpaceGroup,
+    center,
+    group_irrep: GroupIrrep,
+) -> WannierTargetRepresentation:
+    orbit = build_crystallographic_orbit(group, center)
+    source_indices = tuple(
+        element.source_operation_index for element in orbit.site_symmetry.elements
+    )
+    if set(source_indices) != set(group_irrep.table.operation_indices):
+        raise ValueError(
+            f"Irrep {group_irrep.name!r} is defined for operations "
+            f"{group_irrep.table.operation_indices}, but target {name!r} has site group {source_indices}."
+        )
+    matrices = tuple(
+        np.asarray(group_irrep.matrix_for_global_index(operation_index), dtype=np.complex128).copy()
+        for operation_index in source_indices
+    )
+    _validate_site_representation(orbit, matrices, group_irrep.dimension)
+    for matrix in matrices:
+        matrix.setflags(write=False)
+    site_irrep = SiteIrrep(group_irrep.name, group_irrep.dimension, matrices)
+    return WannierTargetRepresentation(name, group, orbit, site_irrep)

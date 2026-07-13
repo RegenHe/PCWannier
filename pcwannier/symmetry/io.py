@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 from typing import Any
+import warnings
 
 import numpy as np
 import yaml
 
 from .group import SpaceGroup, SpaceGroupOperation
+from .definition import (
+    StandardSubgroupDefinition,
+    SymmetryGroupDefinition,
+    build_group_irrep,
+    validate_irrep_table,
+)
 from .representation import (
     SiteIrrepGenerator,
     SiteIrrepSpec,
     SymmetryModel,
     build_wannier_target,
+    build_wannier_target_from_group_irrep,
 )
 from .specs import (
     DegeneracyTolerance,
@@ -20,11 +29,139 @@ from .specs import (
     RepresentationAnalysisSpec,
     RepresentationPointSpec,
     SymmetryGaugeSpec,
+    SymmetryCalculationSpec,
 )
+from .tables import FiniteGroupTable
+
+
+class PCWannierDeprecationWarning(FutureWarning):
+    pass
+
+
+def resolve_symmetry_file(path: str | Path, base_dir: str | Path) -> Path:
+    requested = Path(path)
+    explicit = requested if requested.is_absolute() else Path(base_dir) / requested
+    if explicit.is_file():
+        return explicit.resolve()
+    library = resources.files("pcwannier.symmetries").joinpath(requested.name)
+    if library.is_file():
+        return Path(str(library))
+    raise FileNotFoundError(
+        f"Symmetry file {explicit} does not exist, and {requested.name!r} was not found in the built-in library."
+    )
 
 
 def load_symmetry(path: str | Path) -> SymmetryModel:
     filename = Path(path)
+    raw = _read_symmetry_yaml(filename)
+    if "operations" in raw:
+        definition = _parse_group_definition(raw)
+        deprecated = sorted(
+            set(raw) & {"wannier_targets", "representation_analysis", "symmetry_gauge"}
+        )
+        if deprecated:
+            warnings.warn(
+                "Calculation data in a symmetry-group file is deprecated: "
+                + ", ".join(deprecated)
+                + "; move it to incar.",
+                PCWannierDeprecationWarning,
+                stacklevel=2,
+            )
+            targets, analysis, gauge = _parse_legacy_calculation_sections(
+                raw, definition.group, definition.dimension
+            )
+        else:
+            targets, analysis, gauge = (), None, None
+        return SymmetryModel(
+            definition.dimension,
+            definition.tolerance,
+            definition.group,
+            targets,
+            analysis,
+            gauge,
+            definition,
+        )
+    warnings.warn(
+        "Legacy mixed symmetry YAML is deprecated; use operations/irreps in the group file "
+        "and move wannier_targets, representation_analysis, and symmetry_gauge to incar.",
+        PCWannierDeprecationWarning,
+        stacklevel=2,
+    )
+    return _load_legacy_symmetry(raw, filename)
+
+
+def load_symmetry_group(path: str | Path) -> SymmetryGroupDefinition:
+    model = load_symmetry(path)
+    if model.group_definition is None:
+        raise ValueError(
+            "This legacy symmetry file does not define a reusable full-group irrep library."
+        )
+    return model.group_definition
+
+
+def compose_symmetry_model(
+    base: SymmetryModel,
+    calculation: SymmetryCalculationSpec,
+) -> SymmetryModel:
+    targets = base.targets
+    if calculation.target_specs is not None:
+        if base.group_definition is None:
+            raise ValueError(
+                "incar wannier_targets require a new-style symmetry group file with group irreps."
+            )
+        built_targets = []
+        names = set()
+        from .group import build_crystallographic_orbit
+
+        for target_spec in calculation.target_specs:
+            if target_spec.name in names:
+                raise ValueError(f"Duplicate Wannier target name: {target_spec.name!r}.")
+            names.add(target_spec.name)
+            orbit = build_crystallographic_orbit(base.group, target_spec.center)
+            site_indices = tuple(
+                element.source_operation_index for element in orbit.site_symmetry.elements
+            )
+            group_irrep = base.group_definition.site_irrep(site_indices, target_spec.site_irrep)
+            built_targets.append(
+                build_wannier_target_from_group_irrep(
+                    target_spec.name, base.group, target_spec.center, group_irrep
+                )
+            )
+        targets = tuple(built_targets)
+    analysis = (
+        calculation.representation_analysis
+        if calculation.representation_analysis is not None
+        else base.representation_analysis
+    )
+    gauge = (
+        calculation.symmetry_gauge
+        if calculation.symmetry_gauge is not None
+        else base.symmetry_gauge
+    )
+    if analysis is not None:
+        target_names = {target.name for target in targets}
+        for point in analysis.points:
+            if point.target_names is None:
+                continue
+            unknown = sorted(set(point.target_names) - target_names)
+            if unknown:
+                raise ValueError(
+                    f"Representation point {point.name!r} references unknown Wannier targets {unknown}."
+                )
+    if gauge is not None and gauge.enabled and not targets:
+        raise ValueError("Symmetry-constrained gauge construction requires Wannier targets.")
+    return SymmetryModel(
+        base.dimension,
+        base.tolerance,
+        base.group,
+        targets,
+        analysis,
+        gauge,
+        base.group_definition,
+    )
+
+
+def _read_symmetry_yaml(filename: Path) -> dict[str, Any]:
     try:
         with filename.open("r", encoding="utf-8") as handle:
             raw = yaml.safe_load(handle)
@@ -32,6 +169,120 @@ def load_symmetry(path: str | Path) -> SymmetryModel:
         raise ValueError(f"Invalid symmetry YAML in {filename}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"Symmetry file {filename} must contain a YAML mapping at its root.")
+    return raw
+
+
+def _parse_group_definition(raw: dict[str, Any]) -> SymmetryGroupDefinition:
+    name = str(raw.get("name", "")).strip()
+    if not name:
+        raise ValueError("A symmetry group definition must contain a non-empty name.")
+    dimension = _positive_int(raw.get("dimension"), "dimension")
+    tolerance = float(raw.get("tolerance", 1e-8))
+    operations_raw = raw.get("operations")
+    if not isinstance(operations_raw, list) or not operations_raw:
+        raise ValueError("operations must be a non-empty YAML list.")
+    operations = []
+    for index, operation_raw in enumerate(operations_raw):
+        operation = _parse_operation(operation_raw, dimension)
+        if operation.name is None or not operation.name.strip():
+            raise ValueError(f"operations[{index}] must define a non-empty unique name.")
+        operations.append(operation)
+    group = SpaceGroup(operations, tolerance)
+    table = FiniteGroupTable(group, name=name)
+    irreps = _parse_group_irreps(raw.get("irreps"), table, f"group {name!r}")
+    validate_irrep_table(table, irreps)
+
+    subgroups_raw = raw.get("subgroups", {})
+    if subgroups_raw is None:
+        subgroups_raw = {}
+    if not isinstance(subgroups_raw, dict):
+        raise ValueError("subgroups must be a YAML mapping.")
+    subgroups = []
+    for subgroup_name, subgroup_raw in subgroups_raw.items():
+        if not isinstance(subgroup_raw, dict):
+            raise ValueError(f"Subgroup {subgroup_name!r} must be a mapping.")
+        operation_names = subgroup_raw.get("operations")
+        if not isinstance(operation_names, list) or not operation_names or any(
+            not isinstance(value, str) for value in operation_names
+        ):
+            raise ValueError(f"Subgroup {subgroup_name!r}.operations must contain operation names.")
+        indices = tuple(group.operation_index(group.operation_by_name(value)) for value in operation_names)
+        subgroup_table = FiniteGroupTable(group, indices, name=str(subgroup_name))
+        subgroup_irreps = _parse_group_irreps(
+            subgroup_raw.get("irreps"), subgroup_table, f"subgroup {subgroup_name!r}"
+        )
+        validate_irrep_table(subgroup_table, subgroup_irreps)
+        subgroups.append(
+            StandardSubgroupDefinition(str(subgroup_name), subgroup_table, subgroup_irreps)
+        )
+    return SymmetryGroupDefinition(
+        name,
+        dimension,
+        tolerance,
+        group,
+        table,
+        irreps,
+        tuple(subgroups),
+    )
+
+
+def _parse_group_irreps(
+    raw: Any,
+    table: FiniteGroupTable,
+    description: str,
+) -> tuple:
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{description} irreps must be a non-empty mapping.")
+    output = []
+    for irrep_name, irrep_raw in raw.items():
+        if not isinstance(irrep_raw, dict):
+            raise ValueError(f"Irrep {irrep_name!r} must be a mapping.")
+        dimension = _positive_int(irrep_raw.get("dimension"), f"irrep {irrep_name!r}.dimension")
+        characters_raw = irrep_raw.get("characters")
+        generators_raw = irrep_raw.get("generators")
+        matrices_raw = irrep_raw.get("matrices")
+        characters = (
+            None
+            if characters_raw is None
+            else _parse_character_mapping(characters_raw, f"irrep {irrep_name!r} characters")
+        )
+        generators = (
+            None
+            if generators_raw is None
+            else _parse_named_matrices(
+                generators_raw, dimension, f"irrep {irrep_name!r} generators"
+            )
+        )
+        matrices = (
+            None
+            if matrices_raw is None
+            else _parse_named_matrices(
+                matrices_raw, dimension, f"irrep {irrep_name!r} matrices"
+            )
+        )
+        output.append(
+            build_group_irrep(
+                table,
+                str(irrep_name),
+                dimension,
+                characters=characters,
+                generators=generators,
+                matrices=matrices,
+            )
+        )
+    return tuple(output)
+
+
+def _parse_named_matrices(raw: Any, dimension: int, description: str) -> dict[str, np.ndarray]:
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{description} must be a non-empty mapping.")
+    return {
+        str(operation_name): _complex_matrix(value, dimension, f"{description}.{operation_name}")
+        for operation_name, value in raw.items()
+    }
+
+
+def _load_legacy_symmetry(raw: dict[str, Any], filename: Path) -> SymmetryModel:
 
     dimension = _positive_int(raw.get("dimension"), "dimension")
     tolerance = float(raw.get("tolerance", 1e-8))
@@ -43,6 +294,16 @@ def load_symmetry(path: str | Path) -> SymmetryModel:
         operation = _parse_operation(operation_raw, dimension, default_name=f"g{index}")
         operations.append(operation)
     group = SpaceGroup(operations, tolerance)
+
+    targets, analysis, gauge = _parse_legacy_calculation_sections(raw, group, dimension)
+    return SymmetryModel(dimension, tolerance, group, targets, analysis, gauge, None)
+
+
+def _parse_legacy_calculation_sections(
+    raw: dict[str, Any],
+    group: SpaceGroup,
+    dimension: int,
+) -> tuple[tuple, RepresentationAnalysisSpec | None, SymmetryGaugeSpec | None]:
 
     targets_raw = raw.get("wannier_targets", [])
     if targets_raw is None:
@@ -67,7 +328,7 @@ def load_symmetry(path: str | Path) -> SymmetryModel:
     gauge = _parse_symmetry_gauge(raw.get("symmetry_gauge"))
     if gauge is not None and gauge.enabled and not targets:
         raise ValueError("symmetry_gauge requires at least one Wannier target.")
-    return SymmetryModel(dimension, tolerance, group, tuple(targets), analysis, gauge)
+    return tuple(targets), analysis, gauge
 
 
 def _parse_symmetry_gauge(raw: Any) -> SymmetryGaugeSpec | None:

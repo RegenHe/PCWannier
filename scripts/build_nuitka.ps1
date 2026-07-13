@@ -26,6 +26,7 @@ $nuitkaOptions = @(
     "--assume-yes-for-downloads",
     "--enable-plugin=matplotlib",
     "--include-package=pcwannier",
+    "--include-package-data=pcwannier.symmetries",
     "--output-dir=$OutDir",
     "--output-filename=$Name.exe"
 )

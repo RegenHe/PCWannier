@@ -6,7 +6,12 @@ import numpy as np
 import scipy.sparse
 import scipy.sparse.csgraph
 
-from ..data import BandResult
+from ..data import (
+    BandResult,
+    DegeneracySplittingDiagnostic,
+    HoppingReconstructionDiagnostics,
+    OutputSpectrumDiagnostics,
+)
 from .context import CalculationContext
 from .kspace import get_kxyz
 from .parallel import parallel_map
@@ -54,13 +59,124 @@ class TBAModel:
         k_cart = np.empty((k_count, dim), dtype=float)
         projected = np.empty((k_count, band_count, band_count), dtype=np.complex128)
         for pos, (i, j, k) in enumerate(state.k_indices()):
-            umat = self.ctx.state_coefficients_at(i, j, k)
+            umat = self.ctx.output_state_coefficients_at(i, j, k)
             energy = np.asarray(state.E[i, j, k], dtype=np.complex128)
             projected[pos] = np.conj(umat).T @ (energy[:, None] * umat)
             k_cart[pos] = get_kxyz(config, [i, j, k])[:dim]
         self._projected_k_cart = k_cart
         self._projected_hamiltonians = projected
         return k_cart, projected
+
+    def output_spectrum_diagnostics(self, symmetry_analysis=None) -> OutputSpectrumDiagnostics | None:
+        """Compare the output-basis Hamiltonian with isolated FEM eigenvalues."""
+        _, projected = self._projected_k_hamiltonians()
+        band_count = int(self.config.band_calc_num)
+        indices = tuple(self.state.k_indices())
+        if any(len(np.asarray(self.state.E[index]).reshape(-1)) != band_count for index in indices):
+            return None
+
+        raw = np.asarray(
+            [np.sort(np.real(np.asarray(self.state.E[index], dtype=np.complex128))) for index in indices]
+        )
+        output = np.linalg.eigvalsh(self._hermitian_batch(projected))
+        errors = np.max(np.abs(output - raw), axis=1)
+        worst = int(np.argmax(errors))
+        basis = (
+            self.config.symmetry_output_basis
+            if self.config.symmetry_constrained
+            else ("fem" if self.config.disable_orth else "strict")
+        )
+        return OutputSpectrumDiagnostics(
+            basis,
+            float(errors[worst]),
+            tuple(int(value) for value in indices[worst]),
+            self._degeneracy_splittings(projected, symmetry_analysis),
+        )
+
+    def hopping_reconstruction_diagnostics(
+        self,
+        hoppings: dict[tuple[int, int, int], np.ndarray],
+        symmetry_analysis=None,
+    ) -> HoppingReconstructionDiagnostics:
+        """Measure truncation error on the original sampled k mesh."""
+        k_cart, projected = self._projected_k_hamiltonians()
+        h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
+        neighbors = np.asarray(self.config.neighbor, dtype=int)
+        hop_array = np.asarray(
+            [hoppings[tuple((list(row) + [0, 0, 0])[:3])] for row in neighbors],
+            dtype=np.complex128,
+        )
+        reconstructed = self._h_of_k_factory(h0, neighbors, hop_array)(k_cart)
+        matrix_errors = np.linalg.norm(reconstructed - projected, axis=(1, 2))
+        direct_eigenvalues = np.linalg.eigvalsh(self._hermitian_batch(projected))
+        reconstructed_eigenvalues = np.linalg.eigvalsh(self._hermitian_batch(reconstructed))
+        eigenvalue_errors = np.max(np.abs(reconstructed_eigenvalues - direct_eigenvalues), axis=1)
+        worst = int(np.argmax(eigenvalue_errors))
+        indices = tuple(self.state.k_indices())
+        return HoppingReconstructionDiagnostics(
+            float(np.max(matrix_errors)),
+            float(eigenvalue_errors[worst]),
+            tuple(int(value) for value in indices[worst]),
+            self._degeneracy_splittings(
+                reconstructed,
+                symmetry_analysis,
+                reference_hamiltonians=projected,
+            ),
+        )
+
+    def _degeneracy_splittings(
+        self,
+        hamiltonians: np.ndarray,
+        symmetry_analysis,
+        *,
+        reference_hamiltonians: np.ndarray | None = None,
+    ) -> tuple[DegeneracySplittingDiagnostic, ...]:
+        if symmetry_analysis is None:
+            return ()
+        band_count = int(self.config.band_calc_num)
+        output = []
+        for point in symmetry_analysis.points:
+            state_index = tuple((list(point.k_index) + [0, 0, 0])[:3])
+            actual_bands = tuple(int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1))
+            if len(actual_bands) != band_count:
+                continue
+            raw_energies = np.real(np.asarray(self.state.E[state_index], dtype=np.complex128))
+            sorted_local = np.argsort(raw_energies)
+            rank_by_band = {actual_bands[local]: rank for rank, local in enumerate(sorted_local)}
+            flat = int(np.ravel_multi_index(state_index, self.state.k_shape))
+            output_energies = np.linalg.eigvalsh(self._hermitian_batch(hamiltonians[flat]))
+            for block in point.degenerate_blocks:
+                if len(block.band_indices) < 2 or any(band not in rank_by_band for band in block.band_indices):
+                    continue
+                ranks = [rank_by_band[band] for band in block.band_indices]
+                raw_values = np.asarray([raw_energies[actual_bands.index(band)] for band in block.band_indices])
+                output_values = output_energies[ranks]
+                if reference_hamiltonians is None:
+                    reference_values = raw_values
+                else:
+                    reference_eigenvalues = np.linalg.eigvalsh(
+                        self._hermitian_batch(reference_hamiltonians[flat])
+                    )
+                    reference_values = reference_eigenvalues[ranks]
+                scale = max(float(np.max(np.abs(raw_values))), 1.0)
+                tolerance = float(self.config.representation_degeneracy_absolute) + float(
+                    self.config.representation_degeneracy_relative
+                ) * scale
+                output.append(
+                    DegeneracySplittingDiagnostic(
+                        point.name,
+                        tuple(int(value) for value in block.band_indices),
+                        float(np.max(reference_values) - np.min(reference_values)),
+                        float(np.max(output_values) - np.min(output_values)),
+                        tolerance,
+                    )
+                )
+        return tuple(output)
+
+    @staticmethod
+    def _hermitian_batch(matrices: np.ndarray) -> np.ndarray:
+        array = np.asarray(matrices, dtype=np.complex128)
+        return 0.5 * (array + np.conjugate(np.swapaxes(array, -2, -1)))
 
     def collect_hoppings(self) -> dict[tuple[int, int, int], np.ndarray]:
         if not self.config.neighbor:

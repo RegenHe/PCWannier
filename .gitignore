@@ -93,7 +93,8 @@ dmypy.json
 *.jpeg
 *.svg
 
-/data/
+/datasets/
+/tmp/
 out/
 
 **/log.txt

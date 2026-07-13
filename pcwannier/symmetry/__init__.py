@@ -14,6 +14,7 @@ from .analysis import (
     cartesian_field_matrix,
     compare_representations,
     decompose_characters,
+    decompose_little_group_characters,
     group_degenerate_bands,
     intertwiner_residual,
     little_group,
@@ -65,7 +66,18 @@ from .disentanglement import (
     validate_frozen_window_covariance,
     validate_outer_window_closure,
 )
-from .io import load_symmetry
+from .definition import (
+    ResolvedLittleGroup,
+    StandardSubgroupDefinition,
+    SymmetryGroupDefinition,
+)
+from .io import (
+    PCWannierDeprecationWarning,
+    compose_symmetry_model,
+    load_symmetry,
+    load_symmetry_group,
+    resolve_symmetry_file,
+)
 from .localization import (
     SymmetryLocalizationIteration,
     SymmetryLocalizationResult,
@@ -86,6 +98,7 @@ from .representation import (
     build_site_irrep,
     build_symmetry_context,
     build_wannier_target,
+    build_wannier_target_from_group_irrep,
     combined_target_matrix,
 )
 from .specs import (
@@ -95,7 +108,10 @@ from .specs import (
     RepresentationAnalysisSpec,
     RepresentationPointSpec,
     SymmetryGaugeSpec,
+    SymmetryCalculationSpec,
+    WannierTargetSpec,
 )
+from .tables import AutomaticIrrepCharacter, ConjugacyClass, FiniteGroupTable, GroupIrrep
 from .stars import (
     SymmetryKStar,
     SymmetryStarMember,
@@ -112,6 +128,7 @@ __all__ = [
     "BarycentricStencil",
     "BlochSymmetryAction",
     "CrystallographicOrbit",
+    "ConjugacyClass",
     "DegeneracyTolerance",
     "DegenerateBlock",
     "FieldKind",
@@ -119,6 +136,9 @@ __all__ = [
     "HighSymmetryPointAnalysis",
     "IrrepCharacterSpec",
     "IrrepDecomposition",
+    "GroupIrrep",
+    "FiniteGroupTable",
+    "AutomaticIrrepCharacter",
     "IntertwinerSpace",
     "LittleGroupAnalysis",
     "LittleGroupElement",
@@ -132,6 +152,7 @@ __all__ = [
     "RepresentationAnalysisSpec",
     "RepresentationCompatibility",
     "RepresentationPointSpec",
+    "ResolvedLittleGroup",
     "RepresentativeGaugeDiagnostics",
     "SewingDiagnostics",
     "SewingMatrixProvider",
@@ -146,6 +167,8 @@ __all__ = [
     "StateBlochSymmetryProvider",
     "SymmetryAnalysisResult",
     "SymmetryContext",
+    "SymmetryCalculationSpec",
+    "SymmetryGroupDefinition",
     "SymmetryDisentanglementIteration",
     "SymmetryDisentanglementResult",
     "SymmetryGaugeResult",
@@ -159,6 +182,8 @@ __all__ = [
     "TargetGaugeProjection",
     "TargetGaugePropagation",
     "SymmetryModel",
+    "StandardSubgroupDefinition",
+    "WannierTargetSpec",
     "WannierTargetRepresentation",
     "WannierSymmetryEntry",
     "WannierSymmetryValidation",
@@ -170,12 +195,14 @@ __all__ = [
     "build_symmetry_context",
     "build_symmetry_stars",
     "build_wannier_target",
+    "build_wannier_target_from_group_irrep",
     "cartesian_field_matrix",
     "coefficient_metric_overlap",
     "compare_representations",
     "combined_target_matrix",
     "construct_symmetry_gauge",
     "decompose_characters",
+    "decompose_little_group_characters",
     "disentangle_symmetry_constrained",
     "evaluate_projector_symmetry",
     "fractional_mesh_vertices",
@@ -184,6 +211,10 @@ __all__ = [
     "little_group",
     "localize_symmetry_constrained",
     "load_symmetry",
+    "load_symmetry_group",
+    "compose_symmetry_model",
+    "resolve_symmetry_file",
+    "PCWannierDeprecationWarning",
     "outer_band_grid",
     "periodic_difference",
     "periodic_equivalent",

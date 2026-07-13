@@ -256,6 +256,35 @@ class TopologyResult:
     chern_bands: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DegeneracySplittingDiagnostic:
+    point_name: str
+    band_indices: tuple[int, ...]
+    reference_gap: float
+    output_gap: float
+    tolerance: float
+
+    @property
+    def broken(self) -> bool:
+        return self.reference_gap <= self.tolerance and self.output_gap > self.tolerance
+
+
+@dataclass(frozen=True)
+class OutputSpectrumDiagnostics:
+    basis: str
+    max_eigenvalue_drift: float
+    worst_k_index: tuple[int, int, int]
+    degeneracy_splittings: tuple[DegeneracySplittingDiagnostic, ...] = ()
+
+
+@dataclass(frozen=True)
+class HoppingReconstructionDiagnostics:
+    max_matrix_error: float
+    max_eigenvalue_error: float
+    worst_k_index: tuple[int, int, int]
+    degeneracy_splittings: tuple[DegeneracySplittingDiagnostic, ...] = ()
+
+
 @dataclass
 class RunResult:
     config: IncarConfig
@@ -281,3 +310,5 @@ class RunResult:
     symmetry_gauge: SymmetryGaugeResult | None = None
     symmetry_localization: SymmetryLocalizationResult | None = None
     symmetry_disentanglement: SymmetryDisentanglementResult | None = None
+    output_spectrum_diagnostics: OutputSpectrumDiagnostics | None = None
+    hopping_reconstruction_diagnostics: HoppingReconstructionDiagnostics | None = None

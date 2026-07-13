@@ -136,6 +136,7 @@ def validate_wannier_symmetry(
     zero_cell_wanniers: np.ndarray | None = None,
     tolerance: float = 1.0e-6,
     minimum_retained_norm: float = 0.99,
+    enforce_residual: bool = True,
 ) -> WannierSymmetryValidation:
     """Validate the induced real-space Wannier transformation on a 2D scalar FEM mesh."""
     if ctx.symmetry_gauge is None:
@@ -254,7 +255,7 @@ def validate_wannier_symmetry(
             f"Wannier symmetry validation retained only {retained:.6g} of the norm; "
             f"required {minimum_retained_norm:.6g}. Increase extension."
         )
-    if max_residual > tolerance:
+    if enforce_residual and max_residual > tolerance:
         raise RuntimeError(
             f"Real-space Wannier symmetry residual {max_residual:.6g} exceeds {tolerance:.6g}."
         )
@@ -271,4 +272,3 @@ def _field_norm(view, epsilon, field, state) -> float:
         mode=state.integration_mode,
     )
     return float(validated_real(np.atleast_1d(value), "Wannier symmetry norm")[0])
-

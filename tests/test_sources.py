@@ -22,21 +22,23 @@ from pcwannier.sources.comsol import (
 )
 
 
+@pytest.mark.requires_dataset
 def test_comsol_data_shapes():
-    cfg = load_config("data/incar")
+    cfg = load_config("datasets/c4v/incar")
     mesh = load_comsol_mesh(str(cfg.input_path(cfg.mesh_file)))
     ez = load_comsol_data(str(cfg.input_path(cfg.dataset_file)))
     energy = load_comsol_data(str(cfg.input_path(cfg.E_file)))
     eps = load_comsol_data(str(cfg.input_path(cfg.dielectric_file)), real_only=True)
 
-    assert mesh.vertices.shape == (1329, 2)
-    assert mesh.elements.shape == (2516, 3)
-    assert ez.value_matrix.shape[0] == 1329
+    assert mesh.vertices.shape == (397, 2)
+    assert mesh.elements.shape == (728, 3)
+    assert ez.value_matrix.shape[0] == 397
     assert energy.value_matrix.shape[0] == 1
     assert ez.value_matrix.shape[1] == energy.value_matrix.shape[1]
     assert ez.value_matrix.shape[1] % np.prod([len(axis) for axis in cfg.k_points]) == 0
-    assert np.unique(ez.column_parameters["k1"]).size == 16
-    assert np.unique(ez.column_parameters["k2"]).size == 16
+    assert np.unique(ez.column_parameters["k1"]).size == 10
+    assert np.unique(ez.column_parameters["k2"]).size == 10
+    assert eps.point_matrix.shape[0] == 429
     assert eps.value_matrix.shape[1] == 1
     assert not np.iscomplexobj(eps.value_matrix)
 
@@ -66,8 +68,9 @@ def test_comsol_real_only_reader_accepts_complex_tokens(tmp_path):
     assert np.allclose(raw.value_matrix[0], [23.57556147941945, 4.0])
 
 
+@pytest.mark.requires_dataset
 def test_comsol_header_k_grid_mismatch_is_rejected():
-    cfg = load_config("data/incar")
+    cfg = load_config("datasets/c4v/incar")
     raw = load_comsol_data(cfg.input_path(cfg.dataset_file))
     cfg.k_points[0] = cfg.k_points[0][::2]
 
@@ -117,19 +120,21 @@ def test_comsol_header_requires_complete_band_parameter(tmp_path):
         _validate_header_k_grid(cfg, raw, tmp_path / "E.txt")
 
 
+@pytest.mark.requires_dataset
 def test_load_input_bundle_distribution():
-    bundle = load_input(load_config("data/incar"))
+    bundle = load_input(load_config("datasets/c4v/incar"))
 
-    assert bundle.fields.shape == (16, 16, 1)
-    assert len(bundle.fields[0, 0, 0]) == 4
-    assert bundle.fields[0, 0, 0].shape == (4, 1329)
-    assert bundle.fields[0, 0, 0][0].shape == (1329,)
-    assert bundle.epsilon.shape == (1329,)
-    assert np.array_equal(bundle.band_indices[0, 0, 0], [0, 1, 2, 3])
-    assert np.asarray(bundle.energies[0, 0, 0]).shape == (4,)
-    assert np.count_nonzero(np.isclose(bundle.epsilon, 8.0)) == 159
+    assert bundle.fields.shape == (10, 10, 1)
+    assert len(bundle.fields[0, 0, 0]) == 3
+    assert bundle.fields[0, 0, 0].shape == (3, 397)
+    assert bundle.fields[0, 0, 0][0].shape == (397,)
+    assert bundle.epsilon.shape == (397,)
+    assert np.array_equal(bundle.band_indices[0, 0, 0], [0, 1, 2])
+    assert np.asarray(bundle.energies[0, 0, 0]).shape == (3,)
+    assert np.allclose(np.unique(np.round(bundle.epsilon, 8)), [1.0, 6.3, 11.6])
 
 
+@pytest.mark.requires_dataset
 def test_match_data_to_mesh_and_integral_formula():
     vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     elements = np.array([[0, 1, 2], [1, 3, 2]])
@@ -144,12 +149,12 @@ def test_match_data_to_mesh_and_integral_formula():
         numba_result = integrate_over_mesh(FieldData("test", mesh, values), backend="numba")
         assert np.isclose(numba_result, result)
 
-    cfg = load_config("data/incar")
+    cfg = load_config("datasets/c4v/incar")
     raw = load_comsol_data(str(cfg.input_path(cfg.dataset_file)))
     idxs, dists = match_data_to_mesh(load_comsol_mesh(str(cfg.input_path(cfg.mesh_file))), raw)
-    assert len(idxs) == 1329
+    assert len(idxs) == 397
     assert np.all(dists == 0.0)
-    assert np.unique(idxs).size == 1329
+    assert np.unique(idxs).size == 397
 
 
 def test_values_on_mesh_averages_duplicate_rows_all_columns():
@@ -282,17 +287,18 @@ def test_mesh_extension_matches_legacy_incremental_algorithm():
         assert np.allclose(new_mesh.tri_weights, old_mesh.tri_weights)
 
 
+@pytest.mark.requires_dataset
 def test_data_mesh_extension_full_size():
-    cfg = load_config("data/incar")
+    cfg = load_config("datasets/c4v/incar")
     mesh = load_comsol_mesh(str(cfg.input_path(cfg.mesh_file)))
-    assert np.count_nonzero(mesh._boundary_vertex_mask(mesh.vertices.shape[0])) == 140
-    assert np.unique(mesh.edge).size == 299
+    assert np.count_nonzero(mesh._boundary_vertex_mask(mesh.vertices.shape[0])) == 64
+    assert np.unique(mesh.edge).size == 157
     base_weights = mesh.tri_weights.copy()
     mapping = mesh.extension(cfg.extension, cfg.real_lattice_vectors, float(cfg.lattice_const))
 
-    assert mesh.vertices.shape == (84881, 2)
-    assert mesh.elements.shape == (161024, 3)
-    assert mapping.shape == (84881,)
+    assert mesh.vertices.shape == (36721, 2)
+    assert mesh.elements.shape == (72800, 3)
+    assert mapping.shape == (36721,)
     assert np.allclose(mesh.tri_weights, np.tile(base_weights, np.prod(cfg.extension)), rtol=0.0, atol=1e-14)
 
     avec = np.asarray(cfg.real_lattice_vectors, dtype=float) * float(cfg.lattice_const)

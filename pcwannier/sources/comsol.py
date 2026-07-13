@@ -296,6 +296,7 @@ def load_input(config: IncarConfig) -> InputBundle:
         band_indices=band_indices,
         inner_band_indices=inner_band_indices,
         energy_matrix=energy_matrix,
+        symmetry=config.symmetry_context,
     )
 
 

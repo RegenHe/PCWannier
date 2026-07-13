@@ -77,6 +77,19 @@ def main(argv=None) -> int:
         config.band_calc_num,
         config.compute_backend,
     )
+    if config.symmetry_context is not None:
+        symmetry_model = config.symmetry_context.model
+        target_summary = ", ".join(
+            f"{target.name}:{target.wannier_dimension}" for target in symmetry_model.targets
+        ) or "none"
+        LOGGER.info(
+            "symmetry file=%s operations=%s targets=%s target_dimensions=%s constrained_localization=%s",
+            config.input_path(config.symmetry_file),
+            len(symmetry_model.group.operations),
+            len(symmetry_model.targets),
+            target_summary,
+            config.symmetry_constrained,
+        )
 
     if args.base:
         mesh_path = config.input_path(config.mesh_file)

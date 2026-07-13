@@ -11,11 +11,13 @@ from pcwannier.compute.state import StateCollection
 from pcwannier.data import InputBundle, Mesh
 from pcwannier.compute.tba import TBAModel
 from pcwannier.sources.comsol import load_input
+from pcwannier.symmetry import SpaceGroup, SpaceGroupOperation, SymmetryModel, build_symmetry_context
 
 
+@pytest.mark.requires_dataset
 def test_smoke_calculation_with_data_incar(tmp_path, caplog):
-    cfg = load_config("data/incar")
-    cfg.max_iter = 0
+    cfg = load_config("datasets/c4v/incar")
+    cfg.max_iter = 100
     cfg.k_num = [6, 6]
     cfg.hybrid_Wilson_loop = False
     cfg.Chern_number = False
@@ -28,13 +30,13 @@ def test_smoke_calculation_with_data_incar(tmp_path, caplog):
     cfg.U_file = "false"
     cfg.hopping_file = "false"
     cfg.wannier_file = "false"
-
     with caplog.at_level("INFO"):
-        result = run_calculation(load_input(cfg), threads=1)
+        bundle = load_input(cfg)
+        result = run_calculation(bundle, threads=1)
 
-    assert result.M0.shape == (16, 16, 1)
-    assert result.V.shape == (16, 16, 1)
-    assert result.U.shape == (16, 16, 1)
+    assert result.M0.shape == (10, 10, 1)
+    assert result.V.shape == (10, 10, 1)
+    assert result.U.shape == (10, 10, 1)
     assert result.wanniers[(0, 0)].shape[1] == cfg.band_calc_num
     assert result.wannier_norms.shape == (cfg.band_calc_num,)
     assert np.all(np.isfinite(np.real(result.wannier_norms)))
@@ -46,8 +48,46 @@ def test_smoke_calculation_with_data_incar(tmp_path, caplog):
     assert "omega_OD=" in caplog.text
     assert "omega_D=" in caplog.text
     assert "centers_rn=" in caplog.text
+    assert bundle.symmetry is cfg.symmetry_context
+    assert result.symmetry is cfg.symmetry_context
+    assert result.bloch_gauge.shape == (10, 10, 1)
+    assert result.symmetry_gauge is not None
+    assert len(result.symmetry_gauge.stars.stars) == 21
+    assert result.symmetry_gauge.residuals.max_residual < 1e-8
+    assert result.symmetry_gauge.residuals.max_path_consistency < 1e-8
+    assert result.symmetry_gauge.residuals.max_semiunitarity_error < 1e-8
+    assert result.symmetry_localization is not None
+    assert result.symmetry_localization.converged
+    assert result.symmetry_localization.iterations[-1].omega < result.symmetry_localization.iterations[0].omega
+    assert all(
+        step.max_intertwiner_residual < 1e-8
+        and step.max_path_consistency < 1e-8
+        and step.max_unitarity_error < 1e-8
+        for step in result.symmetry_localization.iterations
+    )
+    for index in np.ndindex(result.bloch_gauge.shape):
+        assert np.allclose(result.bloch_gauge[index], result.V[index] @ result.U[index])
+        assert np.allclose(result.symmetry_gauge.gauge[index], result.bloch_gauge[index])
+    validation = result.symmetry_gauge.real_space_validation
+    assert validation.max_residual < 1e-6
+    assert validation.minimum_retained_norm >= 0.99
+
+    decomposition = {
+        point.name: {
+            name: count
+            for name, count in point.physical_decomposition.multiplicities.items()
+            if count
+        }
+        for point in result.symmetry_analysis.points
+    }
+    assert decomposition == {
+        "Gamma": {"A1": 1, "E": 1},
+        "X": {"A1": 1, "B1": 1, "B2": 1},
+        "M": {"A1": 1, "E": 1},
+    }
 
 
+@pytest.mark.requires_dataset
 def test_thread_counts_are_numerically_consistent():
     results = [_run_small_calculation(threads) for threads in (1, 2, 4)]
     ref = results[0]
@@ -60,7 +100,18 @@ def test_thread_counts_are_numerically_consistent():
         assert np.allclose(result.band.energies, ref.band.energies, rtol=1e-10, atol=1e-10)
 
 
+@pytest.mark.requires_dataset
+def test_unconstrained_mode_bypasses_symmetry_gauge():
+    result = _run_small_calculation(1, symmetry_constrained=False)
+
+    assert result.symmetry is not None
+    assert result.symmetry_analysis is not None
+    assert result.symmetry_gauge is None
+    assert result.symmetry_localization is None
+
+
 @pytest.mark.skipif(not is_numba_available(), reason="numba is not installed")
+@pytest.mark.requires_dataset
 def test_python_and_numba_backends_are_numerically_consistent():
     python_result = _run_small_calculation(threads=1, backend="python")
     numba_result = _run_small_calculation(threads=1, backend="numba")
@@ -75,6 +126,21 @@ def test_python_and_numba_backends_are_numerically_consistent():
         assert np.allclose(numba_result.hoppings[key], hopping, rtol=1e-10, atol=1e-10)
     assert np.allclose(numba_result.wannier_norms, python_result.wannier_norms, rtol=1e-10, atol=1e-10)
     assert np.allclose(numba_result.band.energies, python_result.band.energies, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.requires_dataset
+def test_data_outer_window_runs_symmetry_constrained_disentanglement():
+    result = _run_small_calculation(
+        1,
+        outer_band_count=4,
+        disentangle_max_iter=1,
+    )
+
+    assert result.symmetry_disentanglement is not None
+    assert result.V[0, 0, 0].shape == (4, 3)
+    assert result.bloch_gauge[0, 0, 0].shape == (4, 3)
+    assert result.symmetry_disentanglement.diagnostics.max_projector_residual < 1e-8
+    assert result.symmetry_disentanglement.diagnostics.max_intertwiner_residual < 1e-8
 
 
 def test_even_kmesh_half_r_set_has_no_inverse_duplicates():
@@ -255,8 +321,19 @@ def test_inner_window_projection_is_not_overwritten_by_matc():
     assert np.array_equal(captured["V"], projected_v)
 
 
-def _run_small_calculation(threads: int, backend: str = "python"):
-    cfg = load_config("data/incar")
+def _run_small_calculation(
+    threads: int,
+    backend: str = "python",
+    *,
+    symmetry_constrained: bool = True,
+    outer_band_count: int | None = None,
+    disentangle_max_iter: int | None = None,
+):
+    cfg = load_config("datasets/c4v/incar")
+    cfg.symmetry_constrained = symmetry_constrained
+    if outer_band_count is not None:
+        cfg.band_window = np.arange(outer_band_count)
+    cfg.disentangle_max_iter = disentangle_max_iter
     cfg.max_iter = 0
     cfg.extension = [1, 1]
     cfg.k_num = [4, 4]

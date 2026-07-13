@@ -53,9 +53,8 @@ class TBAModel:
         k_count = state.get_k_num()
         k_cart = np.empty((k_count, dim), dtype=float)
         projected = np.empty((k_count, band_count, band_count), dtype=np.complex128)
-        transform = state.get_transform(True if config.disable_orth else False)
         for pos, (i, j, k) in enumerate(state.k_indices()):
-            umat = transform[i, j, k] @ self.ctx.initializer.matV[i, j, k] @ self.ctx.gradient.U[i, j, k]
+            umat = self.ctx.state_coefficients_at(i, j, k)
             energy = np.asarray(state.E[i, j, k], dtype=np.complex128)
             projected[pos] = np.conj(umat).T @ (energy[:, None] * umat)
             k_cart[pos] = get_kxyz(config, [i, j, k])[:dim]

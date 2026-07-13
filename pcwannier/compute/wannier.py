@@ -23,7 +23,6 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
     band_count = int(config.band_calc_num)
     nv = state.extention_mesh.vertices.shape[0]
     wsum = np.zeros((nv, band_count), dtype=np.complex128)
-    transform = state.get_transform(True if config.disable_orth else False)
     sign = -1 if config.dataset_type.lower() == "comsol" else 1
     for i, j, k in state.k_indices():
         phase_vec = state.get_extention_phase(i, j, k)
@@ -31,7 +30,7 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
         phase_scalar = np.exp(1j * (-(sign) * np.dot(k_vec, r_cart)))
         pvec = phase_vec * phase_scalar
         emat = state.get_extention_block(i, j, k).T
-        coeff = transform[i, j, k] @ ctx.initializer.matV[i, j, k] @ ctx.gradient.U[i, j, k]
+        coeff = ctx.state_coefficients_at(i, j, k)
         wsum += (emat @ coeff) * pvec[:, None]
     wsum /= np.sqrt(float(state.get_k_num()))
     norms = np.atleast_1d(

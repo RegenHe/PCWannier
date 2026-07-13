@@ -187,12 +187,21 @@ class StateCollection:
         return 0.5 * (smat + smat.conj().T)
 
     def turn_to_bloch(self) -> None:
+        """Convert stored full Bloch fields to periodic parts.
+
+        The historical method name is retained for compatibility. For COMSOL,
+        psi_k = exp(-i k.r) u_k, so multiplying by exp(+i k.r) stores u_k.
+        """
         if self.is_bloch:
             return
         for i, j, k in self.k_indices():
             phase = self.get_phase(i, j, k)
             self.fields[i, j, k] = self.get_block(i, j, k) * np.conj(phase)[None, :]
         self.is_bloch = True
+
+    @property
+    def stores_periodic_bloch_parts(self) -> bool:
+        return self.is_bloch
 
     def get_transform(self, zero: bool = False) -> np.ndarray:
         self.ensure_identity_transform()

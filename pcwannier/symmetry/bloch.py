@@ -1,0 +1,462 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from itertools import product
+from typing import TYPE_CHECKING
+
+import numpy as np
+from scipy.spatial import cKDTree
+
+from ..compute.integration import integrate_overlap_matrix
+from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
+from .specs import FieldKind
+
+if TYPE_CHECKING:
+    from ..compute.state import StateCollection
+    from .analysis import SewingMatrixRequest
+    from .representation import SymmetryContext
+
+
+def fractional_mesh_vertices(mesh, real_lattice_vectors, lattice_const: float) -> np.ndarray:
+    """Convert Cartesian mesh vertices to row-vector fractional coordinates."""
+    lattice = np.asarray(real_lattice_vectors, dtype=float)
+    dimension = lattice.shape[0]
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    if lattice.shape != (dimension, dimension) or vertices.shape[1] != dimension:
+        raise ValueError("Mesh and real-space lattice dimensions do not match.")
+    if not np.isfinite(lattice_const) or lattice_const <= 0.0:
+        raise ValueError("lattice_const must be positive and finite.")
+    return (vertices / float(lattice_const)) @ np.linalg.inv(lattice)
+
+
+@dataclass(frozen=True)
+class BarycentricStencil:
+    vertex_indices: np.ndarray
+    weights: np.ndarray
+
+    def apply(self, values: np.ndarray) -> np.ndarray:
+        array = np.asarray(values)
+        if array.ndim == 2:
+            return np.einsum(
+                "nvc,vc->nv",
+                array[:, self.vertex_indices],
+                self.weights,
+                optimize=True,
+            )
+        if array.ndim == 3:
+            return np.einsum(
+                "nvcd,vc->nvd",
+                array[:, self.vertex_indices, :],
+                self.weights,
+                optimize=True,
+            )
+        raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
+
+
+class PeriodicTriangleInterpolator:
+    """Linear interpolation on periodic copies of the original FEM triangles."""
+
+    def __init__(self, fractional_vertices, elements, *, tolerance: float = 1.0e-8):
+        vertices = np.asarray(fractional_vertices, dtype=float)
+        triangles = np.asarray(elements, dtype=np.intp)
+        if vertices.ndim != 2 or vertices.shape[1] != 2:
+            raise NotImplementedError("Periodic FEM symmetry interpolation currently supports 2D meshes.")
+        if triangles.ndim != 2 or triangles.shape[1] != 3:
+            raise ValueError("Symmetry interpolation requires triangular elements.")
+        self.vertices = vertices
+        self.elements = triangles
+        self.tolerance = float(tolerance)
+        canonical = np.mod(vertices, 1.0)
+        canonical[np.abs(canonical - 1.0) <= tolerance] = 0.0
+        self._node_tree = cKDTree(canonical, boxsize=1.0)
+        self._build_periodic_triangles()
+
+    def _build_periodic_triangles(self) -> None:
+        shifts = np.asarray(tuple(product((-1, 0, 1), repeat=2)), dtype=float)
+        base = self.vertices[self.elements]
+        tiled = (base[None, :, :, :] + shifts[:, None, None, :]).reshape(-1, 3, 2)
+        self._triangles = tiled
+        self._triangle_sources = np.tile(self.elements, (len(shifts), 1))
+        lower = np.min(tiled, axis=1)
+        upper = np.max(tiled, axis=1)
+        self._lower = lower
+        self._upper = upper
+
+        count = max(8, int(np.ceil(np.sqrt(tiled.shape[0]))))
+        self._grid_count = count
+        self._buckets: dict[tuple[int, int], list[int]] = {}
+        for triangle_index, (lo, hi) in enumerate(zip(lower, upper)):
+            cell_lo = np.floor(np.clip(lo, 0.0, 1.0 - np.finfo(float).eps) * count).astype(int)
+            cell_hi = np.floor(np.clip(hi, 0.0, 1.0 - np.finfo(float).eps) * count).astype(int)
+            if np.any(hi < -self.tolerance) or np.any(lo > 1.0 + self.tolerance):
+                continue
+            for ix in range(max(0, cell_lo[0]), min(count - 1, cell_hi[0]) + 1):
+                for iy in range(max(0, cell_lo[1]), min(count - 1, cell_hi[1]) + 1):
+                    self._buckets.setdefault((ix, iy), []).append(triangle_index)
+
+    def stencil(self, points) -> BarycentricStencil:
+        query = np.asarray(points, dtype=float)
+        if query.ndim != 2 or query.shape[1] != 2:
+            raise ValueError("Interpolation points must have shape (count, 2).")
+        query = np.asarray([reduce_fractional(point, self.tolerance).reduced for point in query])
+        indices = np.empty((len(query), 3), dtype=np.intp)
+        weights = np.empty((len(query), 3), dtype=float)
+
+        distances, nearest = self._node_tree.query(query, k=1, p=np.inf)
+        for point_index, point in enumerate(query):
+            if distances[point_index] <= self.tolerance:
+                node = int(nearest[point_index])
+                indices[point_index] = (node, node, node)
+                weights[point_index] = (1.0, 0.0, 0.0)
+                continue
+            cell = np.floor(np.clip(point, 0.0, 1.0 - np.finfo(float).eps) * self._grid_count).astype(int)
+            candidates = self._buckets.get((int(cell[0]), int(cell[1])), ())
+            found = self._find_triangle(point, candidates)
+            if found is None:
+                raise ValueError(
+                    "A symmetry-transformed point lies outside the periodic FEM mesh: "
+                    f"fractional coordinate {point.tolist()}."
+                )
+            triangle_index, barycentric = found
+            indices[point_index] = self._triangle_sources[triangle_index]
+            weights[point_index] = barycentric
+        return BarycentricStencil(indices, weights)
+
+    def _find_triangle(self, point: np.ndarray, candidates) -> tuple[int, np.ndarray] | None:
+        best = None
+        best_violation = np.inf
+        for triangle_index in candidates:
+            if np.any(point < self._lower[triangle_index] - self.tolerance) or np.any(
+                point > self._upper[triangle_index] + self.tolerance
+            ):
+                continue
+            triangle = self._triangles[triangle_index]
+            matrix = np.column_stack((triangle[1] - triangle[0], triangle[2] - triangle[0]))
+            determinant = float(np.linalg.det(matrix))
+            if abs(determinant) <= np.finfo(float).eps:
+                continue
+            uv = np.linalg.solve(matrix, point - triangle[0])
+            barycentric = np.array([1.0 - uv[0] - uv[1], uv[0], uv[1]])
+            violation = float(max(0.0, -np.min(barycentric), np.max(barycentric) - 1.0))
+            if violation <= self.tolerance and violation < best_violation:
+                best = (int(triangle_index), barycentric)
+                best_violation = violation
+        return best
+
+
+class BlochSymmetryAction:
+    def __init__(
+        self,
+        fractional_vertices,
+        elements,
+        real_lattice_vectors,
+        *,
+        bloch_sign: int = -1,
+        tolerance: float = 1.0e-8,
+    ):
+        if bloch_sign not in {-1, 1}:
+            raise ValueError("Bloch sign must be -1 or 1.")
+        self.fractional_vertices = np.asarray(fractional_vertices, dtype=float)
+        self.real_lattice_vectors = np.asarray(real_lattice_vectors, dtype=float)
+        self.bloch_sign = int(bloch_sign)
+        self.tolerance = float(tolerance)
+        self.interpolator = PeriodicTriangleInterpolator(
+            self.fractional_vertices, elements, tolerance=tolerance
+        )
+        self._stencils: dict[tuple[bytes, bytes], BarycentricStencil] = {}
+
+    def apply(
+        self,
+        values: np.ndarray,
+        operation: SpaceGroupOperation,
+        source_k_fractional,
+        field_kind: FieldKind,
+    ) -> np.ndarray:
+        source_k = np.asarray(source_k_fractional, dtype=float)
+        transformed_k = operation.act_reciprocal(source_k)
+        stencil = self._stencil(operation)
+        sampled = stencil.apply(values)
+        component_matrix = _cartesian_field_matrix(
+            operation, self.real_lattice_vectors, field_kind, self.tolerance
+        )
+        if field_kind == FieldKind.SCALAR:
+            transformed = sampled
+        else:
+            if sampled.ndim != 3 or sampled.shape[2] != operation.dimension:
+                raise ValueError(
+                    f"{field_kind.value} fields require {operation.dimension} Cartesian components."
+                )
+            transformed = np.einsum("ab,nvb->nva", component_matrix, sampled, optimize=True)
+        phase = np.exp(
+            -self.bloch_sign * 2j * np.pi * np.dot(transformed_k, operation.translation)
+        )
+        return phase * transformed
+
+    def _stencil(self, operation: SpaceGroupOperation) -> BarycentricStencil:
+        reduced_tau = reduce_fractional(operation.translation, self.tolerance).reduced
+        key = (operation.rotation.tobytes(), np.round(reduced_tau / self.tolerance).astype(np.int64).tobytes())
+        cached = self._stencils.get(key)
+        if cached is not None:
+            return cached
+        inverse_rotation = np.linalg.inv(operation.rotation)
+        preimages = (self.fractional_vertices - operation.translation) @ inverse_rotation.T
+        stencil = self.interpolator.stencil(preimages)
+        self._stencils[key] = stencil
+        return stencil
+
+
+def _cartesian_field_matrix(
+    operation: SpaceGroupOperation,
+    real_lattice_vectors,
+    field_kind: FieldKind,
+    tolerance: float,
+) -> np.ndarray:
+    # Kept local to avoid a bloch.py <-> analysis.py import cycle.
+    lattice = np.asarray(real_lattice_vectors, dtype=float)
+    rotation = lattice.T @ operation.rotation @ np.linalg.inv(lattice.T)
+    residual = float(np.linalg.norm(rotation.T @ rotation - np.eye(operation.dimension), ord="fro"))
+    if residual > tolerance:
+        raise ValueError(f"Fractional rotation is not a lattice isometry (residual={residual:.6g}).")
+    if field_kind == FieldKind.SCALAR:
+        return np.ones((1, 1), dtype=float)
+    if field_kind == FieldKind.ELECTRIC_POLAR_VECTOR:
+        return rotation
+    if field_kind == FieldKind.MAGNETIC_AXIAL_VECTOR:
+        return float(np.linalg.det(rotation)) * rotation
+    raise ValueError(f"Unsupported field kind: {field_kind!r}.")
+
+
+def coefficient_metric_overlap(left, right, metric) -> np.ndarray:
+    """Return C_left^dagger S C_right for coefficient-space states."""
+    left_array = np.asarray(left, dtype=np.complex128)
+    right_array = np.asarray(right, dtype=np.complex128)
+    metric_array = np.asarray(metric, dtype=np.complex128)
+    if left_array.ndim != 2 or right_array.ndim != 2 or metric_array.ndim != 2:
+        raise ValueError("Coefficient states and metric must be matrices.")
+    if metric_array.shape[0] != metric_array.shape[1]:
+        raise ValueError("Coefficient-space metric must be square.")
+    if left_array.shape[0] != metric_array.shape[0] or right_array.shape[0] != metric_array.shape[1]:
+        raise ValueError("Coefficient state dimensions do not match the metric.")
+    return left_array.conj().T @ metric_array @ right_array
+
+
+class StateBlochSymmetryProvider:
+    """Sewing matrices for internally orthonormalized periodic COMSOL states."""
+
+    def __init__(
+        self,
+        state: StateCollection,
+        context: SymmetryContext,
+        *,
+        field_kind: FieldKind = FieldKind.SCALAR,
+    ):
+        if not state.is_bloch:
+            raise ValueError("StateCollection must store periodic Bloch parts before symmetry analysis.")
+        if field_kind != FieldKind.SCALAR:
+            raise NotImplementedError(
+                "Automatic StateCollection sewing currently supports scalar COMSOL fields only."
+            )
+        self.state = state
+        self.context = context
+        self.field_kind = field_kind
+        self.dimension = context.model.dimension
+        self.bloch_sign = -1 if state.config.dataset_type.lower() == "comsol" else 1
+        shape = tuple(len(axis) for axis in context.k_points)
+        self._k_indices = tuple(np.ndindex(shape))
+        self._k_fractional_points = np.asarray(
+            [self._fractional_at(index) for index in self._k_indices], dtype=float
+        )
+        fractional = fractional_mesh_vertices(
+            state.mesh, state.config.real_lattice_vectors, state.config.lattice_const
+        )
+        self.fractional_vertices = fractional
+        self.action = BlochSymmetryAction(
+            fractional,
+            state.mesh.elements,
+            state.config.real_lattice_vectors,
+            bloch_sign=self.bloch_sign,
+            tolerance=context.model.tolerance,
+        )
+        self._sewing_cache: dict[tuple[object, ...], np.ndarray] = {}
+
+    def sewing_matrix(self, request: SewingMatrixRequest) -> np.ndarray:
+        cache_key = self._sewing_cache_key(request)
+        cached = self._sewing_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+        source_index, source_representative, source_shift = self._locate_k(request.source_k_fractional)
+        transformed_k = request.operation.act_reciprocal(request.source_k_fractional)
+        target_index, target_representative, target_shift = self._locate_k(transformed_k)
+        expected_target = np.asarray(request.target_k_fractional, dtype=float)
+        if np.max(np.abs(periodic_difference(target_representative, expected_target))) > self.context.model.tolerance:
+            raise ValueError("Sewing request target k does not match the transformed source k.")
+        requested_shift = np.asarray(request.reciprocal_lattice_shift, dtype=np.int64)
+        direct_shift = np.rint(transformed_k - target_representative).astype(np.int64)
+        if not np.array_equal(requested_shift, direct_shift):
+            raise ValueError(
+                f"Sewing reciprocal shift {requested_shift.tolist()} does not match "
+                f"Rk-k'={direct_shift.tolist()}."
+            )
+
+        source_bands = tuple(int(value) for value in request.band_indices)
+        target_bands = (
+            source_bands
+            if request.target_band_indices is None
+            else tuple(int(value) for value in request.target_band_indices)
+        )
+        source = self._orthonormal_block(source_index, source_bands)
+        if np.any(source_shift):
+            source = source * self._fiber_phase(source_shift)[None, :]
+        transformed = self.action.apply(source, request.operation, request.source_k_fractional, request.field_kind)
+        target = self._orthonormal_block(target_index, target_bands)
+        if np.any(target_shift):
+            target = target * self._fiber_phase(target_shift)[None, :]
+        matrix = integrate_overlap_matrix(
+            self.state.integral_view,
+            target,
+            transformed,
+            self.state.epsilon,
+            chunk_size=64,
+            backend=self.state.compute_backend,
+            mode=self.state.integration_mode,
+        )
+        self._sewing_cache[cache_key] = matrix.copy()
+        return matrix
+
+    def sewing_matrix_at(
+        self,
+        operation_index: int,
+        source_k_fractional,
+        band_indices,
+        *,
+        operation: SpaceGroupOperation | None = None,
+    ) -> np.ndarray:
+        """Canonicalize a source k point and evaluate its sewing matrix."""
+        source_index = self.find_k_index(source_k_fractional)
+        mapping = self.mapping(operation_index, source_index)
+        request = self.request_for_mapping(
+            mapping,
+            band_indices,
+            operation=operation,
+            source_k_fractional=source_k_fractional,
+        )
+        return self.sewing_matrix(request)
+
+    def sewing_matrix_for_mapping(self, mapping: SymmetryKMapping, band_indices) -> np.ndarray:
+        """Convenience API for a precomputed symmetry k mapping."""
+        return self.sewing_matrix(self.request_for_mapping(mapping, band_indices))
+
+    def sewing_matrix_between_mapping(
+        self,
+        mapping: SymmetryKMapping,
+        source_band_indices,
+        target_band_indices,
+    ) -> np.ndarray:
+        """Return the target-outer by source-outer sewing matrix."""
+        return self.sewing_matrix(
+            self.request_for_mapping(
+                mapping,
+                source_band_indices,
+                target_band_indices=target_band_indices,
+            )
+        )
+
+    def request_for_mapping(
+        self,
+        mapping: SymmetryKMapping,
+        band_indices,
+        *,
+        operation: SpaceGroupOperation | None = None,
+        source_k_fractional=None,
+        target_band_indices=None,
+    ) -> SewingMatrixRequest:
+        from .analysis import SewingMatrixRequest
+
+        operation = operation or self.context.model.group.operations[mapping.operation_index]
+        source_index = tuple(mapping.source_k_index)
+        target_index = tuple(mapping.target_k_index)
+        source_k = self._fractional_at(source_index) if source_k_fractional is None else np.asarray(source_k_fractional)
+        target_k = self._fractional_at(target_index)
+        transformed = operation.act_reciprocal(source_k)
+        shift = np.rint(transformed - target_k).astype(np.int64)
+        return SewingMatrixRequest(
+            operation_index=mapping.operation_index,
+            operation=operation,
+            source_k_fractional=np.asarray(source_k, dtype=float),
+            target_k_fractional=target_k,
+            reciprocal_lattice_shift=tuple(int(value) for value in shift),
+            band_indices=tuple(int(value) for value in band_indices),
+            field_kind=self.field_kind,
+            target_band_indices=(
+                None
+                if target_band_indices is None
+                else tuple(int(value) for value in target_band_indices)
+            ),
+        )
+
+    def mapping(self, operation_index: int, source_index) -> SymmetryKMapping:
+        source = tuple(int(value) for value in source_index)
+        shape = tuple(len(axis) for axis in self.context.k_points)
+        flat = int(np.ravel_multi_index(source, shape))
+        mapping = self.context.k_mappings[operation_index][flat]
+        if mapping.source_k_index != source:
+            raise RuntimeError("Symmetry k-mapping order is inconsistent with the k mesh.")
+        return mapping
+
+    def find_k_index(self, k_fractional) -> tuple[int, ...]:
+        return self._locate_k(k_fractional)[0]
+
+    def _locate_k(self, k_fractional) -> tuple[tuple[int, ...], np.ndarray, np.ndarray]:
+        point = np.asarray(k_fractional, dtype=float)
+        distances = np.max(np.abs(periodic_difference(self._k_fractional_points, point)), axis=1)
+        flat = int(np.argmin(distances))
+        if distances[flat] > self.context.model.tolerance:
+            raise ValueError(f"k point {point.tolist()} is not present in the configured symmetry k mesh.")
+        representative = self._k_fractional_points[flat]
+        shift_float = point - representative
+        shift = np.rint(shift_float).astype(np.int64)
+        if not np.allclose(shift_float, shift, rtol=0.0, atol=self.context.model.tolerance):
+            raise ValueError("Periodic k-point matching did not yield an integer reciprocal shift.")
+        return self._k_indices[flat], representative, shift
+
+    def _fractional_at(self, index) -> np.ndarray:
+        return np.asarray(
+            [self.context.k_points[axis][index[axis]] for axis in range(self.dimension)],
+            dtype=float,
+        )
+
+    def _state_index(self, index) -> tuple[int, int, int]:
+        values = list(index) + [0, 0, 0]
+        return int(values[0]), int(values[1]), int(values[2])
+
+    def _orthonormal_block(self, index, band_indices) -> np.ndarray:
+        state_index = self._state_index(index)
+        actual = tuple(int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1))
+        requested = tuple(int(value) for value in band_indices)
+        missing = sorted(set(requested) - set(actual))
+        if missing:
+            raise ValueError(f"Actual Bloch bands {missing} are missing at k index {tuple(index)}.")
+        local = [actual.index(band) for band in requested]
+        block = self.state.get_block(*state_index)
+        correction = np.asarray(self.state.get_transform()[state_index], dtype=np.complex128)
+        orthonormal = (block.T @ correction).T
+        return orthonormal[local]
+
+    def _fiber_phase(self, reciprocal_shift) -> np.ndarray:
+        shift = np.asarray(reciprocal_shift, dtype=float)
+        return np.exp(
+            -self.bloch_sign * 2j * np.pi * (self.fractional_vertices @ shift)
+        )
+
+    def _sewing_cache_key(self, request: SewingMatrixRequest) -> tuple[object, ...]:
+        tolerance = self.context.model.tolerance
+        source = tuple(np.rint(np.asarray(request.source_k_fractional) / tolerance).astype(np.int64))
+        translation = tuple(np.rint(request.operation.translation / tolerance).astype(np.int64))
+        return (
+            request.operation.rotation.tobytes(),
+            translation,
+            source,
+            request.band_indices,
+            request.target_band_indices,
+            request.field_kind.value,
+        )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import copy
 from itertools import product
 
@@ -9,6 +9,15 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from .config import IncarConfig
+
+if TYPE_CHECKING:
+    from .symmetry import (
+        SymmetryAnalysisResult,
+        SymmetryContext,
+        SymmetryDisentanglementResult,
+        SymmetryGaugeResult,
+        SymmetryLocalizationResult,
+    )
 
 
 class Mesh:
@@ -224,6 +233,7 @@ class InputBundle:
     band_indices: np.ndarray
     inner_band_indices: np.ndarray
     energy_matrix: np.ndarray
+    symmetry: SymmetryContext | None = None
 
 
 @dataclass
@@ -265,3 +275,9 @@ class RunResult:
     hoppings: dict[tuple[int, int, int], np.ndarray]
     band: BandResult | None
     topology: TopologyResult | None
+    bloch_gauge: np.ndarray | None = None
+    symmetry: SymmetryContext | None = None
+    symmetry_analysis: SymmetryAnalysisResult | None = None
+    symmetry_gauge: SymmetryGaugeResult | None = None
+    symmetry_localization: SymmetryLocalizationResult | None = None
+    symmetry_disentanglement: SymmetryDisentanglementResult | None = None

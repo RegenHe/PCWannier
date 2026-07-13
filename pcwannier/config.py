@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 import math
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .symmetry import SymmetryContext
 
 
 class EnergyWindow(NamedTuple):
@@ -32,6 +35,12 @@ class IncarConfig:
     E_is_real: bool = True
     compute_backend: str = "python"
     integration_mode: str = "nodal"
+    symmetry_file: str | bool = False
+    symmetry_constrained: bool = False
+    disentangle_max_iter: int | None = None
+    disentangle_err_diff: float | None = None
+    disentangle_mixing: float = 0.5
+    symmetry_context: SymmetryContext | None = field(default=None, init=False, repr=False)
 
     N_file: str = "./N.txt"
     U_file: str = "./U.txt"
@@ -81,7 +90,6 @@ class IncarConfig:
     hybrid_Wilson_loop: bool = False
     Chern_number: bool = False
 
-    symmetry: bool = False
     eff_k: list[float] | bool = False
     eff_order: int = 2
     eff_file: str = "./H_eff.txt"
@@ -115,8 +123,6 @@ class IncarConfig:
             raise NotImplementedError("Only COMSOL input is implemented in PCWannier v1.")
         if not self.hermitian:
             raise NotImplementedError("Non-Hermitian left/right fields are not implemented in PCWannier v1.")
-        if self.symmetry:
-            raise NotImplementedError("Symmetry adaptation is not implemented in PCWannier v1.")
         if self.finite is not False:
             raise NotImplementedError("Finite-system calculations are not implemented in PCWannier v1.")
         if self.eff_k is not False:
@@ -235,11 +241,48 @@ class IncarParser:
                     raise ValueError(
                         "The w_center input has been removed because forcing Wannier centers is not a physical operation."
                     )
+                if key == "symmetry":
+                    raise ValueError("The boolean symmetry input has been removed; use symmetry_file = ./sym.yaml.")
                 setattr(cfg, key, self.parse_value(key, value))
 
         preprocess_config(cfg)
         cfg.validate_required()
         cfg.validate_runtime_scope()
+        if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
+            from .symmetry import FieldKind, build_symmetry_context, cartesian_field_matrix, load_symmetry
+
+            symmetry_path = cfg.input_path(cfg.symmetry_file)
+            if symmetry_path is None:
+                raise ValueError("symmetry_file is enabled but no path was supplied.")
+            model = load_symmetry(symmetry_path)
+            if model.dimension != cfg.kdim:
+                raise ValueError(
+                    f"Symmetry dimension {model.dimension} does not match incar kdim={cfg.kdim}."
+                )
+            for operation in model.group.operations:
+                cartesian_field_matrix(
+                    operation,
+                    cfg.real_lattice_vectors,
+                    FieldKind.ELECTRIC_POLAR_VECTOR,
+                    model.tolerance,
+                )
+            target_dimension = sum(target.wannier_dimension for target in model.targets)
+            if model.targets and target_dimension != cfg.band_calc_num:
+                raise ValueError(
+                    f"Symmetry Wannier targets define {target_dimension} functions, but incar projections "
+                    f"define band_calc_num={cfg.band_calc_num}."
+                )
+            cfg.symmetry_context = build_symmetry_context(model, cfg.k_points)
+        if cfg.symmetry_constrained:
+            if cfg.symmetry_context is None:
+                raise ValueError("symmetry_constrained=true requires symmetry_file = ./sym.yaml.")
+            gauge = cfg.symmetry_context.model.symmetry_gauge
+            if gauge is None or not gauge.enabled:
+                raise ValueError(
+                    "symmetry_constrained=true requires symmetry_gauge.enabled=true in the sym file."
+                )
+            if not cfg.symmetry_context.model.targets:
+                raise ValueError("symmetry_constrained=true requires at least one Wannier target.")
         return cfg
 
     def parse_value(self, key: str, value: str):
@@ -249,6 +292,7 @@ class IncarParser:
             "dataset_type",
             "compute_backend",
             "integration_mode",
+            "symmetry_file",
             "dataset_file",
             "left_dataset_file",
             "dielectric_file",
@@ -277,9 +321,9 @@ class IncarParser:
         }
         if key in string_keys:
             return value
-        if key in {"epsilon", "err_diff", "DOS_eps", "finite_DOS_eps"}:
+        if key in {"epsilon", "err_diff", "disentangle_err_diff", "disentangle_mixing", "DOS_eps", "finite_DOS_eps"}:
             return float(evaluate_math_expression(value))
-        if key in {"max_iter", "DOS", "DOS_num", "eff_order", "finite_layer_num"}:
+        if key in {"max_iter", "disentangle_max_iter", "DOS", "DOS_num", "eff_order", "finite_layer_num"}:
             return int(evaluate_math_expression(value))
         if key == "finite_DOS_num":
             return False if value.lower() == "false" else int(evaluate_math_expression(value))
@@ -335,12 +379,12 @@ class IncarParser:
             "proj_iter",
             "hybrid_Wilson_loop",
             "Chern_number",
-            "symmetry",
             "decompose",
             "disable_orth",
             "proj_binarize",
             "v_proj",
             "E_is_real",
+            "symmetry_constrained",
         }:
             return value.lower() == "true"
         if key == "neighbor":
@@ -515,6 +559,14 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
 
     if cfg.integration_mode not in {"nodal", "quadratic"}:
         raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
+    if cfg.disentangle_max_iter is not None and cfg.disentangle_max_iter < 0:
+        raise ValueError("disentangle_max_iter must be non-negative.")
+    if cfg.disentangle_err_diff is not None and (
+        not np.isfinite(cfg.disentangle_err_diff) or cfg.disentangle_err_diff < 0.0
+    ):
+        raise ValueError("disentangle_err_diff must be finite and non-negative.")
+    if not np.isfinite(cfg.disentangle_mixing) or not 0.0 < cfg.disentangle_mixing <= 1.0:
+        raise ValueError("disentangle_mixing must lie in (0, 1].")
 
     if cfg.projections is not None:
         cfg.band_calc_num = sum(len(p["states"]) for p in cfg.projections)

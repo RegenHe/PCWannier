@@ -12,7 +12,7 @@ from pcwannier.sources.comsol import load_input
 
 def parse_args():
     parser = argparse.ArgumentParser(description="PCWannier benchmark helper")
-    parser.add_argument("-i", "--input", default="data/incar")
+    parser.add_argument("-i", "--input", default="datasets/c4v/incar")
     parser.add_argument("-t", "--threads", type=int, default=1)
     parser.add_argument("--backend", choices=("python", "numba", "auto"), default=None)
     parser.add_argument("--max-iter", type=int, default=None)

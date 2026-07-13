@@ -1,0 +1,45 @@
+dimension: 2
+tolerance: 1.0e-8
+
+symmetry_operations:
+  - name: E
+    rotation:
+      - [1, 0]
+      - [0, 1]
+    translation: [0.0, 0.0]
+
+  - name: C4
+    rotation:
+      - [0, -1]
+      - [1, 0]
+    translation: [0.0, 0.0]
+
+  - name: C2
+    rotation:
+      - [-1, 0]
+      - [0, -1]
+    translation: [0.0, 0.0]
+
+  - name: C4_inv
+    rotation:
+      - [0, 1]
+      - [-1, 0]
+    translation: [0.0, 0.0]
+
+wannier_targets:
+  - name: square_2c_A1
+    center: [0.5, 0.0]
+    site_irrep:
+      name: A1
+      dimension: 1
+      matrices:
+        identity:
+          - [1.0]
+        generators:
+          - operation:
+              rotation:
+                - [-1, 0]
+                - [0, -1]
+              translation: [1.0, 0.0]
+            matrix:
+              - [1.0]

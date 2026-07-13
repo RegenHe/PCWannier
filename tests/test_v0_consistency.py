@@ -19,6 +19,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.requires_dataset
 def test_v0_consistency_smoke_comparison(tmp_path):
     old_src = Path("..") / "old" / "PCWannier" / "src"
     if not old_src.exists():
@@ -27,7 +28,7 @@ def test_v0_consistency_smoke_comparison(tmp_path):
     work = tmp_path / "case"
     work.mkdir()
     for name in ["incar", "mesh.mphtxt", "Ez.txt", "eps.txt", "E.txt"]:
-        shutil.copy2(Path("data") / name, work / name)
+        shutil.copy2(Path("datasets/c4v") / name, work / name)
 
     incar = work / "incar"
     text = incar.read_text(encoding="utf-8")
@@ -40,6 +41,8 @@ def test_v0_consistency_smoke_comparison(tmp_path):
         "hybrid_Wilson_loop = true": "hybrid_Wilson_loop = false",
         "Chern_number = true": "Chern_number = false",
         "topo_output = ./topo/": "topo_output = false",
+        "symmetry_file = ../../symmetries/c4v.yaml": "symmetry_file = false",
+        "symmetry_constrained = true": "symmetry_constrained = false",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)

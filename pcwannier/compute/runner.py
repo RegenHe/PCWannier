@@ -2,8 +2,21 @@ from __future__ import annotations
 
 import logging
 import numpy as np
+from dataclasses import replace
 
 from ..data import InputBundle, RunResult
+from ..symmetry import (
+    StateBlochSymmetryProvider,
+    construct_symmetry_gauge,
+    disentangle_symmetry_constrained,
+    evaluate_symmetry_gauge,
+    localize_symmetry_constrained,
+    outer_band_grid,
+    run_symmetry_analysis,
+    validate_frozen_window_covariance,
+    validate_outer_window_closure,
+    validate_wannier_symmetry,
+)
 from ..timing import timed_step
 from .backend import resolve_backend
 from .context import CalculationContext
@@ -81,12 +94,180 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     mset = MSet(state, threads=threads)
     with timed_step("initialize M0", LOGGER):
         mset.init_M0()
+    symmetry_analysis = None
+    symmetry_provider = None
+    if bundle.symmetry is not None and (
+        bundle.symmetry.model.representation_analysis is not None
+        or config.symmetry_constrained
+    ):
+        symmetry_provider = StateBlochSymmetryProvider(state, bundle.symmetry)
+    if bundle.symmetry is not None and bundle.symmetry.model.representation_analysis is not None:
+        with timed_step("analyze Bloch symmetry representations", LOGGER):
+            symmetry_analysis = run_symmetry_analysis(
+                state, bundle.symmetry, provider=symmetry_provider
+            )
+        _log_symmetry_analysis(symmetry_analysis)
     initializer = StateInitializer(state, mset, threads=threads)
-    with timed_step("projection initialization", LOGGER, max_iter=config.max_iter, err_diff=config.err_diff):
-        initializer.iter(config.err_diff, config.max_iter)
+    if config.symmetry_constrained:
+        with timed_step("projection initialization", LOGGER):
+            initializer.prepare()
+    else:
+        with timed_step("projection initialization", LOGGER, max_iter=config.max_iter, err_diff=config.err_diff):
+            initializer.iter(config.err_diff, config.max_iter)
     gradient = Gradient(state, mset, threads=threads)
-    with timed_step("gradient optimization", LOGGER, max_iter=config.max_iter, epsilon=config.epsilon):
-        gradient.iter(config.err_diff, config.max_iter, config.epsilon)
+    symmetry_gauge = None
+    symmetry_localization = None
+    symmetry_disentanglement = None
+    gauge_spec = bundle.symmetry.model.symmetry_gauge if bundle.symmetry is not None else None
+    if config.symmetry_constrained:
+        if gauge_spec is None or not gauge_spec.enabled or bundle.symmetry is None:
+            raise ValueError(
+                "symmetry_constrained=true requires an enabled symmetry_gauge section in the sym file."
+            )
+        if "U" in config.use_cached_data:
+            raise ValueError(
+                "Cached gradient U is incompatible with symmetry-constrained localization; "
+                "use a cached V as the initial gauge instead."
+            )
+        _validate_symmetry_gauge_prerequisites(symmetry_analysis, gauge_spec.tolerance)
+        band_lengths = [len(state.E_idx[index]) for index in state.k_indices()]
+        target_dimension = int(config.band_calc_num)
+        if min(band_lengths) < target_dimension:
+            raise ValueError(
+                f"Outer window contains fewer than N_W={target_dimension} states at some k point."
+            )
+        entangled = any(length > target_dimension for length in band_lengths)
+        closure = None
+        bands_by_k = outer_band_grid(state)
+        if entangled:
+            with timed_step("validate symmetry outer window", LOGGER):
+                closure = validate_outer_window_closure(
+                    state,
+                    bundle.symmetry,
+                    symmetry_provider,
+                    tolerance=gauge_spec.tolerance,
+                )
+                validate_frozen_window_covariance(
+                    initializer,
+                    bundle.symmetry,
+                    symmetry_provider,
+                    bands_by_k,
+                    tolerance=gauge_spec.tolerance,
+                )
+            LOGGER.info(
+                "Outer-window symmetry: matrices=%s unitarity_max=%.6g leakage_max=%.6g composition=%.6g",
+                closure.matrix_count,
+                closure.max_unitarity_error,
+                closure.max_leakage,
+                closure.max_composition_residual,
+            )
+
+        disentangle_max_iter = (
+            config.max_iter
+            if config.disentangle_max_iter is None
+            else config.disentangle_max_iter
+        )
+        disentangle_err_diff = (
+            config.err_diff
+            if config.disentangle_err_diff is None
+            else config.disentangle_err_diff
+        )
+        identity_only = len(bundle.symmetry.model.group.operations) == 1
+        if entangled and identity_only:
+            with timed_step(
+                "identity-group disentanglement",
+                LOGGER,
+                max_iter=disentangle_max_iter,
+                err_diff=disentangle_err_diff,
+            ):
+                initializer.run_unconstrained_disentanglement(
+                    disentangle_err_diff, disentangle_max_iter
+                )
+                initializer.align_to_projection()
+        with timed_step("construct symmetry-adapted Bloch gauge", LOGGER):
+            symmetry_gauge = construct_symmetry_gauge(
+                state,
+                bundle.symmetry,
+                initializer.matV,
+                threads=threads,
+                tolerance=gauge_spec.tolerance,
+                max_iterations=gauge_spec.max_iterations,
+                svd_relative_tolerance=gauge_spec.svd_relative_tolerance,
+                provider=symmetry_provider,
+            )
+        if entangled:
+            run_iterations = 0 if identity_only else disentangle_max_iter
+            with timed_step(
+                "symmetry-constrained disentanglement",
+                LOGGER,
+                max_iter=run_iterations,
+                err_diff=disentangle_err_diff,
+                mixing=config.disentangle_mixing,
+            ):
+                symmetry_disentanglement = disentangle_symmetry_constrained(
+                    initializer,
+                    bundle.symmetry,
+                    symmetry_gauge,
+                    symmetry_provider,
+                    closure,
+                    err_diff=disentangle_err_diff,
+                    max_iter=run_iterations,
+                    mixing=config.disentangle_mixing,
+                    tolerance=gauge_spec.tolerance,
+                    projection_max_iterations=gauge_spec.max_iterations,
+                    svd_relative_tolerance=gauge_spec.svd_relative_tolerance,
+                )
+            initializer.matV = symmetry_disentanglement.optimal_frame
+            gauge_residuals = evaluate_symmetry_gauge(
+                state,
+                bundle.symmetry,
+                symmetry_provider,
+                initializer.matV,
+                symmetry_gauge.band_indices,
+                symmetry_disentanglement.diagnostics.max_path_consistency,
+                band_indices_by_k=symmetry_disentanglement.outer_band_indices,
+            )
+            symmetry_gauge = replace(
+                symmetry_gauge,
+                gauge=initializer.matV,
+                residuals=gauge_residuals,
+                band_indices_by_k=symmetry_disentanglement.outer_band_indices,
+            )
+            _log_symmetry_disentanglement(symmetry_disentanglement)
+        else:
+            initializer.matV = symmetry_gauge.gauge
+        mset.initial(initializer.matV)
+        with timed_step(
+            "symmetry-constrained gradient optimization",
+            LOGGER,
+            max_iter=config.max_iter,
+            epsilon=config.epsilon,
+        ):
+            symmetry_localization = localize_symmetry_constrained(
+                gradient,
+                state,
+                bundle.symmetry,
+                symmetry_gauge,
+                symmetry_provider,
+                err_diff=config.err_diff,
+                max_iter=config.max_iter,
+                epsilon=config.epsilon,
+                tolerance=gauge_spec.tolerance,
+                projection_max_iterations=gauge_spec.max_iterations,
+                svd_relative_tolerance=gauge_spec.svd_relative_tolerance,
+            )
+        symmetry_gauge = replace(
+            symmetry_gauge,
+            gauge=symmetry_localization.final_gauge,
+            residuals=symmetry_localization.residuals,
+        )
+        _log_symmetry_gauge(symmetry_gauge)
+        _log_symmetry_localization(symmetry_localization)
+        if config.disable_orth:
+            LOGGER.info("Symmetry-constrained output uses the internally orthonormalized Bloch basis")
+    else:
+        with timed_step("gradient optimization", LOGGER, max_iter=config.max_iter, epsilon=config.epsilon):
+            gradient.iter(config.err_diff, config.max_iter, config.epsilon)
     LOGGER.info(
         "Gradient result: omega=%s omega_I=%s omega_OD=%s omega_D=%s rn_shape=%s",
         float(np.sum(gradient.omega)),
@@ -96,7 +277,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         gradient.rn.shape,
     )
 
-    ctx = CalculationContext(config, state, mset, initializer, gradient)
+    ctx = CalculationContext(config, state, mset, initializer, gradient, symmetry_gauge)
     with timed_step("generate Wannier functions", LOGGER):
         r_key, wannier, norms = generate_wannier(ctx)
     LOGGER.info(
@@ -109,6 +290,23 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         float(np.max(np.abs(np.imag(norms)))),
         np.real_if_close(gradient.rn.T).tolist(),
     )
+    if symmetry_gauge is not None and gauge_spec.validate_wannier:
+        with timed_step("validate real-space Wannier symmetry", LOGGER):
+            validation = validate_wannier_symmetry(
+                ctx,
+                bundle.symmetry.model.targets,
+                zero_cell_wanniers=wannier,
+                tolerance=gauge_spec.real_space_tolerance,
+                minimum_retained_norm=gauge_spec.minimum_retained_norm,
+            )
+        symmetry_gauge = replace(symmetry_gauge, real_space_validation=validation)
+        ctx.symmetry_gauge = symmetry_gauge
+        LOGGER.info(
+            "Wannier symmetry: max_residual=%.6g mean_residual=%.6g minimum_retained_norm=%.6g",
+            validation.max_residual,
+            validation.mean_residual,
+            validation.minimum_retained_norm,
+        )
     tba = TBAModel(ctx, threads=threads)
     with timed_step("collect hopping matrices", LOGGER):
         hoppings = tba.collect_hoppings()
@@ -121,6 +319,9 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     with timed_step("calculate topology", LOGGER, enabled=band is not None):
         topology = calculate_topology(band, config) if band is not None else None
 
+    bloch_gauge = state.gen_matrix_on_kmesh(
+        lambda i, j, k: np.asarray(ctx.bloch_gauge_at(i, j, k), dtype=np.complex128).copy()
+    )
     return RunResult(
         config=config,
         mesh=state.mesh,
@@ -139,4 +340,114 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         hoppings=hoppings,
         band=band,
         topology=topology,
+        bloch_gauge=bloch_gauge,
+        symmetry=bundle.symmetry,
+        symmetry_analysis=symmetry_analysis,
+        symmetry_gauge=symmetry_gauge,
+        symmetry_localization=symmetry_localization,
+        symmetry_disentanglement=symmetry_disentanglement,
+    )
+
+
+def _log_symmetry_analysis(result) -> None:
+    for point in result.points:
+        blocks = [tuple(band + 1 for band in block.band_indices) for block in point.degenerate_blocks]
+        LOGGER.info(
+            "Symmetry point %s: k=%s bands(actual,1-based)=%s blocks=%s "
+            "unitarity=%.6g leakage=%.6g composition=%.6g characters=%s",
+            point.name,
+            point.sampled_k_fractional.tolist(),
+            tuple(band + 1 for band in point.band_indices),
+            blocks,
+            point.diagnostics.unitarity_error,
+            point.diagnostics.leakage,
+            point.diagnostics.max_composition_residual,
+            {name: complex(value) for name, value in point.characters.items()},
+        )
+        if point.physical_decomposition is not None:
+            LOGGER.info(
+                "Symmetry point %s irreps: physical=%s target=%s compatible=%s residuals=(%.6g, %.6g)",
+                point.name,
+                point.physical_decomposition.multiplicities,
+                point.target_decomposition.multiplicities if point.target_decomposition else {},
+                point.compatibility.compatible if point.compatibility else None,
+                point.physical_decomposition.max_residual,
+                point.target_decomposition.max_residual if point.target_decomposition else 0.0,
+            )
+
+
+def _validate_symmetry_gauge_prerequisites(analysis, tolerance: float) -> None:
+    if analysis is None:
+        return
+    for point in analysis.points:
+        if point.compatibility is not None and not point.compatibility.compatible:
+            raise RuntimeError(f"Target representation is incompatible at symmetry point {point.name}.")
+        if point.diagnostics.unitarity_error > tolerance:
+            raise RuntimeError(
+                f"Physical sewing space is not closed at {point.name}: "
+                f"unitarity residual={point.diagnostics.unitarity_error:.6g}."
+            )
+        if point.diagnostics.max_composition_residual > tolerance:
+            raise RuntimeError(
+                f"Sewing composition residual at {point.name} is "
+                f"{point.diagnostics.max_composition_residual:.6g}."
+            )
+
+
+def _log_symmetry_gauge(result) -> None:
+    LOGGER.info(
+        "Symmetry gauge: stars=%s max_residual=%.6g mean_residual=%.6g "
+        "path_residual=%.6g semiunitarity=%.6g",
+        len(result.stars.stars),
+        result.residuals.max_residual,
+        result.residuals.mean_residual,
+        result.residuals.max_path_consistency,
+        result.residuals.max_semiunitarity_error,
+    )
+    for diagnostic in result.representative_diagnostics:
+        if diagnostic.hom_dimension > 1 or diagnostic.target_commutant_dimension > 1:
+            LOGGER.info(
+                "Symmetry gauge representative %s: dim_Hom=%s residual_gauge_dimension=%s "
+                "iterations=%s residual=%.6g",
+                diagnostic.representative_index,
+                diagnostic.hom_dimension,
+                diagnostic.target_commutant_dimension,
+                diagnostic.iterations,
+                diagnostic.residual,
+            )
+
+
+def _log_symmetry_localization(result) -> None:
+    final = result.iterations[-1]
+    initial = result.iterations[0]
+    LOGGER.info(
+        "Symmetry localization: converged=%s iterations=%s omega_initial=%.12g omega_final=%.12g "
+        "gradient_norm=%.6g symmetry_max=%.6g symmetry_mean=%.6g unitarity=%.6g path=%.6g",
+        result.converged,
+        final.iteration,
+        initial.omega,
+        final.omega,
+        final.gradient_norm,
+        final.max_intertwiner_residual,
+        final.mean_intertwiner_residual,
+        final.max_unitarity_error,
+        final.max_path_consistency,
+    )
+
+
+def _log_symmetry_disentanglement(result) -> None:
+    final = result.iterations[-1]
+    LOGGER.info(
+        "Symmetry disentanglement: converged=%s iterations=%s omega_I=%.12g "
+        "projector_change=%.6g projector_symmetry=%.6g intertwiner=%.6g "
+        "orthonormality=%.6g frozen=%.6g path=%.6g",
+        result.converged,
+        final.iteration,
+        final.omega_i,
+        final.projector_change,
+        final.max_projector_symmetry_residual,
+        final.max_intertwiner_residual,
+        final.orthonormality_error,
+        final.frozen_window_residual,
+        final.path_consistency_residual,
     )

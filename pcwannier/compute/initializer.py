@@ -127,41 +127,55 @@ class StateInitializer:
         self.I_idx = self.state.gen_matrix_on_kmesh(lambda *_: None)
         self.O_idx = self.state.gen_matrix_on_kmesh(lambda *_: None)
         self.alpha = 0.5
+        self._prepared = False
+        self._has_cached_a = False
+        self._has_cached_v = False
 
     def iter(self, err_diff: float, max_iter: int) -> None:
-        has_cached_a = "A" in self.config.use_cached_data
-        has_cached_v = "V" in self.config.use_cached_data
-        if has_cached_a:
+        self.prepare()
+        min_len, max_len = self.get_min_max_len_idx(self.state.E_idx)
+        if min_len == self.config.band_calc_num == max_len or not self.config.proj_iter:
+            self.mset.initial(self.matV)
+            return
+        self.run_unconstrained_disentanglement(err_diff, max_iter)
+        self.align_to_projection()
+        self.mset.initial(self.matV)
+
+    def prepare(self) -> None:
+        """Load or construct the trial subspace without running Souza iterations."""
+        if getattr(self, "_prepared", False):
+            return
+        self._has_cached_a = "A" in self.config.use_cached_data
+        self._has_cached_v = "V" in self.config.use_cached_data
+        if self._has_cached_a:
             path = self.config.input_path(self.config.A_file)
             if path is None:
                 raise ValueError("A cache requested, but A_file is disabled.")
             self.matA = load_cell_matrix(path, self.state.k_shape)
             self._validate_cached_matrix("A", self.matA, require_semiunitary=False)
-        if has_cached_v:
+        if self._has_cached_v:
             path = self.config.input_path(self.config.V_file)
             if path is None:
                 raise ValueError("V cache requested, but V_file is disabled.")
             self.matV = load_cell_matrix(path, self.state.k_shape)
             self._validate_cached_matrix("V", self.matV, require_semiunitary=True)
 
-        if has_cached_a and not has_cached_v:
+        if self._has_cached_a and not self._has_cached_v:
             band_count = int(self.config.band_calc_num)
             for i, j, k in self.state.k_indices():
                 u, _, vh = np.linalg.svd(self.matA[i, j, k])
                 self.matC[i, j, k] = u @ np.eye(len(self.state.E_idx[i, j, k]), band_count) @ vh
             self.matV = self.matC.copy()
-        elif not has_cached_v:
+        elif not self._has_cached_v:
             self.projection()
             if self.config.inner_window is False:
                 self.matV = self.matC.copy()
 
-        if has_cached_a or has_cached_v:
+        if self._has_cached_a or self._has_cached_v:
             self.set_window_indices()
-        min_len, max_len = self.get_min_max_len_idx(self.state.E_idx)
-        if min_len == self.config.band_calc_num == max_len or not self.config.proj_iter:
-            self.mset.initial(self.matV)
-            return
+        self._prepared = True
 
+    def run_unconstrained_disentanglement(self, err_diff: float, max_iter: int) -> None:
         last_omega = np.inf
         omega = np.inf
         for idx in range(max_iter):
@@ -172,7 +186,9 @@ class StateInitializer:
             if abs(omega - last_omega) < err_diff:
                 break
             last_omega = omega
-        if has_cached_a or not has_cached_v:
+
+    def align_to_projection(self) -> None:
+        if self._has_cached_a or not self._has_cached_v:
             band_count = int(self.config.band_calc_num)
             for i, j, k in self.state.k_indices():
                 tmat = np.conj(self.matV[i, j, k]).T @ self.matA[i, j, k]
@@ -182,7 +198,6 @@ class StateInitializer:
                 self.V_projection()
         else:
             LOGGER.info("V-only cache: projection-gauge alignment skipped because A is unavailable")
-        self.mset.initial(self.matV)
 
     def projection(self) -> None:
         if self.state.extention_mesh is None or self.state.extention_epsilon is None:

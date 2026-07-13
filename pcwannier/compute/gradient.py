@@ -38,9 +38,7 @@ class Gradient:
         last_omega = np.inf
         err = np.inf
         if max_iter == 0:
-            self.mset.update(self.U)
-            self.update()
-            self.calc(is_update=False)
+            self.evaluate_current()
             return
         self.mset.update(self.U)
         for iteration in range(max_iter):
@@ -76,6 +74,12 @@ class Gradient:
         if err > err_diff:
             LOGGER.warning("Gradient iteration reached the limit with err=%s", err)
         self.update()
+
+    def evaluate_current(self) -> None:
+        """Evaluate spread diagnostics without changing the current gauge."""
+        self.mset.update(self.U)
+        self.update()
+        self.calc(is_update=False)
 
     def calc(self, is_update: bool = True) -> None:
         band_count = int(self.config.band_calc_num)

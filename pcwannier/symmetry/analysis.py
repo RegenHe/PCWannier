@@ -9,7 +9,6 @@ from .group import SpaceGroup, SpaceGroupOperation
 from .specs import (
     DegeneracyTolerance,
     FieldKind,
-    IrrepCharacterSpec,
     RepresentationPointSpec,
 )
 
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
     from ..compute.state import StateCollection
     from .bloch import StateBlochSymmetryProvider
     from .representation import SymmetryContext, WannierTargetRepresentation
-    from .definition import ResolvedLittleGroup
+    from .definition import FactorSystem, ResolvedLittleGroup
 
 
 def cartesian_field_matrix(
@@ -151,6 +150,8 @@ class HighSymmetryPointAnalysis:
     compatibility: RepresentationCompatibility | None
     little_group_name: str | None = None
     conjugacy_classes: tuple[tuple[str, ...], ...] = ()
+    finite_group_mapping: tuple[tuple[str, str], ...] = ()
+    factor_system: FactorSystem | None = None
 
 
 @dataclass(frozen=True)
@@ -226,59 +227,6 @@ def group_degenerate_bands(
     return tuple(tuple(block) for block in blocks)
 
 
-def decompose_characters(
-    group: SpaceGroup,
-    operation_indices,
-    physical_characters: dict[str, complex],
-    irreps: tuple[IrrepCharacterSpec, ...],
-    conjugacy_classes: dict[str, tuple[str, ...]] | None = None,
-) -> IrrepDecomposition:
-    indices = tuple(int(index) for index in operation_indices)
-    names = tuple(_operation_name(group, index) for index in indices)
-    if set(physical_characters) != set(names):
-        raise ValueError("Physical characters must contain every little-group operation exactly once.")
-    classes = conjugacy_classes or {}
-    if classes:
-        _validate_conjugacy_classes(group, indices, classes)
-        physical_by_key = {
-            class_name: sum(physical_characters[name] for name in members) / len(members)
-            for class_name, members in classes.items()
-        }
-        class_residuals = {
-            class_name: max(
-                (abs(physical_characters[name] - physical_by_key[class_name]) for name in members),
-                default=0.0,
-            )
-            for class_name, members in classes.items()
-        }
-        weights = {name: len(members) for name, members in classes.items()}
-    else:
-        physical_by_key = physical_characters
-        class_residuals = {}
-        weights = {name: 1 for name in names}
-
-    raw: dict[str, complex] = {}
-    rounded: dict[str, int] = {}
-    residuals: dict[str, float] = {}
-    order = len(indices)
-    for irrep in irreps:
-        table = irrep.class_characters if classes else irrep.characters
-        if set(table) != set(physical_by_key):
-            raise ValueError(
-                f"Character table for irrep {irrep.name!r} does not match the configured "
-                f"{'classes' if classes else 'little-group elements'}."
-            )
-        multiplicity = sum(
-            weights[key] * np.conj(table[key]) * physical_by_key[key]
-            for key in physical_by_key
-        ) / order
-        nearest = int(np.rint(multiplicity.real))
-        raw[irrep.name] = complex(multiplicity)
-        rounded[irrep.name] = nearest
-        residuals[irrep.name] = float(abs(multiplicity - nearest))
-    return IrrepDecomposition(raw, rounded, residuals, class_residuals)
-
-
 def decompose_little_group_characters(
     little_group_definition: ResolvedLittleGroup,
     physical_characters: dict[str, complex],
@@ -288,10 +236,15 @@ def decompose_little_group_characters(
     if set(physical_characters) != set(names):
         raise ValueError("Physical characters must contain every little-group operation exactly once.")
     physical_values = np.asarray([physical_characters[name] for name in names], dtype=np.complex128)
+    cochain = little_group_definition.factor_system.trivializing_cochain
+    if cochain is None:
+        little_group_definition.require_irreps()
+        raise AssertionError("unreachable")
+    physical_values = cochain * physical_values
     raw: dict[str, complex] = {}
     rounded: dict[str, int] = {}
     residuals: dict[str, float] = {}
-    for irrep in little_group_definition.irreps:
+    for irrep in little_group_definition.require_irreps():
         character = np.asarray(irrep.characters, dtype=np.complex128)
         multiplicity = np.vdot(character, physical_values) / table.order
         nearest = int(np.rint(multiplicity.real))
@@ -301,9 +254,9 @@ def decompose_little_group_characters(
     class_residuals = {}
     for conjugacy_class in table.conjugacy_classes:
         class_names = tuple(
-            table.group.operations[index].name for index in conjugacy_class.operation_indices
+            table.element_names[index] for index in conjugacy_class.element_indices
         )
-        values = [physical_characters[str(name)] for name in class_names]
+        values = [physical_values[index] for index in conjugacy_class.element_indices]
         average = sum(values) / len(values)
         label = "{" + ",".join(str(name) for name in class_names) + "}"
         class_residuals[label] = max((abs(value - average) for value in values), default=0.0)
@@ -475,14 +428,6 @@ def _analyze_point(
             decomposition = decompose_little_group_characters(
                 resolved_little_group, block_characters
             )
-        elif point.irreps:
-            decomposition = decompose_characters(
-                group,
-                operation_indices,
-                block_characters,
-                point.irreps,
-                point.conjugacy_classes,
-            )
         else:
             decomposition = None
         block_results.append(
@@ -500,10 +445,6 @@ def _analyze_point(
         physical_decomposition = decompose_little_group_characters(
             resolved_little_group, characters
         )
-    elif point.irreps:
-        physical_decomposition = decompose_characters(
-            group, operation_indices, characters, point.irreps, point.conjugacy_classes
-        )
     else:
         physical_decomposition = None
     targets = _selected_targets(context, point)
@@ -511,14 +452,6 @@ def _analyze_point(
     if targets and resolved_little_group is not None:
         target_decomposition = decompose_little_group_characters(
             resolved_little_group, target_characters
-        )
-    elif targets and point.irreps:
-        target_decomposition = decompose_characters(
-            group,
-            operation_indices,
-            target_characters,
-            point.irreps,
-            point.conjugacy_classes,
         )
     else:
         target_decomposition = None
@@ -553,12 +486,26 @@ def _analyze_point(
             if resolved_little_group is None
             else tuple(
                 tuple(
-                    str(group.operations[index].name)
-                    for index in conjugacy_class.operation_indices
+                    resolved_little_group.table.element_names[index]
+                    for index in conjugacy_class.element_indices
                 )
                 for conjugacy_class in resolved_little_group.table.conjugacy_classes
             )
         ),
+        (
+            ()
+            if resolved_little_group is None
+            else tuple(
+                (
+                    resolved_little_group.table.element_names[actual],
+                    resolved_little_group.identification.canonical.table.element_names[canonical],
+                )
+                for actual, canonical in enumerate(
+                    resolved_little_group.identification.actual_to_canonical
+                )
+            )
+        ),
+        None if resolved_little_group is None else resolved_little_group.factor_system,
     )
 
 
@@ -627,29 +574,6 @@ def _selected_targets(
     if point.target_names is None:
         return ()
     return tuple(context.model.target(name) for name in point.target_names)
-
-
-def _validate_conjugacy_classes(
-    group: SpaceGroup,
-    operation_indices: tuple[int, ...],
-    classes: dict[str, tuple[str, ...]],
-) -> None:
-    names = {_operation_name(group, index) for index in operation_indices}
-    listed = [name for members in classes.values() for name in members]
-    if len(listed) != len(set(listed)) or set(listed) != names:
-        raise ValueError("Conjugacy classes must partition every little-group operation exactly once.")
-    index_set = set(operation_indices)
-    for class_name, members in classes.items():
-        member_indices = {group.operation_index(group.operation_by_name(name)) for name in members}
-        for member_index in member_indices:
-            member = group.operations[member_index]
-            for conjugator_index in operation_indices:
-                conjugator = group.operations[conjugator_index]
-                conjugate_index = group.operation_index(conjugator * member * conjugator.inverse())
-                if conjugate_index not in index_set or conjugate_index not in member_indices:
-                    raise ValueError(
-                        f"Configured class {class_name!r} is not closed under little-group conjugation."
-                    )
 
 
 def _validated_bands(band_indices) -> tuple[int, ...]:

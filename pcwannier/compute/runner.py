@@ -399,17 +399,21 @@ def _log_symmetry_analysis(result) -> None:
     for point in result.points:
         blocks = [tuple(band + 1 for band in block.band_indices) for block in point.degenerate_blocks]
         LOGGER.info(
-            "Symmetry point %s: little_group=%s classes=%s k=%s bands(actual,1-based)=%s blocks=%s "
-            "unitarity=%.6g leakage=%.6g composition=%.6g characters=%s",
+            "Symmetry point %s: little_group=%s classes=%s mapping=%s k=%s "
+            "bands(actual,1-based)=%s blocks=%s unitarity=%.6g leakage=%.6g "
+            "composition=%.6g factor_phase=%.6g factor_cocycle=%.6g characters=%s",
             point.name,
-            point.little_group_name or "legacy",
+            point.little_group_name or "unresolved",
             point.conjugacy_classes,
+            point.finite_group_mapping,
             point.sampled_k_fractional.tolist(),
             tuple(band + 1 for band in point.band_indices),
             blocks,
             point.diagnostics.unitarity_error,
             point.diagnostics.leakage,
             point.diagnostics.max_composition_residual,
+            point.factor_system.phase_residual if point.factor_system is not None else 0.0,
+            point.factor_system.cocycle_residual if point.factor_system is not None else 0.0,
             {name: complex(value) for name, value in point.characters.items()},
         )
         if point.physical_decomposition is not None:

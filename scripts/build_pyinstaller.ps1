@@ -32,7 +32,7 @@ $pyinstallerOptions = @(
     "--specpath", $workDir,
     "--collect-submodules", "scipy",
     "--collect-data", "matplotlib",
-    "--collect-data", "pcwannier.symmetries"
+    "--collect-data", "pcwannier.symmetry"
 )
 
 if ($OneFile) {

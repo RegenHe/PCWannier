@@ -1,0 +1,14 @@
+name: Cs
+dimension: 2
+elements:
+  - name: E
+    point_action: [[1, 0], [0, 1]]
+  - name: sigma
+    point_action: [[-1, 0], [0, 1]]
+irreps:
+  A_prime:
+    dimension: 1
+    characters: {E: 1, sigma: 1}
+  A_double_prime:
+    dimension: 1
+    characters: {E: 1, sigma: -1}

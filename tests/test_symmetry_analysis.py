@@ -12,7 +12,6 @@ from pcwannier.symmetry import (
     BlochSymmetryAction,
     DegeneracyTolerance,
     FieldKind,
-    IrrepCharacterSpec,
     IrrepDecomposition,
     SewingMatrixRequest,
     SpaceGroupOperation,
@@ -21,13 +20,14 @@ from pcwannier.symmetry import (
     build_symmetry_context,
     coefficient_metric_overlap,
     compare_representations,
-    decompose_characters,
+    decompose_little_group_characters,
     group_degenerate_bands,
     intertwiner_residual,
     little_group,
-    load_symmetry,
     run_symmetry_analysis,
 )
+
+from .symmetry_models import p4mm_model, square_2c_model
 
 
 def _square_mesh(points_per_axis: int = 5) -> Mesh:
@@ -122,7 +122,7 @@ def test_full_bloch_and_periodic_part_symmetry_formulas_agree():
 
 
 def test_state_provider_gives_a1_and_e_sewing_matrices():
-    model = load_symmetry("tests/data/square_c4v_analysis.sym.yaml")
+    model = square_2c_model()
     context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
     x = _square_mesh().vertices[:, 0]
     y = _square_mesh().vertices[:, 1]
@@ -164,7 +164,7 @@ def test_state_provider_gives_a1_and_e_sewing_matrices():
 
 
 def test_target_2c_a1_has_expected_gamma_x_m_content():
-    model = load_symmetry("tests/data/square_c4v_analysis.sym.yaml")
+    model = square_2c_model()
     target = model.target("square_2c_A1")
     expected = {
         "Gamma": {"A1": 1, "B1": 1},
@@ -178,36 +178,11 @@ def test_target_2c_a1_has_expected_gamma_x_m_content():
             model.group.operations[index].name: complex(np.trace(target.matrix(index, point.k_fractional)))
             for index in indices
         }
-        decomposition = decompose_characters(
-            model.group,
-            indices,
-            characters,
-            point.irreps,
-            point.conjugacy_classes,
-        )
+        resolved = model.group_definition.resolve_little_group(indices, point.k_fractional)
+        decomposition = decompose_little_group_characters(resolved, characters)
         nonzero = {name: value for name, value in decomposition.multiplicities.items() if value}
         assert nonzero == expected[point.name]
         assert decomposition.max_residual < 1e-12
-
-
-def test_element_character_table_decomposition():
-    model = load_symmetry("tests/data/square_c4.sym.yaml")
-    group = model.group
-    indices = tuple(range(len(group.operations)))
-    irreps = (
-        IrrepCharacterSpec(
-            "plus_i",
-            characters={"E": 1, "C4": 1j, "C2": -1, "C4_inv": -1j},
-        ),
-        IrrepCharacterSpec(
-            "minus_i",
-            characters={"E": 1, "C4": -1j, "C2": -1, "C4_inv": 1j},
-        ),
-    )
-    physical = {"E": 2, "C4": 0, "C2": -2, "C4_inv": 0}
-    decomposition = decompose_characters(group, indices, physical, irreps)
-    assert decomposition.multiplicities == {"plus_i": 1, "minus_i": 1}
-    assert decomposition.max_residual < 1e-12
 
 
 def test_degeneracy_metric_compatibility_and_intertwiner_helpers():
@@ -243,7 +218,7 @@ def test_nonclosed_subspace_reports_nonunitary_projection():
         def sewing_matrix(self, request: SewingMatrixRequest) -> np.ndarray:
             return matrix
 
-    model = load_symmetry("tests/data/square_c4.sym.yaml")
+    model = p4mm_model()
     result = analyze_little_group(model.group, [0.0, 0.0], [0], Provider())
     c4 = next(
         entry for entry in result.entries if model.group.operations[entry.element.operation_index].name == "C4"

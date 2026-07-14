@@ -1,0 +1,24 @@
+name: C2v
+dimension: 2
+elements:
+  - name: E
+    point_action: [[1, 0], [0, 1]]
+  - name: C2
+    point_action: [[-1, 0], [0, -1]]
+  - name: sigma_x
+    point_action: [[-1, 0], [0, 1]]
+  - name: sigma_y
+    point_action: [[1, 0], [0, -1]]
+irreps:
+  A1:
+    dimension: 1
+    characters: {E: 1, C2: 1, sigma_x: 1, sigma_y: 1}
+  A2:
+    dimension: 1
+    characters: {E: 1, C2: 1, sigma_x: -1, sigma_y: -1}
+  B1:
+    dimension: 1
+    characters: {E: 1, C2: -1, sigma_x: 1, sigma_y: -1}
+  B2:
+    dimension: 1
+    characters: {E: 1, C2: -1, sigma_x: -1, sigma_y: 1}

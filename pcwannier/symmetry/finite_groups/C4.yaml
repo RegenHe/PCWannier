@@ -1,0 +1,24 @@
+name: C4
+dimension: 2
+elements:
+  - name: E
+    point_action: [[1, 0], [0, 1]]
+  - name: C4
+    point_action: [[0, -1], [1, 0]]
+  - name: C2
+    point_action: [[-1, 0], [0, -1]]
+  - name: C4_inv
+    point_action: [[0, 1], [-1, 0]]
+irreps:
+  A:
+    dimension: 1
+    characters: {E: 1, C4: 1, C2: 1, C4_inv: 1}
+  B:
+    dimension: 1
+    characters: {E: 1, C4: -1, C2: 1, C4_inv: -1}
+  E_plus:
+    dimension: 1
+    characters: {E: 1, C4: i, C2: -1, C4_inv: -i}
+  E_minus:
+    dimension: 1
+    characters: {E: 1, C4: -i, C2: -1, C4_inv: i}

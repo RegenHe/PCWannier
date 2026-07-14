@@ -277,6 +277,7 @@ class OrbitPoint:
     index: int
     position: np.ndarray
     representative_operation_index: int
+    representative_operation: SpaceGroupOperation
 
 
 @dataclass(frozen=True)
@@ -338,11 +339,22 @@ def build_crystallographic_orbit(group: SpaceGroup, center) -> CrystallographicO
     order = (group.identity_index,) + tuple(idx for idx in range(len(group.operations)) if idx != group.identity_index)
     orbit_points: list[OrbitPoint] = []
     for operation_index in order:
-        image = group.operations[operation_index].act_real_reduced(center, group.tolerance).reduced
+        operation = group.operations[operation_index]
+        periodic_image = operation.act_real_reduced(center, group.tolerance)
+        image = periodic_image.reduced
         if any(periodic_equivalent(image, point.position, group.tolerance) for point in orbit_points):
             continue
+        representative = (
+            SpaceGroupOperation.lattice_translation(-periodic_image.lattice_shift) * operation
+        )
+        if not np.allclose(
+            representative.act_real(center), image, rtol=0.0, atol=group.tolerance
+        ):
+            raise FloatingPointError("Failed to construct an exact orbit representative.")
         image.setflags(write=False)
-        orbit_points.append(OrbitPoint(len(orbit_points), image, operation_index))
+        orbit_points.append(
+            OrbitPoint(len(orbit_points), image, operation_index, representative)
+        )
     if len(group.operations) != len(orbit_points) * len(site_elements):
         raise ValueError("Orbit-stabilizer relation failed for the supplied operation list and target center.")
 
@@ -367,8 +379,8 @@ def build_crystallographic_orbit(group: SpaceGroup, center) -> CrystallographicO
                 group.tolerance,
                 description="Orbit lattice shift",
             )
-            g_source = group.operations[source.representative_operation_index]
-            g_target = group.operations[target.representative_operation_index]
+            g_source = source.representative_operation
+            g_target = target.representative_operation
             translation = SpaceGroupOperation.lattice_translation(-lattice_shift)
             site_operation = g_target.inverse() * translation * operation * g_source
             site_index = site_group.element_index(site_operation)

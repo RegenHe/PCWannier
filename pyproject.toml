@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcwannier"
-version = "1.0.2"
+version = "1.0.3"
 requires-python = ">=3.10"
 dependencies = [
   "matplotlib>=3.10",
@@ -28,4 +28,4 @@ pcwannier = "pcwannier.cli:main"
 include = ["pcwannier*"]
 
 [tool.setuptools.package-data]
-"pcwannier.symmetries" = ["*.yaml"]
+"pcwannier.symmetry" = ["space_groups/*.yaml", "finite_groups/*.yaml"]

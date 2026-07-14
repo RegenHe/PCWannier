@@ -29,19 +29,6 @@ class DegeneracyTolerance:
 
 
 @dataclass(frozen=True)
-class IrrepCharacterSpec:
-    name: str
-    characters: dict[str, complex] = field(default_factory=dict)
-    class_characters: dict[str, complex] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if bool(self.characters) == bool(self.class_characters):
-            raise ValueError(
-                f"Irrep {self.name!r} must define exactly one of characters or class_characters."
-            )
-
-
-@dataclass(frozen=True)
 class WannierTargetSpec:
     name: str
     center: np.ndarray
@@ -65,8 +52,6 @@ class RepresentationPointSpec:
     band_indices: tuple[int, ...] | None = None
     target_names: tuple[str, ...] | None = None
     degeneracy_tolerance: DegeneracyTolerance = field(default_factory=DegeneracyTolerance)
-    conjugacy_classes: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    irreps: tuple[IrrepCharacterSpec, ...] = ()
 
     def __post_init__(self) -> None:
         kpoint = np.asarray(self.k_fractional, dtype=float)

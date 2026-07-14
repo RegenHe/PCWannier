@@ -8,10 +8,11 @@ from pcwannier.symmetry import (
     build_symmetry_stars,
     combined_target_matrix,
     little_group,
-    load_symmetry,
     project_intertwiner,
     solve_intertwiner_space,
 )
+
+from .symmetry_models import square_2c_model
 
 
 def test_one_dimensional_intertwiner_is_identity():
@@ -72,7 +73,7 @@ def test_semiunitary_intertwiner_for_larger_physical_space():
 
 
 def test_c4v_ten_by_ten_mesh_has_twenty_one_stars():
-    model = load_symmetry("tests/data/square_c4v_analysis.sym.yaml")
+    model = square_2c_model()
     axis = np.arange(-0.5, 0.5, 0.1)
     context = build_symmetry_context(model, [axis, axis])
     partition = build_symmetry_stars(context)
@@ -84,7 +85,7 @@ def test_c4v_ten_by_ten_mesh_has_twenty_one_stars():
 
 
 def test_square_2c_target_has_direct_intertwiners_at_high_symmetry_points():
-    model = load_symmetry("tests/data/square_c4v_analysis.sym.yaml")
+    model = square_2c_model()
     target = model.target("square_2c_A1")
     rng = np.random.default_rng(321)
     raw = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))

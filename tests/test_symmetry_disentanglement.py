@@ -7,14 +7,18 @@ import pytest
 
 from pcwannier.symmetry import (
     OuterWindowClosureReport,
+    SpaceGroup,
+    SpaceGroupOperation,
+    WannierTargetSpec,
     build_symmetry_context,
     combined_target_matrix,
     construct_symmetry_gauge,
     disentangle_symmetry_constrained,
-    load_symmetry,
     validate_frozen_window_covariance,
     validate_outer_window_closure,
 )
+
+from .symmetry_models import model_from_space_group, square_2c_model
 
 
 def test_covariant_outer_subspace_is_preserved_with_changing_band_ids(tmp_path):
@@ -157,7 +161,7 @@ def test_compatible_frozen_subspace_is_retained_at_little_group_point(tmp_path):
 
 
 def test_square_2c_target_is_selected_from_four_dimensional_outer_space():
-    model = load_symmetry("tests/data/square_c4v_analysis.sym.yaml")
+    model = square_2c_model()
     context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
     state = _state(context, ((0, 1, 2, 3),))
 
@@ -255,58 +259,34 @@ class _SyntheticProvider:
 
 
 def _c2_context(tmp_path, *, target_character, axis=None):
-    path = tmp_path / "c2.sym.yaml"
-    path.write_text(
-        f"""
-dimension: 2
-tolerance: 1.0e-10
-symmetry_operations:
-  - name: E
-    rotation: [[1, 0], [0, 1]]
-    translation: [0.0, 0.0]
-  - name: C2
-    rotation: [[-1, 0], [0, -1]]
-    translation: [0.0, 0.0]
-wannier_targets:
-  - name: target
-    center: [0.0, 0.0]
-    site_irrep:
-      name: A
-      dimension: 1
-      matrices:
-        identity: [[1.0]]
-        generators:
-          - operation: C2
-            matrix: [[{target_character}]]
-""".strip(),
-        encoding="utf-8",
+    group = SpaceGroup(
+        (
+            SpaceGroupOperation(np.eye(2, dtype=int), np.zeros(2), "E"),
+            SpaceGroupOperation(-np.eye(2, dtype=int), np.zeros(2), "C2"),
+        ),
+        tolerance=1.0e-10,
     )
-    model = load_symmetry(path)
+    irrep_name = "A" if target_character == 1.0 else "B"
+    model = model_from_space_group(
+        "c2",
+        group,
+        targets=(WannierTargetSpec("target", [0.0, 0.0], irrep_name),),
+    )
     xaxis = np.array([-0.25, 0.25]) if axis is None else np.asarray(axis)
     return build_symmetry_context(model, [xaxis, np.array([0.0])])
 
 
 def _identity_context(tmp_path):
-    path = tmp_path / "identity.sym.yaml"
-    path.write_text(
-        """
-dimension: 2
-symmetry_operations:
-  - name: E
-    rotation: [[1, 0], [0, 1]]
-    translation: [0.0, 0.0]
-wannier_targets:
-  - name: target
-    center: [0.0, 0.0]
-    site_irrep:
-      name: A
-      dimension: 1
-      matrices:
-        identity: [[1.0]]
-""".strip(),
-        encoding="utf-8",
+    group = SpaceGroup(
+        (SpaceGroupOperation(np.eye(2, dtype=int), np.zeros(2), "E"),),
+        tolerance=1.0e-10,
     )
-    return build_symmetry_context(load_symmetry(path), [np.array([0.0]), np.array([0.0])])
+    model = model_from_space_group(
+        "identity",
+        group,
+        targets=(WannierTargetSpec("target", [0.0, 0.0], "A"),),
+    )
+    return build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
 
 
 def _state(context, band_sets):

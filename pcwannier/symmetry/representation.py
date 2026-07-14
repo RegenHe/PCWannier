@@ -6,9 +6,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from .definition import SymmetryGroupDefinition
+    from .definition import ResolvedIrrep, SpaceGroupDefinition
     from .specs import RepresentationAnalysisSpec, SymmetryGaugeSpec
-    from .tables import GroupIrrep
 
 from .group import (
     CrystallographicOrbit,
@@ -21,108 +20,15 @@ from .group import (
 
 
 @dataclass(frozen=True)
-class SiteIrrepGenerator:
-    operation: SpaceGroupOperation
-    matrix: np.ndarray
-    match_modulo_lattice: bool = False
-
-
-@dataclass(frozen=True)
-class SiteIrrepSpec:
-    name: str
-    dimension: int
-    identity_matrix: np.ndarray
-    generators: tuple[SiteIrrepGenerator, ...]
-
-
-@dataclass(frozen=True)
 class SiteIrrep:
     name: str
     dimension: int
     matrices: tuple[np.ndarray, ...]
+    finite_group_name: str
+    actual_to_canonical: tuple[int, ...]
 
     def matrix(self, site_element_index: int) -> np.ndarray:
         return self.matrices[site_element_index]
-
-
-def build_site_irrep(orbit: CrystallographicOrbit, spec: SiteIrrepSpec) -> SiteIrrep:
-    dimension = int(spec.dimension)
-    if dimension <= 0:
-        raise ValueError("Site-irrep dimension must be positive.")
-    identity_matrix = _validated_representation_matrix(spec.identity_matrix, dimension, "identity")
-    if not np.allclose(identity_matrix, np.eye(dimension), rtol=0.0, atol=orbit.site_symmetry.tolerance):
-        raise ValueError("The site-irrep identity matrix must equal the identity.")
-
-    identity_operation = SpaceGroupOperation.identity(orbit.center.size)
-    identity_index = orbit.site_symmetry.element_index(identity_operation)
-    known: dict[int, np.ndarray] = {identity_index: identity_matrix}
-    generators = []
-    for generator_index, generator in enumerate(spec.generators):
-        if generator.match_modulo_lattice:
-            site_index = next(
-                (
-                    index
-                    for index, element in enumerate(orbit.site_symmetry.elements)
-                    if element.operation.equivalent_mod_lattice(
-                        generator.operation, orbit.site_symmetry.tolerance
-                    )
-                ),
-                None,
-            )
-            if site_index is None:
-                raise ValueError("Named generator operation is not in the target site-symmetry group.")
-        else:
-            site_index = orbit.site_symmetry.element_index(generator.operation)
-        matrix = _validated_representation_matrix(generator.matrix, dimension, f"generator {generator_index}")
-        existing = known.get(site_index)
-        if existing is not None and not np.allclose(
-            existing, matrix, rtol=0.0, atol=orbit.site_symmetry.tolerance
-        ):
-            raise ValueError(f"Conflicting matrices were supplied for site element {site_index}.")
-        known[site_index] = matrix
-        generators.append((site_index, orbit.site_symmetry.elements[site_index].operation, matrix))
-
-    queue = list(known)
-    while queue:
-        current_index = queue.pop(0)
-        current_operation = orbit.site_symmetry.elements[current_index].operation
-        current_matrix = known[current_index]
-        for _, generator_operation, generator_matrix in generators:
-            product_operation = current_operation * generator_operation
-            product_index = orbit.site_symmetry.element_index(product_operation)
-            product_matrix = current_matrix @ generator_matrix
-            existing = known.get(product_index)
-            if existing is None:
-                known[product_index] = product_matrix
-                queue.append(product_index)
-            elif not np.allclose(
-                existing,
-                product_matrix,
-                rtol=0.0,
-                atol=orbit.site_symmetry.tolerance,
-            ):
-                raise ValueError("Site-irrep generators violate a group relation.")
-    if len(known) != len(orbit.site_symmetry.elements):
-        missing = sorted(set(range(len(orbit.site_symmetry.elements))) - set(known))
-        raise ValueError(f"Site-irrep generators do not generate the full site group; missing elements {missing}.")
-
-    matrices = tuple(np.asarray(known[index], dtype=np.complex128) for index in range(len(known)))
-    _validate_site_representation(orbit, matrices, dimension)
-    for matrix in matrices:
-        matrix.setflags(write=False)
-    return SiteIrrep(spec.name, dimension, matrices)
-
-
-def _validated_representation_matrix(matrix, dimension: int, description: str) -> np.ndarray:
-    array = np.asarray(matrix, dtype=np.complex128)
-    if array.shape != (dimension, dimension):
-        raise ValueError(f"Site-irrep {description} matrix has shape {array.shape}; expected {(dimension, dimension)}.")
-    if not np.all(np.isfinite(array)):
-        raise ValueError(f"Site-irrep {description} matrix contains non-finite values.")
-    residual = float(np.linalg.norm(array.conj().T @ array - np.eye(dimension), ord="fro"))
-    if residual > 1e-8:
-        raise ValueError(f"Site-irrep {description} matrix is not unitary (residual={residual:.6g}).")
-    return array.copy()
 
 
 def _validate_site_representation(
@@ -227,7 +133,7 @@ class SymmetryModel:
     targets: tuple[WannierTargetRepresentation, ...]
     representation_analysis: RepresentationAnalysisSpec | None = None
     symmetry_gauge: SymmetryGaugeSpec | None = None
-    group_definition: SymmetryGroupDefinition | None = None
+    group_definition: SpaceGroupDefinition | None = None
 
     def target(self, name: str) -> WannierTargetRepresentation:
         for target in self.targets:
@@ -255,31 +161,21 @@ def build_symmetry_context(model: SymmetryModel, k_points) -> SymmetryContext:
     return SymmetryContext(model, axes, mappings)
 
 
-def build_wannier_target(
-    name: str,
-    group: SpaceGroup,
-    center,
-    irrep_spec: SiteIrrepSpec,
-) -> WannierTargetRepresentation:
-    orbit = build_crystallographic_orbit(group, center)
-    irrep = build_site_irrep(orbit, irrep_spec)
-    return WannierTargetRepresentation(name, group, orbit, irrep)
-
-
 def build_wannier_target_from_group_irrep(
     name: str,
     group: SpaceGroup,
     center,
-    group_irrep: GroupIrrep,
+    group_irrep: ResolvedIrrep,
 ) -> WannierTargetRepresentation:
     orbit = build_crystallographic_orbit(group, center)
     source_indices = tuple(
         element.source_operation_index for element in orbit.site_symmetry.elements
     )
-    if set(source_indices) != set(group_irrep.table.operation_indices):
+    concrete_indices = group_irrep.identification.concrete.operation_indices
+    if set(source_indices) != set(concrete_indices):
         raise ValueError(
             f"Irrep {group_irrep.name!r} is defined for operations "
-            f"{group_irrep.table.operation_indices}, but target {name!r} has site group {source_indices}."
+            f"{concrete_indices}, but target {name!r} has site group {source_indices}."
         )
     matrices = tuple(
         np.asarray(group_irrep.matrix_for_global_index(operation_index), dtype=np.complex128).copy()
@@ -288,5 +184,11 @@ def build_wannier_target_from_group_irrep(
     _validate_site_representation(orbit, matrices, group_irrep.dimension)
     for matrix in matrices:
         matrix.setflags(write=False)
-    site_irrep = SiteIrrep(group_irrep.name, group_irrep.dimension, matrices)
+    site_irrep = SiteIrrep(
+        group_irrep.name,
+        group_irrep.dimension,
+        matrices,
+        group_irrep.identification.canonical.name,
+        group_irrep.identification.actual_to_canonical,
+    )
     return WannierTargetRepresentation(name, group, orbit, site_irrep)

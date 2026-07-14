@@ -90,7 +90,7 @@ def test_math_expression_parser_is_limited():
 
 
 def test_symmetry_constrained_requires_symmetry_file(tmp_path):
-    source = _minimal_symmetry_incar().replace("symmetry_file = c4v.yaml", "symmetry_file = false")
+    source = _minimal_symmetry_incar().replace("symmetry_file = p4mm.yaml", "symmetry_file = false")
     incar = tmp_path / "incar"
     incar.write_text(source, encoding="utf-8")
 
@@ -147,7 +147,7 @@ def _minimal_symmetry_incar() -> str:
             "mesh_file = mesh.mphtxt",
             "E_file = E.txt",
             "extension = 1, 1",
-            "symmetry_file = c4v.yaml",
+            "symmetry_file = p4mm.yaml",
             "symmetry_constrained = true",
             "wannier_targets",
             "center_s_A1; 0.0, 0.0; A1",

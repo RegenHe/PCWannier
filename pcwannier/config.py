@@ -325,7 +325,7 @@ class IncarParser:
                 raise ValueError("symmetry_file is enabled but no path was supplied.")
             symmetry_path = resolve_symmetry_file(str(cfg.symmetry_file), cfg.base_dir)
             cfg.symmetry_resolved_path = symmetry_path
-            model = load_symmetry(symmetry_path)
+            model = load_symmetry(symmetry_path, tolerance=cfg.symmetry_tolerance)
             target_specs = None
             if cfg.wannier_targets is not None:
                 target_specs = tuple(

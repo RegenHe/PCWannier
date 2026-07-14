@@ -11,7 +11,7 @@ from .group import SpaceGroup
 
 @dataclass(frozen=True)
 class ConjugacyClass:
-    operation_indices: tuple[int, ...]
+    element_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -20,90 +20,72 @@ class AutomaticIrrepCharacter:
     characters: tuple[complex, ...]
 
 
-@dataclass(frozen=True)
-class GroupIrrep:
-    name: str
-    dimension: int
-    table: "FiniteGroupTable"
-    matrices: tuple[np.ndarray, ...] | None
-    characters: tuple[complex, ...]
-
-    def matrix_for_global_index(self, operation_index: int) -> np.ndarray:
-        if self.matrices is None:
-            raise ValueError(
-                f"Irrep {self.name!r} has characters only and cannot be used as a Wannier site representation."
-            )
-        return self.matrices[self.table.local_index(operation_index)]
-
-    def character_for_global_index(self, operation_index: int) -> complex:
-        return self.characters[self.table.local_index(operation_index)]
-
-
 class FiniteGroupTable:
-    """Finite group data for the full group or a closed operation subset."""
+    """A finite multiplication table independent of any space-group embedding."""
 
-    def __init__(
-        self,
-        group: SpaceGroup,
-        operation_indices: Iterable[int] | None = None,
-        *,
-        name: str | None = None,
-    ) -> None:
-        indices = (
-            tuple(range(len(group.operations)))
-            if operation_indices is None
-            else tuple(int(index) for index in operation_indices)
-        )
-        if not indices or len(indices) != len(set(indices)):
-            raise ValueError("A finite-group table requires unique operation indices.")
-        if any(index < 0 or index >= len(group.operations) for index in indices):
-            raise IndexError("Finite-group operation index is out of range.")
-        if group.identity_index not in indices:
-            raise ValueError("A finite-group operation subset must contain the identity.")
-        self.group = group
-        self.operation_indices = indices
-        self.name = name
-        self._global_to_local = {global_index: local for local, global_index in enumerate(indices)}
-        multiplication = np.empty((len(indices), len(indices)), dtype=np.int64)
-        for left_local, left_global in enumerate(indices):
-            for right_local, right_global in enumerate(indices):
-                product_global = group.operation_index(
-                    group.operations[left_global] * group.operations[right_global]
-                )
-                if product_global not in self._global_to_local:
-                    raise ValueError("The supplied operation subset is not closed under multiplication.")
-                multiplication[left_local, right_local] = self._global_to_local[product_global]
-        multiplication.setflags(write=False)
-        self.multiplication = multiplication
-        self.identity_index = self._global_to_local[group.identity_index]
-        inverse = np.empty(len(indices), dtype=np.int64)
-        for local_index in range(len(indices)):
-            candidates = np.flatnonzero(
-                (multiplication[local_index] == self.identity_index)
-                & (multiplication[:, local_index] == self.identity_index)
+    def __init__(self, element_names: Iterable[str], multiplication, *, name: str | None = None):
+        names = tuple(str(value) for value in element_names)
+        if not names or len(names) != len(set(names)) or any(not value for value in names):
+            raise ValueError("Finite-group element names must be unique and non-empty.")
+        product = np.asarray(multiplication, dtype=np.int64)
+        if product.shape != (len(names), len(names)):
+            raise ValueError("Finite-group multiplication must be a square table matching its elements.")
+        if np.any(product < 0) or np.any(product >= len(names)):
+            raise ValueError("Finite-group multiplication contains an invalid element index.")
+        identity_candidates = [
+            index
+            for index in range(len(names))
+            if np.array_equal(product[index], np.arange(len(names)))
+            and np.array_equal(product[:, index], np.arange(len(names)))
+        ]
+        if len(identity_candidates) != 1:
+            raise ValueError("Finite-group identity is missing or non-unique.")
+        self.element_names = names
+        self.name = None if name is None else str(name)
+        self.identity_index = identity_candidates[0]
+        product = product.copy()
+        product.setflags(write=False)
+        self.multiplication = product
+        inverse = np.empty(len(names), dtype=np.int64)
+        for index in range(len(names)):
+            matches = np.flatnonzero(
+                (product[index] == self.identity_index)
+                & (product[:, index] == self.identity_index)
             )
-            if candidates.size != 1:
+            if matches.size != 1:
                 raise ValueError("Finite-group inverse is missing or non-unique.")
-            inverse[local_index] = candidates[0]
+            inverse[index] = matches[0]
         inverse.setflags(write=False)
         self.inverse = inverse
+        self._validate_associativity()
 
     @property
     def order(self) -> int:
-        return len(self.operation_indices)
+        return len(self.element_names)
 
     @property
     def operation_names(self) -> tuple[str, ...]:
-        names = tuple(self.group.operations[index].name for index in self.operation_indices)
-        if any(name is None for name in names):
-            raise ValueError("All operations used in representation analysis must have names.")
-        return tuple(str(name) for name in names)
+        return self.element_names
 
-    def local_index(self, global_index: int) -> int:
+    def element_index(self, name: str) -> int:
         try:
-            return self._global_to_local[int(global_index)]
-        except KeyError as exc:
-            raise ValueError("Operation does not belong to this finite-group table.") from exc
+            return self.element_names.index(str(name))
+        except ValueError as exc:
+            raise KeyError(f"Unknown finite-group element {name!r}.") from exc
+
+    @cached_property
+    def element_orders(self) -> tuple[int, ...]:
+        output = []
+        for element in range(self.order):
+            value = self.identity_index
+            for power in range(1, self.order + 1):
+                value = int(self.multiplication[value, element])
+                if value == self.identity_index:
+                    output.append(power)
+                    break
+            else:
+                raise ValueError("Finite-group element order exceeds the group order.")
+        return tuple(output)
 
     @cached_property
     def conjugacy_classes(self) -> tuple[ConjugacyClass, ...]:
@@ -120,20 +102,16 @@ class FiniteGroupTable:
                 )
                 for conjugator in range(self.order)
             }
-            output.append(
-                ConjugacyClass(
-                    tuple(sorted(self.operation_indices[local_index] for local_index in members))
-                )
-            )
+            output.append(ConjugacyClass(tuple(sorted(members))))
             remaining.difference_update(members)
         return tuple(output)
 
     @cached_property
     def regular_matrices(self) -> tuple[np.ndarray, ...]:
         matrices = []
-        for operation in range(self.order):
+        for element in range(self.order):
             matrix = np.zeros((self.order, self.order), dtype=np.complex128)
-            matrix[self.multiplication[operation], np.arange(self.order)] = 1.0
+            matrix[self.multiplication[element], np.arange(self.order)] = 1.0
             matrix.setflags(write=False)
             matrices.append(matrix)
         return tuple(matrices)
@@ -144,8 +122,7 @@ class FiniteGroupTable:
         central_operators = []
         for conjugacy_class in self.conjugacy_classes:
             class_sum = sum(
-                self.regular_matrices[self.local_index(global_index)]
-                for global_index in conjugacy_class.operation_indices
+                self.regular_matrices[index] for index in conjugacy_class.element_indices
             )
             central_operators.extend(
                 (
@@ -181,24 +158,72 @@ class FiniteGroupTable:
         _validate_automatic_character_table(self, irreps)
         return tuple(irreps)
 
-    def projective_factor_residual(self, k_fractional) -> float:
-        """Return the largest phase from representative products differing by a lattice translation."""
-        kpoint = np.asarray(k_fractional, dtype=float)
-        if kpoint.shape != (self.group.dimension,):
-            raise ValueError(f"k_fractional must have shape {(self.group.dimension,)}.")
-        residual = 0.0
-        for left_local, left_global in enumerate(self.operation_indices):
-            for right_local, right_global in enumerate(self.operation_indices):
-                product = self.group.operations[left_global] * self.group.operations[right_global]
-                target_local = int(self.multiplication[left_local, right_local])
-                representative = self.group.operations[self.operation_indices[target_local]]
-                shift = product.translation - representative.translation
-                rounded = np.rint(shift)
-                if not np.allclose(shift, rounded, rtol=0.0, atol=self.group.tolerance):
-                    raise ValueError("Space-group product differs from its representative by a non-lattice shift.")
-                phase = np.exp(-2j * np.pi * np.dot(kpoint, rounded))
-                residual = max(residual, float(abs(phase - 1.0)))
-        return residual
+    def _validate_associativity(self) -> None:
+        for left in range(self.order):
+            for middle in range(self.order):
+                for right in range(self.order):
+                    lhs = self.multiplication[self.multiplication[left, middle], right]
+                    rhs = self.multiplication[left, self.multiplication[middle, right]]
+                    if lhs != rhs:
+                        raise ValueError("Finite-group multiplication is not associative.")
+
+
+@dataclass(frozen=True)
+class ConcreteFiniteGroup:
+    """A finite co-group together with its actual Seitz representatives."""
+
+    group: SpaceGroup
+    operation_indices: tuple[int, ...]
+    table: FiniteGroupTable
+
+    @classmethod
+    def from_space_group(
+        cls,
+        group: SpaceGroup,
+        operation_indices: Iterable[int] | None = None,
+        *,
+        name: str | None = None,
+    ) -> "ConcreteFiniteGroup":
+        indices = (
+            tuple(range(len(group.operations)))
+            if operation_indices is None
+            else tuple(int(index) for index in operation_indices)
+        )
+        if not indices or len(indices) != len(set(indices)):
+            raise ValueError("A concrete finite group requires unique operation indices.")
+        if group.identity_index not in indices:
+            raise ValueError("A concrete finite group must contain the identity representative.")
+        global_to_local = {global_index: local for local, global_index in enumerate(indices)}
+        multiplication = np.empty((len(indices), len(indices)), dtype=np.int64)
+        for left_local, left_global in enumerate(indices):
+            for right_local, right_global in enumerate(indices):
+                product_global = group.operation_index(
+                    group.operations[left_global] * group.operations[right_global]
+                )
+                if product_global not in global_to_local:
+                    raise ValueError("The supplied Seitz representative subset is not closed.")
+                multiplication[left_local, right_local] = global_to_local[product_global]
+        names = tuple(
+            group.operations[index].name or f"g{index}" for index in indices
+        )
+        return cls(group, indices, FiniteGroupTable(names, multiplication, name=name))
+
+    @property
+    def order(self) -> int:
+        return self.table.order
+
+    def local_index(self, operation_index: int) -> int:
+        try:
+            return self.operation_indices.index(int(operation_index))
+        except ValueError as exc:
+            raise ValueError("Operation does not belong to this concrete finite group.") from exc
+
+    def global_index(self, local_index: int) -> int:
+        return self.operation_indices[int(local_index)]
+
+    @property
+    def rotations(self) -> tuple[np.ndarray, ...]:
+        return tuple(self.group.operations[index].rotation for index in self.operation_indices)
 
 
 def _eigenvalue_clusters(values: np.ndarray) -> tuple[np.ndarray, ...]:

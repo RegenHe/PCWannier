@@ -4,40 +4,30 @@ import numpy as np
 import scipy.linalg
 
 from pcwannier.symmetry import (
+    SpaceGroup,
+    SpaceGroupOperation,
     build_symmetry_context,
     build_symmetry_stars,
     combined_target_matrix,
-    compose_symmetry_model,
-    load_symmetry,
     project_target_gauge_to_stars,
     propagate_target_gauge,
     symmetrize_gradient,
-    SymmetryCalculationSpec,
     WannierTargetSpec,
 )
 
+from .symmetry_models import model_from_space_group, p4mm_model, square_2c_model
+
 
 def test_identity_group_constrained_gradient_is_the_raw_gradient(tmp_path):
-    symmetry_file = tmp_path / "identity.sym.yaml"
-    symmetry_file.write_text(
-        """
-dimension: 2
-symmetry_operations:
-  - name: E
-    rotation: [[1, 0], [0, 1]]
-    translation: [0.0, 0.0]
-wannier_targets:
-  - name: scalar
-    center: [0.0, 0.0]
-    site_irrep:
-      name: A
-      dimension: 1
-      matrices:
-        identity: [[1.0]]
-""".strip(),
-        encoding="utf-8",
+    group = SpaceGroup(
+        (SpaceGroupOperation(np.eye(2, dtype=int), np.zeros(2), "E"),),
+        tolerance=1.0e-10,
     )
-    model = load_symmetry(symmetry_file)
+    model = model_from_space_group(
+        "identity",
+        group,
+        targets=(WannierTargetSpec("scalar", [0.0, 0.0], "A"),),
+    )
     context = build_symmetry_context(model, [np.array([-0.25, 0.25]), np.array([-0.25, 0.25])])
     stars = build_symmetry_stars(context)
     raw = np.empty((2, 2, 1), dtype=object)
@@ -52,14 +42,11 @@ wannier_targets:
 
 
 def test_symmetric_target_gauge_is_unchanged_and_random_noise_is_projected_out():
-    model = compose_symmetry_model(
-        load_symmetry("pcwannier/symmetries/c4v.yaml"),
-        SymmetryCalculationSpec(
-            (
-                WannierTargetSpec("center_s_A1", [0.0, 0.0], "A1"),
-                WannierTargetSpec("center_p_E", [0.0, 0.0], "E"),
-            )
-        ),
+    model = p4mm_model(
+        targets=(
+            WannierTargetSpec("center_s_A1", [0.0, 0.0], "A1"),
+            WannierTargetSpec("center_p_E", [0.0, 0.0], "E"),
+        )
     )
     axis = np.arange(-0.5, 0.5, 0.1)
     context = build_symmetry_context(model, [axis, axis])
@@ -88,7 +75,7 @@ def test_symmetric_target_gauge_is_unchanged_and_random_noise_is_projected_out()
 
 
 def test_square_2c_gradient_pullback_and_star_propagation_follow_right_action_convention():
-    model = load_symmetry("tests/data/square_c4v_analysis.sym.yaml")
+    model = square_2c_model()
     axis = np.array([-0.4, -0.2, 0.0, 0.2, 0.4])
     context = build_symmetry_context(model, [axis, axis])
     stars = build_symmetry_stars(context)

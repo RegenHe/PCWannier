@@ -1,0 +1,9 @@
+name: C1
+dimension: 2
+elements:
+  - name: E
+    point_action: [[1, 0], [0, 1]]
+irreps:
+  A:
+    dimension: 1
+    characters: {E: 1}

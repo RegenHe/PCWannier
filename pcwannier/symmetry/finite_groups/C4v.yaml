@@ -1,0 +1,38 @@
+name: C4v
+dimension: 2
+elements:
+  - name: E
+    point_action: [[1, 0], [0, 1]]
+  - name: C4
+    point_action: [[0, -1], [1, 0]]
+  - name: C2
+    point_action: [[-1, 0], [0, -1]]
+  - name: C4_inv
+    point_action: [[0, 1], [-1, 0]]
+  - name: sigma_x
+    point_action: [[-1, 0], [0, 1]]
+  - name: sigma_y
+    point_action: [[1, 0], [0, -1]]
+  - name: sigma_d
+    point_action: [[0, 1], [1, 0]]
+  - name: sigma_d2
+    point_action: [[0, -1], [-1, 0]]
+irreps:
+  A1:
+    dimension: 1
+    characters: {E: 1, C4: 1, C2: 1, C4_inv: 1, sigma_x: 1, sigma_y: 1, sigma_d: 1, sigma_d2: 1}
+  A2:
+    dimension: 1
+    characters: {E: 1, C4: 1, C2: 1, C4_inv: 1, sigma_x: -1, sigma_y: -1, sigma_d: -1, sigma_d2: -1}
+  B1:
+    dimension: 1
+    characters: {E: 1, C4: -1, C2: 1, C4_inv: -1, sigma_x: 1, sigma_y: 1, sigma_d: -1, sigma_d2: -1}
+  B2:
+    dimension: 1
+    characters: {E: 1, C4: -1, C2: 1, C4_inv: -1, sigma_x: -1, sigma_y: -1, sigma_d: 1, sigma_d2: 1}
+  E:
+    dimension: 2
+    characters: {E: 2, C4: 0, C2: -2, C4_inv: 0, sigma_x: 0, sigma_y: 0, sigma_d: 0, sigma_d2: 0}
+    generators:
+      C4: [[0.0, -1.0], [1.0, 0.0]]
+      sigma_x: [[-1.0, 0.0], [0.0, 1.0]]

@@ -1,4 +1,4 @@
-name: p4g
+name: p4gm
 dimension: 2
 operations:
   - name: E

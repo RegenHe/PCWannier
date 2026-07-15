@@ -7,6 +7,9 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 
+MIN_FRACTIONAL_TOLERANCE = 64.0 * np.finfo(float).eps
+
+
 @dataclass(frozen=True)
 class PeriodicImage:
     reduced: np.ndarray
@@ -142,8 +145,15 @@ class SpaceGroup:
         items = tuple(operations)
         if not items:
             raise ValueError("A space group must contain at least one operation.")
-        if not np.isfinite(tolerance) or tolerance <= 0.0 or tolerance >= 0.25:
-            raise ValueError("Symmetry tolerance must be positive, finite, and smaller than 0.25.")
+        if (
+            not np.isfinite(tolerance)
+            or tolerance < MIN_FRACTIONAL_TOLERANCE
+            or tolerance >= 0.25
+        ):
+            raise ValueError(
+                "Symmetry tolerance must be finite, at least "
+                f"{MIN_FRACTIONAL_TOLERANCE:.6g}, and smaller than 0.25."
+            )
         dimension = items[0].dimension
         if any(operation.dimension != dimension for operation in items):
             raise ValueError("All space-group operations must have the same dimension.")
@@ -216,7 +226,7 @@ def build_k_mappings(
     tree = cKDTree(canonical, boxsize=1.0)
     duplicate_pairs = tree.query_pairs(r=group.tolerance, p=np.inf)
     if duplicate_pairs:
-        first = next(iter(duplicate_pairs))
+        first = min(duplicate_pairs)
         raise ValueError(f"k mesh contains periodically duplicate samples at flat indices {first}.")
 
     all_mappings = []
@@ -225,13 +235,25 @@ def build_k_mappings(
         for flat_index, (source_index, source_k) in enumerate(zip(multi_indices, raw_points)):
             transformed = operation.act_reciprocal(source_k)
             transformed_reduced = reduce_fractional(transformed, group.tolerance).reduced
-            distance, target_flat = tree.query(transformed_reduced, k=1, p=np.inf)
+            neighbor_count = min(2, len(canonical))
+            distances, targets = tree.query(
+                transformed_reduced, k=neighbor_count, p=np.inf
+            )
+            distances = np.atleast_1d(distances)
+            targets = np.atleast_1d(targets)
+            distance = float(distances[0])
+            target_flat = int(targets[0])
             if not np.isfinite(distance) or distance > group.tolerance:
                 raise ValueError(
                     f"k mesh is not closed under operation {operation.name or operation_index}: "
                     f"source index {source_index} maps to {transformed.tolist()}."
                 )
-            target_flat = int(target_flat)
+            if neighbor_count > 1 and distances[1] <= group.tolerance:
+                raise ValueError(
+                    f"Ambiguous symmetry k mapping under operation "
+                    f"{operation.name or operation_index}: source index {source_index} is within "
+                    f"tolerance of flat targets {target_flat} and {int(targets[1])}."
+                )
             target_k = raw_points[target_flat]
             reciprocal_shift = _integer_shift(
                 transformed - target_k,

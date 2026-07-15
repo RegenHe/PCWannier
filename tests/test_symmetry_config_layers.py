@@ -24,7 +24,7 @@ from pcwannier.symmetry import (
     resolve_symmetry_file,
 )
 
-from .symmetry_models import P4G, P4MM, p4mm_model
+from .symmetry_models import P4GM, P4MM, p4mm_model
 
 
 FINITE_GROUPS = Path("pcwannier/symmetry/finite_groups")
@@ -222,15 +222,19 @@ def test_site_groups_are_identified_from_center_geometry():
 
 
 def test_p4g_factor_system_reports_projective_points_without_fallback():
-    definition = load_space_group(P4G)
+    definition = load_space_group(P4GM)
     gamma = resolve_little_group(definition, [0.0, 0.0])
     xpoint = resolve_little_group(definition, [0.5, 0.0])
     mpoint = resolve_little_group(definition, [0.5, 0.5])
 
     assert gamma.factor_system.phase_residual == pytest.approx(0.0)
     assert gamma.factor_system.is_trivial
+    assert gamma.factor_system.raw_trivial
+    assert gamma.factor_system.cohomologically_trivial
     assert xpoint.factor_system.phase_residual > 1.0
     assert not xpoint.factor_system.is_trivial
+    assert not xpoint.factor_system.raw_trivial
+    assert not xpoint.factor_system.cohomologically_trivial
     with pytest.raises(NotImplementedError, match="projective irreps"):
         xpoint.require_irreps()
 
@@ -238,6 +242,8 @@ def test_p4g_factor_system_reports_projective_points_without_fallback():
     # removed by a one-cochain. Ordinary irreps are therefore valid after rephasing.
     assert mpoint.factor_system.phase_residual > 1.0
     assert mpoint.factor_system.is_trivial
+    assert not mpoint.factor_system.raw_trivial
+    assert mpoint.factor_system.cohomologically_trivial
     assert mpoint.factor_system.trivializing_cochain is not None
 
 

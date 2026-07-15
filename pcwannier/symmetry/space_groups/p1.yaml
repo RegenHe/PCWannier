@@ -1,0 +1,6 @@
+name: p1
+dimension: 2
+operations:
+  - name: E
+    rotation: [[1, 0], [0, 1]]
+    translation: [0.0, 0.0]

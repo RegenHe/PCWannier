@@ -1,0 +1,40 @@
+# Hexagonal primitive basis with a1.a2 = -|a1|^2/2 (120 degrees).
+name: p6mm
+dimension: 2
+operations:
+  - name: E
+    rotation: [[1, 0], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: C6
+    rotation: [[1, -1], [1, 0]]
+    translation: [0.0, 0.0]
+  - name: C3
+    rotation: [[0, -1], [1, -1]]
+    translation: [0.0, 0.0]
+  - name: C2
+    rotation: [[-1, 0], [0, -1]]
+    translation: [0.0, 0.0]
+  - name: C3_inv
+    rotation: [[-1, 1], [-1, 0]]
+    translation: [0.0, 0.0]
+  - name: C6_inv
+    rotation: [[0, 1], [-1, 1]]
+    translation: [0.0, 0.0]
+  - name: sigma_v1
+    rotation: [[0, 1], [1, 0]]
+    translation: [0.0, 0.0]
+  - name: sigma_v2
+    rotation: [[1, -1], [0, -1]]
+    translation: [0.0, 0.0]
+  - name: sigma_v3
+    rotation: [[-1, 0], [-1, 1]]
+    translation: [0.0, 0.0]
+  - name: sigma_d1
+    rotation: [[0, -1], [-1, 0]]
+    translation: [0.0, 0.0]
+  - name: sigma_d2
+    rotation: [[-1, 1], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: sigma_d3
+    rotation: [[1, 0], [1, -1]]
+    translation: [0.0, 0.0]

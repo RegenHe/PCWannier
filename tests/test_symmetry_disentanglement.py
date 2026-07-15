@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import pcwannier.symmetry.disentanglement as disentanglement_module
+
 from pcwannier.symmetry import (
     OuterWindowClosureReport,
     SpaceGroup,
@@ -19,6 +21,72 @@ from pcwannier.symmetry import (
 )
 
 from .symmetry_models import model_from_space_group, square_2c_model
+
+
+def test_symmetrized_z_uses_little_group_normalization(tmp_path):
+    context = _c2_context(tmp_path, target_character=1.0)
+    state = _state(context, ((0, 1), (2, 3)))
+    swap = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    provider = _SyntheticProvider(context, lambda op, *_: np.eye(2) if op == 0 else swap)
+    initializer = _initializer(state, target_dimension=1)
+    initial = _matrix_grid(
+        state.k_shape,
+        [np.array([[1.0], [0.0]]), np.array([[0.0], [1.0]])],
+    )
+    gauge = construct_symmetry_gauge(
+        state, context, initial, provider=provider, tolerance=1e-12
+    )
+    bands = gauge.band_indices_by_k
+    if bands is None:
+        bands = _band_grid(state)
+    zmat = disentanglement_module._symmetrized_z(
+        initializer,
+        context,
+        provider,
+        bands,
+        gauge.gauge,
+        gauge.stars.stars[0],
+    )
+
+    # There are two group paths and a trivial representative little group.
+    # Eq. (35) therefore gives the sum over both distinct star members, not
+    # their average.
+    assert np.allclose(zmat, np.diag([2.0, 0.0]), atol=1e-12)
+
+
+def test_flat_omega_does_not_converge_while_projector_changes(tmp_path, monkeypatch):
+    context = _identity_context(tmp_path)
+    state = _state(context, ((0, 1),))
+    provider = _SyntheticProvider(context, lambda *_: np.eye(2, dtype=np.complex128))
+    initializer = _initializer(state, target_dimension=1)
+    initial = _matrix_grid(
+        state.k_shape,
+        [np.array([[1.0], [1.0]], dtype=np.complex128) / np.sqrt(2.0)],
+    )
+    closure = validate_outer_window_closure(state, context, provider, tolerance=1e-12)
+    gauge = construct_symmetry_gauge(
+        state, context, initial, provider=provider, tolerance=1e-12
+    )
+    monkeypatch.setattr(disentanglement_module, "_omega_i", lambda *_: 0.0)
+    monkeypatch.setattr(disentanglement_module, "_projector_change", lambda *_: 1.0)
+
+    result = disentangle_symmetry_constrained(
+        initializer,
+        context,
+        gauge,
+        provider,
+        closure,
+        err_diff=1e-12,
+        projector_tolerance=1e-8,
+        max_iter=2,
+        mixing=0.5,
+        tolerance=1e-12,
+        projection_max_iterations=10,
+        svd_relative_tolerance=1e-12,
+    )
+
+    assert not result.converged
+    assert result.iterations[-1].projector_change == pytest.approx(1.0)
 
 
 def test_covariant_outer_subspace_is_preserved_with_changing_band_ids(tmp_path):

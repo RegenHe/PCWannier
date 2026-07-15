@@ -9,7 +9,7 @@ from scipy.spatial import cKDTree
 
 from ..compute.integration import integrate_overlap_matrix
 from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
-from .specs import FieldKind
+from .specs import BlochConvention, FieldKind
 
 if TYPE_CHECKING:
     from ..compute.state import StateCollection
@@ -69,7 +69,59 @@ class PeriodicTriangleInterpolator:
         canonical = np.mod(vertices, 1.0)
         canonical[np.abs(canonical - 1.0) <= tolerance] = 0.0
         self._node_tree = cKDTree(canonical, boxsize=1.0)
+        self._node_representative, self.periodic_node_classes = self._periodic_node_groups(
+            canonical
+        )
         self._build_periodic_triangles()
+
+    def _periodic_node_groups(
+        self, canonical: np.ndarray
+    ) -> tuple[np.ndarray, tuple[tuple[int, ...], ...]]:
+        parent = np.arange(len(canonical), dtype=np.intp)
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = int(parent[index])
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root == right_root:
+                return
+            root = min(left_root, right_root)
+            parent[max(left_root, right_root)] = root
+
+        for left, right in sorted(self._node_tree.query_pairs(r=self.tolerance, p=np.inf)):
+            left = int(left)
+            right = int(right)
+            difference = self.vertices[left] - self.vertices[right]
+            lattice_shift = np.rint(difference).astype(np.int64)
+            if not np.allclose(
+                difference, lattice_shift, rtol=0.0, atol=self.tolerance
+            ):
+                raise ValueError(
+                    "Distinct FEM nodes are closer than the symmetry tolerance after periodic "
+                    f"reduction: nodes=({left}, {right}). Reduce symmetry_tolerance."
+                )
+            if not np.any(lattice_shift):
+                raise ValueError(
+                    "The FEM mesh contains coincident duplicate nodes, so symmetry interpolation "
+                    f"is ambiguous: nodes=({left}, {right})."
+                )
+            union(left, right)
+        groups: dict[int, list[int]] = {}
+        for index in range(len(canonical)):
+            groups.setdefault(find(index), []).append(index)
+        classes = tuple(
+            tuple(values) for _, values in sorted(groups.items()) if len(values) > 1
+        )
+        representative = np.arange(len(canonical), dtype=np.intp)
+        for values in classes:
+            representative[np.asarray(values, dtype=np.intp)] = min(values)
+        representative.setflags(write=False)
+        return representative, classes
 
     def _build_periodic_triangles(self) -> None:
         shifts = np.asarray(tuple(product((-1, 0, 1), repeat=2)), dtype=float)
@@ -105,7 +157,7 @@ class PeriodicTriangleInterpolator:
         distances, nearest = self._node_tree.query(query, k=1, p=np.inf)
         for point_index, point in enumerate(query):
             if distances[point_index] <= self.tolerance:
-                node = int(nearest[point_index])
+                node = int(self._node_representative[int(nearest[point_index])])
                 indices[point_index] = (node, node, node)
                 weights[point_index] = (1.0, 0.0, 0.0)
                 continue
@@ -260,7 +312,13 @@ class StateBlochSymmetryProvider:
         self.context = context
         self.field_kind = field_kind
         self.dimension = context.model.dimension
-        self.bloch_sign = -1 if state.config.dataset_type.lower() == "comsol" else 1
+        dataset_convention = BlochConvention.for_dataset(state.config.dataset_type)
+        if dataset_convention.sign != context.model.bloch_convention.sign:
+            raise ValueError(
+                f"Symmetry model uses Bloch sign {context.model.bloch_convention.sign}, but "
+                f"dataset {state.config.dataset_type!r} requires {dataset_convention.sign}."
+            )
+        self.bloch_sign = context.model.bloch_convention.sign
         shape = tuple(len(axis) for axis in context.k_points)
         self._k_indices = tuple(np.ndindex(shape))
         self._k_fractional_points = np.asarray(
@@ -277,6 +335,7 @@ class StateBlochSymmetryProvider:
             bloch_sign=self.bloch_sign,
             tolerance=context.model.tolerance,
         )
+        self._validate_periodic_node_data(context.model.boundary_tolerance)
         self._sewing_cache: dict[tuple[object, ...], np.ndarray] = {}
 
     def sewing_matrix(self, request: SewingMatrixRequest) -> np.ndarray:
@@ -441,6 +500,46 @@ class StateBlochSymmetryProvider:
         correction = np.asarray(self.state.get_transform()[state_index], dtype=np.complex128)
         orthonormal = (block.T @ correction).T
         return orthonormal[local]
+
+    def _validate_periodic_node_data(self, tolerance: float) -> None:
+        classes = self.action.interpolator.periodic_node_classes
+        if not classes:
+            return
+        epsilon = np.asarray(self.state.epsilon).reshape(-1)
+        if epsilon.size != self.fractional_vertices.shape[0]:
+            raise ValueError("Epsilon size does not match the symmetry FEM mesh.")
+        epsilon_scale = max(float(np.max(np.abs(epsilon), initial=0.0)), np.finfo(float).tiny)
+        for nodes in classes:
+            values = epsilon[np.asarray(nodes, dtype=np.intp)]
+            residual = float(np.max(np.abs(values - values[0]), initial=0.0) / epsilon_scale)
+            if residual > tolerance:
+                raise ValueError(
+                    "Periodic-equivalent FEM nodes have inconsistent epsilon values: "
+                    f"nodes={nodes}, relative_residual={residual:.6g}, tolerance={tolerance:.6g}."
+                )
+
+        for k_index in self._k_indices:
+            state_index = self._state_index(k_index)
+            block = self.state.get_block(*state_index)
+            scales = np.maximum(
+                np.max(np.abs(block), axis=1),
+                np.finfo(float).tiny,
+            )
+            actual_bands = tuple(
+                int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1)
+            )
+            for nodes in classes:
+                node_indices = np.asarray(nodes, dtype=np.intp)
+                values = block[:, node_indices]
+                residuals = np.max(np.abs(values - values[:, :1]), axis=1) / scales
+                worst = int(np.argmax(residuals))
+                if residuals[worst] > tolerance:
+                    band = actual_bands[worst] if worst < len(actual_bands) else worst
+                    raise ValueError(
+                        "Periodic-equivalent FEM nodes have inconsistent periodic Bloch fields: "
+                        f"k={state_index}, band={band}, nodes={nodes}, "
+                        f"relative_residual={residuals[worst]:.6g}, tolerance={tolerance:.6g}."
+                    )
 
     def _fiber_phase(self, reciprocal_shift) -> np.ndarray:
         shift = np.asarray(reciprocal_shift, dtype=float)

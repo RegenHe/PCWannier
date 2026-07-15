@@ -44,14 +44,17 @@ class IncarConfig:
     symmetry_validate_wannier: bool = True
     symmetry_real_space_tolerance: float = 1.0e-6
     symmetry_minimum_retained_norm: float = 0.99
+    symmetry_boundary_tolerance: float = 1.0e-6
     representation_field_kind: str = "scalar"
     representation_degeneracy_absolute: float = 1.0e-6
     representation_degeneracy_relative: float = 1.0e-8
+    representation_leakage_tolerance: float | None = None
     wannier_targets: list[dict[str, Any]] | None = None
     representation_analysis: list[dict[str, Any]] | None = None
     symmetry_resolved_path: Path | None = field(default=None, init=False)
     disentangle_max_iter: int | None = None
     disentangle_err_diff: float | None = None
+    disentangle_projector_tolerance: float | None = None
     disentangle_mixing: float = 0.5
     symmetry_context: SymmetryContext | None = field(default=None, init=False, repr=False)
 
@@ -306,6 +309,7 @@ class IncarParser:
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
             from .symmetry import (
+                BlochConvention,
                 DegeneracyTolerance,
                 FieldKind,
                 RepresentationAnalysisSpec,
@@ -349,7 +353,14 @@ class IncarParser:
                     for item in cfg.representation_analysis
                 )
                 analysis = RepresentationAnalysisSpec(
-                    FieldKind(cfg.representation_field_kind), degeneracy, points
+                    FieldKind(cfg.representation_field_kind),
+                    degeneracy,
+                    points,
+                    (
+                        cfg.symmetry_tolerance
+                        if cfg.representation_leakage_tolerance is None
+                        else cfg.representation_leakage_tolerance
+                    ),
                 )
             gauge = None
             if cfg.symmetry_constrained:
@@ -364,7 +375,13 @@ class IncarParser:
                 )
             model = compose_symmetry_model(
                 model,
-                SymmetryCalculationSpec(target_specs, analysis, gauge),
+                SymmetryCalculationSpec(
+                    target_specs=target_specs,
+                    representation_analysis=analysis,
+                    symmetry_gauge=gauge,
+                    bloch_convention=BlochConvention.for_dataset(cfg.dataset_type),
+                    boundary_tolerance=cfg.symmetry_boundary_tolerance,
+                ),
             )
             if model.dimension != cfg.kdim:
                 raise ValueError(
@@ -442,6 +459,7 @@ class IncarParser:
             "epsilon",
             "err_diff",
             "disentangle_err_diff",
+            "disentangle_projector_tolerance",
             "disentangle_mixing",
             "DOS_eps",
             "finite_DOS_eps",
@@ -449,8 +467,10 @@ class IncarParser:
             "symmetry_svd_tolerance",
             "symmetry_real_space_tolerance",
             "symmetry_minimum_retained_norm",
+            "symmetry_boundary_tolerance",
             "representation_degeneracy_absolute",
             "representation_degeneracy_relative",
+            "representation_leakage_tolerance",
         }:
             return float(evaluate_math_expression(value))
         if key in {
@@ -776,10 +796,22 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
         not np.isfinite(cfg.disentangle_err_diff) or cfg.disentangle_err_diff < 0.0
     ):
         raise ValueError("disentangle_err_diff must be finite and non-negative.")
+    if cfg.disentangle_projector_tolerance is not None and (
+        not np.isfinite(cfg.disentangle_projector_tolerance)
+        or cfg.disentangle_projector_tolerance <= 0.0
+    ):
+        raise ValueError("disentangle_projector_tolerance must be positive and finite.")
     if not np.isfinite(cfg.disentangle_mixing) or not 0.0 < cfg.disentangle_mixing <= 1.0:
         raise ValueError("disentangle_mixing must lie in (0, 1].")
     if not np.isfinite(cfg.symmetry_tolerance) or cfg.symmetry_tolerance <= 0.0:
         raise ValueError("symmetry_tolerance must be positive and finite.")
+    if not np.isfinite(cfg.symmetry_boundary_tolerance) or cfg.symmetry_boundary_tolerance <= 0.0:
+        raise ValueError("symmetry_boundary_tolerance must be positive and finite.")
+    if cfg.representation_leakage_tolerance is not None and (
+        not np.isfinite(cfg.representation_leakage_tolerance)
+        or cfg.representation_leakage_tolerance <= 0.0
+    ):
+        raise ValueError("representation_leakage_tolerance must be positive and finite.")
     if cfg.symmetry_max_iter <= 0:
         raise ValueError("symmetry_max_iter must be positive.")
     if not np.isfinite(cfg.symmetry_svd_tolerance) or cfg.symmetry_svd_tolerance <= 0.0:

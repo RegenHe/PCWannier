@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -17,6 +17,7 @@ from .group import (
     build_crystallographic_orbit,
     build_k_mappings,
 )
+from .specs import BlochConvention
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,10 @@ class WannierTargetRepresentation:
     group: SpaceGroup
     orbit: CrystallographicOrbit
     site_irrep: SiteIrrep
+    bloch_convention: BlochConvention = field(default_factory=BlochConvention)
+    _matrix_cache: dict[tuple[int, bytes], np.ndarray] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     @property
     def multiplicity(self) -> int:
@@ -86,19 +91,30 @@ class WannierTargetRepresentation:
         kpoint = np.asarray(k_fractional, dtype=float)
         if kpoint.shape != (self.group.dimension,) or not np.all(np.isfinite(kpoint)):
             raise ValueError(f"k_fractional must have shape {(self.group.dimension,)} and be finite.")
+        cache_key = (operation_index, np.ascontiguousarray(kpoint).tobytes())
+        cached = self._matrix_cache.get(cache_key)
+        if cached is not None:
+            return cached
         transformed_k = self.group.operations[operation_index].act_reciprocal(kpoint)
         dimension = self.site_irrep.dimension
         output = np.zeros((self.wannier_dimension, self.wannier_dimension), dtype=np.complex128)
         for orbit_index in range(self.multiplicity):
             action = self.orbit.action(operation_index, orbit_index)
             lattice_shift = np.asarray(action.lattice_shift, dtype=float)
-            phase = np.exp(-2j * np.pi * np.dot(transformed_k, lattice_shift))
+            phase = np.exp(
+                -self.bloch_convention.sign
+                * 2j
+                * np.pi
+                * np.dot(transformed_k, lattice_shift)
+            )
             row = slice(action.target_index * dimension, (action.target_index + 1) * dimension)
             column = slice(orbit_index * dimension, (orbit_index + 1) * dimension)
             output[row, column] = phase * self.site_irrep.matrix(action.site_element_index)
         residual = float(np.linalg.norm(output.conj().T @ output - np.eye(self.wannier_dimension), ord="fro"))
         if residual > 1e-8:
             raise FloatingPointError(f"Target Wannier representation is not unitary (residual={residual:.6g}).")
+        output.setflags(write=False)
+        self._matrix_cache[cache_key] = output
         return output
 
 
@@ -114,6 +130,9 @@ def combined_target_matrix(
     group = items[0].group
     if any(target.group is not group for target in items):
         raise ValueError("Combined Wannier targets must belong to the same space group.")
+    convention = items[0].bloch_convention
+    if any(target.bloch_convention != convention for target in items):
+        raise ValueError("Combined Wannier targets must use the same Bloch convention.")
     blocks = [target.matrix(operation, k_fractional) for target in items]
     total = sum(block.shape[0] for block in blocks)
     output = np.zeros((total, total), dtype=np.complex128)
@@ -134,6 +153,14 @@ class SymmetryModel:
     representation_analysis: RepresentationAnalysisSpec | None = None
     symmetry_gauge: SymmetryGaugeSpec | None = None
     group_definition: SpaceGroupDefinition | None = None
+    bloch_convention: BlochConvention = field(default_factory=BlochConvention)
+    boundary_tolerance: float = 1.0e-6
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.boundary_tolerance) or self.boundary_tolerance <= 0.0:
+            raise ValueError("Symmetry boundary tolerance must be positive and finite.")
+        if any(target.bloch_convention != self.bloch_convention for target in self.targets):
+            raise ValueError("Symmetry targets and model must use the same Bloch convention.")
 
     def target(self, name: str) -> WannierTargetRepresentation:
         for target in self.targets:
@@ -166,6 +193,7 @@ def build_wannier_target_from_group_irrep(
     group: SpaceGroup,
     center,
     group_irrep: ResolvedIrrep,
+    bloch_convention: BlochConvention | None = None,
 ) -> WannierTargetRepresentation:
     orbit = build_crystallographic_orbit(group, center)
     source_indices = tuple(
@@ -191,4 +219,10 @@ def build_wannier_target_from_group_irrep(
         group_irrep.identification.canonical.name,
         group_irrep.identification.actual_to_canonical,
     )
-    return WannierTargetRepresentation(name, group, orbit, site_irrep)
+    return WannierTargetRepresentation(
+        name,
+        group,
+        orbit,
+        site_irrep,
+        BlochConvention() if bloch_convention is None else bloch_convention,
+    )

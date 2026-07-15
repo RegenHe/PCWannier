@@ -1,0 +1,15 @@
+name: p4
+dimension: 2
+operations:
+  - name: E
+    rotation: [[1, 0], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: C4
+    rotation: [[0, -1], [1, 0]]
+    translation: [0.0, 0.0]
+  - name: C2
+    rotation: [[-1, 0], [0, -1]]
+    translation: [0.0, 0.0]
+  - name: C4_inv
+    rotation: [[0, 1], [-1, 0]]
+    translation: [0.0, 0.0]

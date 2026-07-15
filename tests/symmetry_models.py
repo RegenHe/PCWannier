@@ -21,7 +21,7 @@ from pcwannier.symmetry import (
 
 
 P4MM = Path("pcwannier/symmetry/space_groups/p4mm.yaml")
-P4G = Path("pcwannier/symmetry/space_groups/p4g.yaml")
+P4GM = Path("pcwannier/symmetry/space_groups/p4gm.yaml")
 
 
 def p4mm_model(*, targets=(), points=(), gauge=None) -> SymmetryModel:

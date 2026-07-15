@@ -201,6 +201,7 @@ def disentangle_symmetry_constrained(
     tolerance: float,
     projection_max_iterations: int,
     svd_relative_tolerance: float,
+    projector_tolerance: float | None = None,
 ) -> SymmetryDisentanglementResult:
     if max_iter < 0:
         raise ValueError("disentanglement max_iter must be non-negative.")
@@ -208,6 +209,9 @@ def disentangle_symmetry_constrained(
         raise ValueError("disentanglement err_diff must be finite and non-negative.")
     if not np.isfinite(mixing) or not 0.0 < mixing <= 1.0:
         raise ValueError("disentanglement mixing must lie in (0, 1].")
+    projector_tolerance = tolerance if projector_tolerance is None else projector_tolerance
+    if not np.isfinite(projector_tolerance) or projector_tolerance <= 0.0:
+        raise ValueError("disentanglement projector tolerance must be positive and finite.")
 
     state = initializer.state
     stars = initial_gauge.stars
@@ -300,7 +304,7 @@ def disentangle_symmetry_constrained(
             report.max_path_consistency,
             mixing,
         )
-        if err < err_diff:
+        if err < err_diff and change < projector_tolerance:
             converged = True
             break
         last_omega = omega
@@ -394,7 +398,14 @@ def _symmetrized_z(initializer, context, provider, bands, frame, star: SymmetryK
             f"Star {star.index} has {path_count} symmetry paths; expected "
             f"{len(context.model.group.operations)}."
         )
-    zmat = accumulator / path_count
+    little_count = len(representative_member.paths)
+    if little_count == 0:
+        raise RuntimeError(
+            f"Star {star.index} representative has an empty little group."
+        )
+    # Sakuma Eq. (35) divides the full group-path sum by |G_k|. This leaves
+    # one contribution from each distinct member of the symmetry star.
+    zmat = accumulator / little_count
     little_accumulator = np.zeros_like(zmat)
     for path in representative_member.paths:
         dmat = provider.sewing_matrix_between_mapping(

@@ -84,7 +84,7 @@ def main(argv=None) -> int:
         ) or "none"
         LOGGER.info(
             "symmetry file=%s group=%s operations=%s targets=%s target_dimensions=%s "
-            "constrained_localization=%s output_basis=%s",
+            "constrained_localization=%s output_basis=%s bloch_convention=%s(sign=%s)",
             config.symmetry_resolved_path or config.input_path(config.symmetry_file),
             (
                 symmetry_model.group_definition.name
@@ -96,6 +96,8 @@ def main(argv=None) -> int:
             target_summary,
             config.symmetry_constrained,
             config.symmetry_output_basis,
+            symmetry_model.bloch_convention.name,
+            symmetry_model.bloch_convention.sign,
         )
 
     if args.base:

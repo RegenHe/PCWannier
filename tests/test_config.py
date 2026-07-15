@@ -28,6 +28,9 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.symmetry_output_basis == "strict"
     assert cfg.symmetry_context is not None
     assert cfg.symmetry_context.model.symmetry_gauge.enabled
+    assert cfg.symmetry_context.model.bloch_convention.sign == -1
+    assert cfg.symmetry_context.model.bloch_convention.name == "comsol"
+    assert cfg.symmetry_context.model.boundary_tolerance == pytest.approx(1.0e-6)
 
 
 def test_energy_window_parser(tmp_path):
@@ -48,6 +51,7 @@ def test_energy_window_parser(tmp_path):
                 "compute_backend = auto",
                 "disentangle_max_iter = 25",
                 "disentangle_err_diff = 1e-7",
+                "disentangle_projector_tolerance = 2e-7",
                 "disentangle_mixing = 0.75",
                 "symmetry_output_basis = FEM",
                 "extension = 1, 1",
@@ -68,6 +72,7 @@ def test_energy_window_parser(tmp_path):
     assert cfg.symmetry_constrained is False
     assert cfg.disentangle_max_iter == 25
     assert cfg.disentangle_err_diff == pytest.approx(1e-7)
+    assert cfg.disentangle_projector_tolerance == pytest.approx(2e-7)
     assert cfg.disentangle_mixing == pytest.approx(0.75)
     assert cfg.symmetry_output_basis == "fem"
 

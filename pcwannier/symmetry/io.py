@@ -24,7 +24,29 @@ from .specs import SymmetryCalculationSpec
 from .tables import FiniteGroupTable
 
 
-_FINITE_GROUP_FILES = ("C1.yaml", "C2.yaml", "C4.yaml", "Cs.yaml", "C2v.yaml", "C4v.yaml")
+_FINITE_GROUP_FILES = (
+    "C1.yaml",
+    "C2.yaml",
+    "C3.yaml",
+    "C4.yaml",
+    "C6.yaml",
+    "Cs.yaml",
+    "C2v.yaml",
+    "C3v.yaml",
+    "C4v.yaml",
+    "C6v.yaml",
+)
+
+_SPACE_GROUP_ALIASES = {
+    "cm.yaml": "c1m1.yaml",
+    "cmm.yaml": "c2mm.yaml",
+    "pmm.yaml": "p2mm.yaml",
+    "pmg.yaml": "p2mg.yaml",
+    "pgg.yaml": "p2gg.yaml",
+    "p4m.yaml": "p4mm.yaml",
+    "p4g.yaml": "p4gm.yaml",
+    "p6m.yaml": "p6mm.yaml",
+}
 
 
 def resolve_symmetry_file(path: str | Path, base_dir: str | Path) -> Path:
@@ -32,7 +54,8 @@ def resolve_symmetry_file(path: str | Path, base_dir: str | Path) -> Path:
     explicit = requested if requested.is_absolute() else Path(base_dir) / requested
     if explicit.is_file():
         return explicit.resolve()
-    library = resources.files("pcwannier.symmetry").joinpath("space_groups", requested.name)
+    resource_name = _SPACE_GROUP_ALIASES.get(requested.name.lower(), requested.name)
+    library = resources.files("pcwannier.symmetry").joinpath("space_groups", resource_name)
     if library.is_file():
         return Path(str(library))
     raise FileNotFoundError(
@@ -146,6 +169,16 @@ def compose_symmetry_model(
     base: SymmetryModel,
     calculation: SymmetryCalculationSpec,
 ) -> SymmetryModel:
+    convention = (
+        base.bloch_convention
+        if calculation.bloch_convention is None
+        else calculation.bloch_convention
+    )
+    boundary_tolerance = (
+        base.boundary_tolerance
+        if calculation.boundary_tolerance is None
+        else calculation.boundary_tolerance
+    )
     targets = base.targets
     if calculation.target_specs is not None:
         if base.group_definition is None:
@@ -171,6 +204,7 @@ def compose_symmetry_model(
                     base.group,
                     target_spec.center,
                     resolved_irrep,
+                    convention,
                 )
             )
         targets = tuple(built_targets)
@@ -204,6 +238,8 @@ def compose_symmetry_model(
         analysis,
         gauge,
         base.group_definition,
+        convention,
+        boundary_tolerance,
     )
 
 

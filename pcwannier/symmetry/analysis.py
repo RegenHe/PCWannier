@@ -362,7 +362,9 @@ def _analyze_point(
     operation_indices = tuple(element.operation_index for element in elements)
     resolved_little_group = (
         context.model.group_definition.resolve_little_group(
-            operation_indices, point.k_fractional
+            operation_indices,
+            point.k_fractional,
+            bloch_convention=context.model.bloch_convention,
         )
         if context.model.group_definition is not None
         else None
@@ -412,18 +414,31 @@ def _analyze_point(
         }
         block_characters = {name: complex(np.trace(matrix)) for name, matrix in block_matrices.items()}
         outside = [index for index in range(len(bands)) if index not in positions]
-        leakage = max(
-            (
-                float(
-                    np.sqrt(
-                        np.linalg.norm(matrix[np.ix_(outside, positions)], ord="fro") ** 2
-                        + np.linalg.norm(matrix[np.ix_(positions, outside)], ord="fro") ** 2
-                    )
+        leakage_by_operation = {
+            name: float(
+                np.sqrt(
+                    np.linalg.norm(matrix[np.ix_(outside, positions)], ord="fro") ** 2
+                    + np.linalg.norm(matrix[np.ix_(positions, outside)], ord="fro") ** 2
                 )
-                for matrix in matrices.values()
-            ),
-            default=0.0,
+            )
+            for name, matrix in matrices.items()
+        }
+        worst_operation, leakage = max(
+            leakage_by_operation.items(), key=lambda item: item[1], default=("<none>", 0.0)
         )
+        analysis_spec = context.model.representation_analysis
+        leakage_tolerance = (
+            context.model.tolerance
+            if analysis_spec is None
+            else analysis_spec.leakage_tolerance
+        )
+        if leakage > leakage_tolerance:
+            raise ValueError(
+                f"Degenerate block {block} at representation point {point.name!r} is not invariant "
+                f"under operation {worst_operation!r}: sewing leakage={leakage:.6g} exceeds "
+                f"{leakage_tolerance:.6g}. Increase the degeneracy tolerance or select a closed "
+                "band subspace before assigning irreducible representations."
+            )
         if resolved_little_group is not None:
             decomposition = decompose_little_group_characters(
                 resolved_little_group, block_characters

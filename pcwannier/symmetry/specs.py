@@ -13,6 +13,31 @@ class FieldKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class BlochConvention:
+    """Sign convention in psi_k = exp(sign * i k.r) u_k."""
+
+    sign: int = 1
+    name: str = "standard"
+
+    def __post_init__(self) -> None:
+        if self.sign not in {-1, 1}:
+            raise ValueError("Bloch convention sign must be -1 or 1.")
+        if not str(self.name).strip():
+            raise ValueError("Bloch convention name must not be empty.")
+
+    @classmethod
+    def for_dataset(cls, dataset_type: str) -> "BlochConvention":
+        name = str(dataset_type).strip().lower()
+        if name == "comsol":
+            return cls(-1, "comsol")
+        if name in {"standard", "synthetic"}:
+            return cls(1, name)
+        raise ValueError(
+            f"Dataset type {dataset_type!r} does not declare a Bloch phase convention."
+        )
+
+
+@dataclass(frozen=True)
 class DegeneracyTolerance:
     absolute: float = 1.0e-6
     relative: float = 1.0e-8
@@ -74,6 +99,11 @@ class RepresentationAnalysisSpec:
     field_kind: FieldKind
     degeneracy_tolerance: DegeneracyTolerance
     points: tuple[RepresentationPointSpec, ...]
+    leakage_tolerance: float = 1.0e-8
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.leakage_tolerance) or self.leakage_tolerance <= 0.0:
+            raise ValueError("Representation leakage tolerance must be positive and finite.")
 
 
 @dataclass(frozen=True)
@@ -104,3 +134,11 @@ class SymmetryCalculationSpec:
     target_specs: tuple[WannierTargetSpec, ...] | None = None
     representation_analysis: RepresentationAnalysisSpec | None = None
     symmetry_gauge: SymmetryGaugeSpec | None = None
+    bloch_convention: BlochConvention | None = None
+    boundary_tolerance: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.boundary_tolerance is not None and (
+            not np.isfinite(self.boundary_tolerance) or self.boundary_tolerance <= 0.0
+        ):
+            raise ValueError("Symmetry boundary tolerance must be positive and finite.")

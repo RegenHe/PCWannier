@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import permutations, product
 from typing import Mapping, Protocol
 
 import numpy as np
 
-from .group import SpaceGroup
+from .group import SpaceGroup, reduce_fractional
+from .specs import BlochConvention
 from .tables import ConcreteFiniteGroup, FiniteGroupTable
 
 
@@ -166,9 +167,21 @@ class FactorSystem:
     phases: np.ndarray
     cocycle_residual: float
     trivializing_cochain: np.ndarray | None
+    bloch_sign: int = 1
+    tolerance: float = 1.0e-8
 
     @property
     def is_trivial(self) -> bool:
+        """Compatibility alias for cohomologically_trivial."""
+
+        return self.cohomologically_trivial
+
+    @property
+    def raw_trivial(self) -> bool:
+        return self.phase_residual <= self.tolerance
+
+    @property
+    def cohomologically_trivial(self) -> bool:
         return self.trivializing_cochain is not None
 
     @property
@@ -214,14 +227,26 @@ class SpaceGroupDefinition:
     tolerance: float
     group: SpaceGroup
     finite_groups: FiniteGroupLibrary
+    _identification_cache: dict[tuple[int, ...], FiniteGroupIdentification] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _little_group_cache: dict[tuple[tuple[int, ...], bytes, int], ResolvedLittleGroup] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.dimension != self.group.dimension:
             raise ValueError("Space-group definition dimension does not match its operations.")
 
     def identify_operations(self, operation_indices) -> FiniteGroupIdentification:
-        concrete = ConcreteFiniteGroup.from_space_group(self.group, operation_indices)
-        return self.finite_groups.identify(concrete)
+        indices = tuple(int(value) for value in operation_indices)
+        cached = self._identification_cache.get(indices)
+        if cached is not None:
+            return cached
+        concrete = ConcreteFiniteGroup.from_space_group(self.group, indices)
+        result = self.finite_groups.identify(concrete)
+        self._identification_cache[indices] = result
+        return result
 
     def site_irrep(self, operation_indices, name: str) -> ResolvedIrrep:
         return self.identify_operations(operation_indices).resolved_irrep(name)
@@ -232,11 +257,28 @@ class SpaceGroupDefinition:
         k_fractional,
         *,
         projective_resolver: ProjectiveIrrepResolver | None = None,
+        bloch_convention: BlochConvention | None = None,
     ) -> ResolvedLittleGroup:
-        concrete = ConcreteFiniteGroup.from_space_group(self.group, operation_indices)
-        identification = self.finite_groups.identify(concrete)
-        factor = build_factor_system(concrete, k_fractional, self.tolerance)
-        if factor.is_trivial:
+        convention = BlochConvention() if bloch_convention is None else bloch_convention
+        indices = tuple(int(value) for value in operation_indices)
+        kpoint = np.asarray(k_fractional, dtype=float)
+        if kpoint.shape != (self.dimension,):
+            raise ValueError(f"k_fractional must have shape {(self.dimension,)}.")
+        reduced_k = reduce_fractional(kpoint, self.tolerance).reduced
+        cache_key = (indices, np.ascontiguousarray(reduced_k).tobytes(), convention.sign)
+        if projective_resolver is None:
+            cached = self._little_group_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        identification = self.identify_operations(indices)
+        concrete = identification.concrete
+        factor = build_factor_system(
+            concrete,
+            kpoint,
+            self.tolerance,
+            bloch_convention=convention,
+        )
+        if factor.cohomologically_trivial:
             irreps = tuple(
                 identification.resolved_irrep(irrep.name)
                 for irrep in identification.canonical.irreps
@@ -245,13 +287,16 @@ class SpaceGroupDefinition:
             irreps = tuple(projective_resolver.resolve(identification, factor))
         else:
             irreps = ()
-        return ResolvedLittleGroup(
+        result = ResolvedLittleGroup(
             identification.canonical.name,
             concrete,
             identification,
             factor,
             irreps,
         )
+        if projective_resolver is None:
+            self._little_group_cache[cache_key] = result
+        return result
 
 
 SymmetryGroupDefinition = SpaceGroupDefinition
@@ -268,6 +313,8 @@ def resolve_little_group(
     definition: SpaceGroupDefinition,
     k_fractional,
     operation_indices=None,
+    *,
+    bloch_convention: BlochConvention | None = None,
 ) -> ResolvedLittleGroup:
     if operation_indices is None:
         kpoint = np.asarray(k_fractional, dtype=float)
@@ -281,14 +328,21 @@ def resolve_little_group(
                 atol=definition.tolerance,
             )
         )
-    return definition.resolve_little_group(operation_indices, k_fractional)
+    return definition.resolve_little_group(
+        operation_indices,
+        k_fractional,
+        bloch_convention=bloch_convention,
+    )
 
 
 def build_factor_system(
     concrete: ConcreteFiniteGroup,
     k_fractional,
     tolerance: float,
+    *,
+    bloch_convention: BlochConvention | None = None,
 ) -> FactorSystem:
+    convention = BlochConvention() if bloch_convention is None else bloch_convention
     kpoint = np.asarray(k_fractional, dtype=float)
     if kpoint.shape != (concrete.group.dimension,):
         raise ValueError(f"k_fractional must have shape {(concrete.group.dimension,)}.")
@@ -307,7 +361,12 @@ def build_factor_system(
             if not np.allclose(difference, rounded, rtol=0.0, atol=tolerance):
                 raise ValueError("Seitz representatives differ by a non-lattice translation.")
             shifts[left, right] = rounded
-    phases = np.exp(-2j * np.pi * np.einsum("abd,d->ab", shifts, kpoint))
+    phases = np.exp(
+        -convention.sign
+        * 2j
+        * np.pi
+        * np.einsum("abd,d->ab", shifts, kpoint)
+    )
     cocycle_residual = 0.0
     for left in range(concrete.order):
         for middle in range(concrete.order):
@@ -326,7 +385,14 @@ def build_factor_system(
     phases.setflags(write=False)
     if cochain is not None:
         cochain.setflags(write=False)
-    return FactorSystem(shifts, phases, cocycle_residual, cochain)
+    return FactorSystem(
+        shifts,
+        phases,
+        cocycle_residual,
+        cochain,
+        convention.sign,
+        tolerance,
+    )
 
 
 def build_group_irrep(
@@ -410,26 +476,33 @@ def _group_isomorphisms(actual: FiniteGroupTable, canonical: FiniteGroupTable):
         return ()
     identity_a = actual.identity_index
     identity_c = canonical.identity_index
-    remaining_a = [index for index in range(actual.order) if index != identity_a]
-    by_order = {}
+    actual_class_sizes = _element_conjugacy_class_sizes(actual)
+    canonical_class_sizes = _element_conjugacy_class_sizes(canonical)
+    actual_buckets: dict[tuple[int, int], list[int]] = {}
+    canonical_buckets: dict[tuple[int, int], list[int]] = {}
+    for index in range(actual.order):
+        if index != identity_a:
+            key = (actual.element_orders[index], actual_class_sizes[index])
+            actual_buckets.setdefault(key, []).append(index)
     for index in range(canonical.order):
         if index != identity_c:
-            by_order.setdefault(canonical.element_orders[index], []).append(index)
-    choices = [by_order.get(actual.element_orders[index], ()) for index in remaining_a]
-    if any(not value for value in choices):
+            key = (canonical.element_orders[index], canonical_class_sizes[index])
+            canonical_buckets.setdefault(key, []).append(index)
+    if set(actual_buckets) != set(canonical_buckets) or any(
+        len(actual_buckets[key]) != len(canonical_buckets[key]) for key in actual_buckets
+    ):
         return ()
+    keys = tuple(sorted(actual_buckets))
+    bucket_permutations = tuple(
+        tuple(permutations(canonical_buckets[key])) for key in keys
+    )
     output = []
-    for values in permutations([index for group in by_order.values() for index in group]):
+    for selected_buckets in product(*bucket_permutations):
         mapping = [None] * actual.order
         mapping[identity_a] = identity_c
-        valid_orders = True
-        for actual_index, canonical_index in zip(remaining_a, values):
-            if actual.element_orders[actual_index] != canonical.element_orders[canonical_index]:
-                valid_orders = False
-                break
-            mapping[actual_index] = canonical_index
-        if not valid_orders:
-            continue
+        for key, selected in zip(keys, selected_buckets):
+            for actual_index, canonical_index in zip(actual_buckets[key], selected):
+                mapping[actual_index] = canonical_index
         if all(
             mapping[int(actual.multiplication[left, right])]
             == int(canonical.multiplication[mapping[left], mapping[right]])
@@ -438,6 +511,15 @@ def _group_isomorphisms(actual: FiniteGroupTable, canonical: FiniteGroupTable):
         ):
             output.append(tuple(int(value) for value in mapping))
     return tuple(output)
+
+
+def _element_conjugacy_class_sizes(table: FiniteGroupTable) -> tuple[int, ...]:
+    sizes = [0] * table.order
+    for conjugacy_class in table.conjugacy_classes:
+        size = len(conjugacy_class.element_indices)
+        for element in conjugacy_class.element_indices:
+            sizes[element] = size
+    return tuple(sizes)
 
 
 def _point_actions_match(

@@ -181,6 +181,11 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             if config.disentangle_err_diff is None
             else config.disentangle_err_diff
         )
+        disentangle_projector_tolerance = (
+            config.symmetry_tolerance
+            if config.disentangle_projector_tolerance is None
+            else config.disentangle_projector_tolerance
+        )
         identity_only = len(bundle.symmetry.model.group.operations) == 1
         if entangled and identity_only:
             with timed_step(
@@ -211,6 +216,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 LOGGER,
                 max_iter=run_iterations,
                 err_diff=disentangle_err_diff,
+                projector_tolerance=disentangle_projector_tolerance,
                 mixing=config.disentangle_mixing,
             ):
                 symmetry_disentanglement = disentangle_symmetry_constrained(
@@ -225,6 +231,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                     tolerance=gauge_spec.tolerance,
                     projection_max_iterations=gauge_spec.max_iterations,
                     svd_relative_tolerance=gauge_spec.svd_relative_tolerance,
+                    projector_tolerance=disentangle_projector_tolerance,
                 )
             initializer.matV = symmetry_disentanglement.optimal_frame
             gauge_residuals = evaluate_symmetry_gauge(
@@ -401,7 +408,8 @@ def _log_symmetry_analysis(result) -> None:
         LOGGER.info(
             "Symmetry point %s: little_group=%s classes=%s mapping=%s k=%s "
             "bands(actual,1-based)=%s blocks=%s unitarity=%.6g leakage=%.6g "
-            "composition=%.6g factor_phase=%.6g factor_cocycle=%.6g characters=%s",
+            "composition=%.6g factor_phase=%.6g factor_cocycle=%.6g "
+            "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s characters=%s",
             point.name,
             point.little_group_name or "unresolved",
             point.conjugacy_classes,
@@ -414,6 +422,13 @@ def _log_symmetry_analysis(result) -> None:
             point.diagnostics.max_composition_residual,
             point.factor_system.phase_residual if point.factor_system is not None else 0.0,
             point.factor_system.cocycle_residual if point.factor_system is not None else 0.0,
+            point.factor_system.raw_trivial if point.factor_system is not None else True,
+            (
+                point.factor_system.cohomologically_trivial
+                if point.factor_system is not None
+                else True
+            ),
+            point.factor_system.bloch_sign if point.factor_system is not None else 1,
             {name: complex(value) for name, value in point.characters.items()},
         )
         if point.physical_decomposition is not None:

@@ -1,0 +1,15 @@
+name: p2gg
+dimension: 2
+operations:
+  - name: E
+    rotation: [[1, 0], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: C2
+    rotation: [[-1, 0], [0, -1]]
+    translation: [0.0, 0.0]
+  - name: glide_x
+    rotation: [[-1, 0], [0, 1]]
+    translation: [0.5, 0.5]
+  - name: glide_y
+    rotation: [[1, 0], [0, -1]]
+    translation: [0.5, 0.5]

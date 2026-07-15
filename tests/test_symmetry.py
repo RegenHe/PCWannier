@@ -2,18 +2,27 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import scipy.linalg
 
 from pcwannier import load_config, load_symmetry
 from pcwannier.symmetry import (
+    BlochConvention,
+    BlochSymmetryAction,
     FieldKind,
     SpaceGroup,
     SpaceGroupOperation,
+    SymmetryCalculationSpec,
+    WannierTargetSpec,
     analyze_little_group,
     build_symmetry_context,
+    build_symmetry_stars,
     cartesian_field_matrix,
     reduce_fractional,
+    resolve_little_group,
+    compose_symmetry_model,
+    symmetrize_gradient,
 )
-from tests.symmetry_models import P4MM, model_from_space_group, square_2c_model
+from tests.symmetry_models import P4GM, P4MM, model_from_space_group, square_2c_model
 
 
 def test_space_group_algebra_and_reciprocal_duality():
@@ -67,6 +76,67 @@ def test_square_c4_orbit_actions_and_target_representation():
     assert np.allclose(composed, target.matrix(c2_index, kpoint), rtol=0.0, atol=1e-12)
 
 
+def test_p4g_glide_uses_one_bloch_convention_for_field_target_and_factor():
+    base = load_symmetry(P4GM)
+    kpoint = np.array([0.0, 0.25])
+    glide_index = base.group.operation_index(base.group.operation_by_name("glide_x"))
+    identity_index = base.group.identity_index
+    glide = base.group.operations[glide_index]
+    vertices = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    elements = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.intp)
+    constant = np.ones((1, 4), dtype=np.complex128)
+
+    for sign in (1, -1):
+        convention = BlochConvention(sign, f"test-{sign}")
+        model = compose_symmetry_model(
+            base,
+            SymmetryCalculationSpec(
+                target_specs=(WannierTargetSpec("origin_A", [0.0, 0.0], "A"),),
+                bloch_convention=convention,
+            ),
+        )
+        target = model.target("origin_A")
+        resolved = model.group_definition.resolve_little_group(
+            (identity_index, glide_index),
+            kpoint,
+            bloch_convention=convention,
+        )
+        glide_local = resolved.concrete.local_index(glide_index)
+        factor = resolved.factor_system.phases[glide_local, glide_local]
+        expected = np.exp(-sign * 2j * np.pi * kpoint[1])
+        assert factor == pytest.approx(expected)
+        assert resolved.factor_system.bloch_sign == sign
+
+        transformed_k = glide.act_reciprocal(kpoint)
+        composed = target.matrix(glide_index, transformed_k) @ target.matrix(
+            glide_index, kpoint
+        )
+        assert np.allclose(
+            composed,
+            factor * target.matrix(identity_index, kpoint),
+            atol=1e-12,
+        )
+
+        action = BlochSymmetryAction(
+            vertices,
+            elements,
+            np.eye(2),
+            bloch_sign=sign,
+        )
+        once = action.apply(constant, glide, kpoint, FieldKind.SCALAR)
+        twice = action.apply(once, glide, transformed_k, FieldKind.SCALAR)
+        assert np.allclose(twice, factor * constant, atol=1e-12)
+
+        projective = resolve_little_group(
+            base.group_definition,
+            [0.5, 0.0],
+            bloch_convention=convention,
+        )
+        assert not projective.factor_system.cohomologically_trivial
+        with pytest.raises(NotImplementedError, match="projective irreps"):
+            projective.require_irreps()
+
+
 def test_square_k_mesh_mapping_and_closure_errors():
     model = load_symmetry(P4MM)
     axes = [np.arange(-0.5, 0.5, 0.25), np.arange(-0.5, 0.5, 0.25)]
@@ -84,6 +154,77 @@ def test_square_k_mesh_mapping_and_closure_errors():
         build_symmetry_context(model, [np.array([-0.5, 0.0]), np.array([-0.5, -0.25, 0.0, 0.25])])
     with pytest.raises(ValueError, match="periodically duplicate"):
         build_symmetry_context(model, [np.array([-0.5, 0.5]), np.array([-0.5, 0.0])])
+
+
+def test_k_mapping_rejects_ambiguous_targets_and_unphysical_tolerance():
+    tolerance = 1.0e-3
+    reflection = SpaceGroup(
+        (
+            SpaceGroupOperation(np.eye(2, dtype=int), np.zeros(2), "E"),
+            SpaceGroupOperation([[-1, 0], [0, 1]], np.zeros(2), "mirror_x"),
+        ),
+        tolerance=tolerance,
+    )
+    model = model_from_space_group("Cs", reflection)
+    xaxis = np.array([0.75, -0.75 - 0.75 * tolerance, -0.75 + 0.75 * tolerance])
+    with pytest.raises(ValueError, match="Ambiguous symmetry k mapping"):
+        build_symmetry_context(model, [xaxis, np.array([0.0])])
+
+    with pytest.raises(ValueError, match="at least"):
+        SpaceGroup(
+            (SpaceGroupOperation(np.eye(2, dtype=int), np.zeros(2), "E"),),
+            tolerance=np.finfo(float).eps,
+        )
+
+
+def test_constrained_gradient_pullback_matches_directional_finite_difference():
+    model = square_2c_model(analysis=False)
+    axes = [np.array([-0.25, 0.25]), np.array([-0.25, 0.25])]
+    context = build_symmetry_context(model, axes)
+    stars = build_symmetry_stars(context)
+    assert len(stars.stars) == 1
+    star = stars.stars[0]
+    shape = (2, 2, 1)
+    raw = np.empty(shape, dtype=object)
+    rng = np.random.default_rng(2718)
+    for index in np.ndindex(shape):
+        matrix = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
+        raw[index] = 0.5 * (matrix - matrix.conj().T)
+
+    representative_gradient = symmetrize_gradient(raw, context, stars)[0]
+    representative_k = np.asarray(
+        [axes[axis][star.representative_index[axis]] for axis in range(2)]
+    )
+    target = model.targets[0]
+
+    member_directions = {}
+    for member in star.members:
+        path = member.paths[0]
+        dmat = target.matrix(path.operation_index, representative_k)
+        member_directions[member.k_index] = (
+            dmat @ representative_gradient @ dmat.conj().T
+        )
+
+    def objective(step):
+        total = 0.0
+        for member in star.members:
+            state_index = tuple(member.k_index) + (0,)
+            direction = member_directions[member.k_index]
+            total += float(
+                np.real(
+                    np.trace(
+                        raw[state_index].conj().T @ scipy.linalg.expm(step * direction)
+                    )
+                )
+            )
+        return total
+
+    delta = 1.0e-6
+    finite_difference = (objective(delta) - objective(-delta)) / (2.0 * delta)
+    analytic = float(
+        np.real(np.trace(representative_gradient.conj().T @ representative_gradient))
+    )
+    assert finite_difference == pytest.approx(analytic, rel=1e-7, abs=1e-9)
 
 
 def test_incar_loads_relative_space_group_file(tmp_path):

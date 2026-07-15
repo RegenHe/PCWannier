@@ -1,0 +1,10 @@
+# Primitive centered-rectangular basis: a1=(a/2,b/2), a2=(-a/2,b/2).
+name: c1m1
+dimension: 2
+operations:
+  - name: E
+    rotation: [[1, 0], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: sigma_x
+    rotation: [[0, -1], [-1, 0]]
+    translation: [0.0, 0.0]

@@ -67,7 +67,7 @@ def _synthetic_state(fields: np.ndarray, energies=None):
     config = SimpleNamespace(
         real_lattice_vectors=[[1.0, 0.0], [0.0, 1.0]],
         lattice_const=1.0,
-        dataset_type="comsol",
+        dataset_type="synthetic",
     )
     return SimpleNamespace(
         is_bloch=True,
@@ -161,6 +161,42 @@ def test_state_provider_gives_a1_and_e_sewing_matrices():
     assert full.points[0].diagnostics.unitarity_error < 1e-12
     assert full.points[0].diagnostics.max_composition_residual < 1e-12
     assert full.points[0].physical_decomposition.multiplicities["E"] == 1
+
+
+def test_state_provider_rejects_inconsistent_periodic_duplicate_nodes():
+    model = square_2c_model(analysis=False)
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    x = _square_mesh().vertices[:, 0]
+    field = np.asarray([np.sin(2 * np.pi * x)])
+
+    field_state = _synthetic_state(field, energies=[1.0])
+    field_state.fields[0, 0, 0][0, -1] += 0.1
+    with pytest.raises(ValueError, match="inconsistent periodic Bloch fields"):
+        StateBlochSymmetryProvider(field_state, context)
+
+    epsilon_state = _synthetic_state(field, energies=[1.0])
+    epsilon_state.epsilon[-1] = 2.0
+    with pytest.raises(ValueError, match="inconsistent epsilon"):
+        StateBlochSymmetryProvider(epsilon_state, context)
+
+
+def test_representation_analysis_rejects_noninvariant_energy_block():
+    model = square_2c_model()
+    gamma_only = replace(
+        model,
+        representation_analysis=replace(
+            model.representation_analysis,
+            points=(model.representation_analysis.points[0],),
+        ),
+    )
+    context = build_symmetry_context(gamma_only, [np.array([0.0]), np.array([0.0])])
+    x = _square_mesh().vertices[:, 0]
+    y = _square_mesh().vertices[:, 1]
+    fields = np.asarray([np.sin(2 * np.pi * x), np.sin(2 * np.pi * y)])
+    state = _synthetic_state(fields, energies=[1.0, 2.0])
+
+    with pytest.raises(ValueError, match="Degenerate block.*not invariant"):
+        run_symmetry_analysis(state, context)
 
 
 def test_target_2c_a1_has_expected_gamma_x_m_content():

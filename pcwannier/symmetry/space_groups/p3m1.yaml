@@ -1,0 +1,22 @@
+# Hexagonal primitive basis with a1.a2 = -|a1|^2/2 (120 degrees).
+name: p3m1
+dimension: 2
+operations:
+  - name: E
+    rotation: [[1, 0], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: C3
+    rotation: [[0, -1], [1, -1]]
+    translation: [0.0, 0.0]
+  - name: C3_inv
+    rotation: [[-1, 1], [-1, 0]]
+    translation: [0.0, 0.0]
+  - name: sigma_1
+    rotation: [[0, -1], [-1, 0]]
+    translation: [0.0, 0.0]
+  - name: sigma_2
+    rotation: [[-1, 1], [0, 1]]
+    translation: [0.0, 0.0]
+  - name: sigma_3
+    rotation: [[1, 0], [1, -1]]
+    translation: [0.0, 0.0]

@@ -109,6 +109,7 @@ from .representation import (
     combined_target_matrix,
 )
 from .specs import (
+    BlochConvention,
     DegeneracyTolerance,
     FieldKind,
     RepresentationAnalysisSpec,
@@ -132,6 +133,7 @@ from .wannier_validation import (
 
 __all__ = [
     "BarycentricStencil",
+    "BlochConvention",
     "BlochSymmetryAction",
     "CrystallographicOrbit",
     "ConjugacyClass",

@@ -1,0 +1,52 @@
+name: C6v
+dimension: 2
+elements:
+  - name: E
+    point_action: [[1, 0], [0, 1]]
+  - name: C6
+    point_action: [[1, -1], [1, 0]]
+  - name: C3
+    point_action: [[0, -1], [1, -1]]
+  - name: C2
+    point_action: [[-1, 0], [0, -1]]
+  - name: C3_inv
+    point_action: [[-1, 1], [-1, 0]]
+  - name: C6_inv
+    point_action: [[0, 1], [-1, 1]]
+  - name: sigma_v1
+    point_action: [[0, 1], [1, 0]]
+  - name: sigma_v2
+    point_action: [[1, -1], [0, -1]]
+  - name: sigma_v3
+    point_action: [[-1, 0], [-1, 1]]
+  - name: sigma_d1
+    point_action: [[0, -1], [-1, 0]]
+  - name: sigma_d2
+    point_action: [[-1, 1], [0, 1]]
+  - name: sigma_d3
+    point_action: [[1, 0], [1, -1]]
+irreps:
+  A1:
+    dimension: 1
+    characters: {E: 1, C6: 1, C3: 1, C2: 1, C3_inv: 1, C6_inv: 1, sigma_v1: 1, sigma_v2: 1, sigma_v3: 1, sigma_d1: 1, sigma_d2: 1, sigma_d3: 1}
+  A2:
+    dimension: 1
+    characters: {E: 1, C6: 1, C3: 1, C2: 1, C3_inv: 1, C6_inv: 1, sigma_v1: -1, sigma_v2: -1, sigma_v3: -1, sigma_d1: -1, sigma_d2: -1, sigma_d3: -1}
+  B1:
+    dimension: 1
+    characters: {E: 1, C6: -1, C3: 1, C2: -1, C3_inv: 1, C6_inv: -1, sigma_v1: 1, sigma_v2: 1, sigma_v3: 1, sigma_d1: -1, sigma_d2: -1, sigma_d3: -1}
+  B2:
+    dimension: 1
+    characters: {E: 1, C6: -1, C3: 1, C2: -1, C3_inv: 1, C6_inv: -1, sigma_v1: -1, sigma_v2: -1, sigma_v3: -1, sigma_d1: 1, sigma_d2: 1, sigma_d3: 1}
+  E1:
+    dimension: 2
+    characters: {E: 2, C6: 1, C3: -1, C2: -2, C3_inv: -1, C6_inv: 1, sigma_v1: 0, sigma_v2: 0, sigma_v3: 0, sigma_d1: 0, sigma_d2: 0, sigma_d3: 0}
+    generators:
+      C6: [[0.5, -0.8660254037844386], [0.8660254037844386, 0.5]]
+      sigma_v1: [[1.0, 0.0], [0.0, -1.0]]
+  E2:
+    dimension: 2
+    characters: {E: 2, C6: -1, C3: -1, C2: 2, C3_inv: -1, C6_inv: -1, sigma_v1: 0, sigma_v2: 0, sigma_v3: 0, sigma_d1: 0, sigma_d2: 0, sigma_d3: 0}
+    generators:
+      C6: [[-0.5, -0.8660254037844386], [0.8660254037844386, -0.5]]
+      sigma_v1: [[1.0, 0.0], [0.0, -1.0]]

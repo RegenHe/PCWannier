@@ -139,6 +139,70 @@ def test_removed_w_center_input_is_rejected(tmp_path):
         load_config(incar)
 
 
+@pytest.mark.parametrize(
+    ("suffix", "message"),
+    [
+        ("unknown_option = 1", "Unknown incar field"),
+        ("lattice_const = 2", "Duplicate incar field"),
+        ("this is not an assignment", "Malformed incar line"),
+    ],
+)
+def test_incar_rejects_unknown_duplicate_and_malformed_fields(tmp_path, suffix, message):
+    incar = tmp_path / "incar"
+    incar.write_text(_minimal_symmetry_incar() + "\n" + suffix + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_config(incar)
+
+
+@pytest.mark.parametrize("value", ["yes", "0", "tru", "enabled"])
+def test_boolean_fields_accept_only_true_or_false(tmp_path, value):
+    incar = tmp_path / "incar"
+    source = _minimal_symmetry_incar().replace(
+        "symmetry_constrained = true", f"symmetry_constrained = {value}"
+    )
+    incar.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be 'true' or 'false'"):
+        load_config(incar)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("real_lattice_vectors = 1 0, 0 1", "real_lattice_vectors = 1 0, 2 0", "invertible"),
+        ("k_points = -0.5:0.5:0.5, -0.5:0.5:0.5", "k_points = 0:1:2, -0.5:0.5:0.5", "periodic duplicate"),
+        ("band_window = 0:3", "band_window = false", "band_window must not be false"),
+        ("extension = 1, 1", "extension = 1, 0", "positive integers"),
+    ],
+)
+def test_central_config_validation_rejects_invalid_core_geometry(tmp_path, old, new, message):
+    incar = tmp_path / "incar"
+    incar.write_text(_minimal_symmetry_incar().replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_config(incar)
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("max_iter = -1", "max_iter must be non-negative"),
+        ("epsilon = 0", "epsilon must be finite and positive"),
+        ("projection_rank_tolerance = 1", "projection_rank_tolerance"),
+        ("neighbor = 0 0", r"neighbor\[0\] must be non-zero"),
+        ("inner_window = 2:4", "frozen inner_window bands"),
+        ("k_path\nX; 0.5; 0\nend", "k_path point 0"),
+    ],
+)
+def test_central_config_validation_rejects_invalid_algorithm_inputs(tmp_path, extra, message):
+    incar = tmp_path / "incar"
+    incar.write_text(_minimal_symmetry_incar() + "\n" + extra + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_config(incar)
+
+
 def _minimal_symmetry_incar() -> str:
     return "\n".join(
         [

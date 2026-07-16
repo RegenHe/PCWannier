@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from dataclasses import replace
 
@@ -8,6 +9,7 @@ import pytest
 
 from pcwannier.compute.integration import integrate_overlap_matrix, mesh_integral_view
 from pcwannier.data import Mesh
+from pcwannier.matrix_io import load_cell_matrix
 from pcwannier.symmetry import (
     BlochSymmetryAction,
     DegeneracyTolerance,
@@ -25,6 +27,8 @@ from pcwannier.symmetry import (
     intertwiner_residual,
     little_group,
     run_symmetry_analysis,
+    load_sewing_matrix_cache,
+    save_sewing_matrix_cache,
 )
 
 from .symmetry_models import p4mm_model, square_2c_model
@@ -161,6 +165,91 @@ def test_state_provider_gives_a1_and_e_sewing_matrices():
     assert full.points[0].diagnostics.unitarity_error < 1e-12
     assert full.points[0].diagnostics.max_composition_residual < 1e-12
     assert full.points[0].physical_decomposition.multiplicities["E"] == 1
+
+
+def test_state_provider_roundtrips_full_outer_sewing_cache(tmp_path, monkeypatch):
+    model = square_2c_model(analysis=False)
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    x = mesh.vertices[:, 0]
+    y = mesh.vertices[:, 1]
+    fields = np.asarray([np.sin(2 * np.pi * x), np.sin(2 * np.pi * y)])
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+    state.config.use_cached_data = []
+    provider = StateBlochSymmetryProvider(state, context)
+    c4_index = model.group.operation_index(model.group.operation_by_name("C4"))
+    mapping = provider.mapping(c4_index, (0, 0))
+    expected = provider.sewing_matrix_between_mapping(mapping, (1,), (0, 1))
+
+    path = tmp_path / "D.txt"
+    save_sewing_matrix_cache(
+        path,
+        provider.cached_sewing_matrices,
+        dimension=2,
+        bloch_sign=model.bloch_convention.sign,
+        k_shape=(1, 1),
+        calculation_fingerprint=provider.sewing_cache_fingerprint,
+    )
+    saved = load_sewing_matrix_cache(path)
+    generic = load_cell_matrix(path, (1,))
+    assert len(saved.entries) == 1
+    assert saved.entries[0].matrix.shape == (2, 2)
+    assert saved.entries[0].source_band_indices == (0, 1)
+    assert np.allclose(generic[0], saved.entries[0].matrix, atol=1e-15)
+    assert "CELL(0,)" in path.read_text(encoding="utf-8")
+
+    cached_state = _synthetic_state(fields, energies=[1.0, 1.0])
+    cached_state.config.use_cached_data = ["D"]
+    cached_state.config.D_file = str(path)
+    cached_state.config.input_path = lambda value: Path(value)
+    cached_provider = StateBlochSymmetryProvider(cached_state, context)
+
+    def fail_integration(*args, **kwargs):
+        raise AssertionError("A cache hit must not integrate Bloch fields again.")
+
+    monkeypatch.setattr("pcwannier.symmetry.bloch.integrate_overlap_matrix", fail_integration)
+    actual = cached_provider.sewing_matrix_between_mapping(mapping, (1,), (0, 1))
+    assert np.allclose(actual, expected, atol=1e-12)
+
+    identity = model.group.operation_index(model.group.operation_by_name("E"))
+    with pytest.raises(ValueError, match="does not contain the requested exact Seitz action"):
+        cached_provider.sewing_matrix_for_mapping(
+            cached_provider.mapping(identity, (0, 0)), (0, 1)
+        )
+
+
+def test_state_provider_rejects_sewing_cache_for_different_calculation(tmp_path):
+    model = square_2c_model(analysis=False)
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+    state.config.use_cached_data = []
+    provider = StateBlochSymmetryProvider(state, context)
+    c4_index = model.group.operation_index(model.group.operation_by_name("C4"))
+    provider.sewing_matrix_for_mapping(provider.mapping(c4_index, (0, 0)), (0, 1))
+    path = tmp_path / "D.txt"
+    save_sewing_matrix_cache(
+        path,
+        provider.cached_sewing_matrices,
+        dimension=2,
+        bloch_sign=model.bloch_convention.sign,
+        k_shape=(1, 1),
+        calculation_fingerprint=provider.sewing_cache_fingerprint,
+    )
+
+    changed = _synthetic_state(fields, energies=[1.0, 1.0])
+    changed.E_idx[0, 0, 0] = [0, 2]
+    changed.config.use_cached_data = ["D"]
+    changed.config.D_file = str(path)
+    changed.config.input_path = lambda value: Path(value)
+    with pytest.raises(ValueError, match="calculation fingerprint does not match"):
+        StateBlochSymmetryProvider(changed, context)
 
 
 def test_state_provider_rejects_inconsistent_periodic_duplicate_nodes():

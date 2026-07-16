@@ -27,6 +27,12 @@ from .bloch import (
     coefficient_metric_overlap,
     fractional_mesh_vertices,
 )
+from .cache import (
+    SewingMatrixCache,
+    SewingMatrixCacheEntry,
+    load_sewing_matrix_cache,
+    save_sewing_matrix_cache,
+)
 from .group import (
     CrystallographicOrbit,
     OrbitAction,
@@ -167,6 +173,8 @@ __all__ = [
     "ResolvedIrrep",
     "RepresentativeGaugeDiagnostics",
     "SewingDiagnostics",
+    "SewingMatrixCache",
+    "SewingMatrixCacheEntry",
     "SewingMatrixProvider",
     "SewingMatrixRequest",
     "SiteIrrep",
@@ -217,6 +225,7 @@ __all__ = [
     "group_degenerate_bands",
     "intertwiner_residual",
     "little_group",
+    "load_sewing_matrix_cache",
     "localize_symmetry_constrained",
     "load_symmetry",
     "load_symmetry_group",
@@ -237,6 +246,7 @@ __all__ = [
     "propagate_target_gauge",
     "reduce_fractional",
     "run_symmetry_analysis",
+    "save_sewing_matrix_cache",
     "solve_intertwiner_space",
     "symmetrize_gradient",
     "validate_frozen_window_covariance",

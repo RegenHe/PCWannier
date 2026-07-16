@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from types import SimpleNamespace
 
 from pcwannier.compute.gradient import Gradient
@@ -8,6 +9,7 @@ from pcwannier.compute.matrix import MSet
 from pcwannier.compute.parallel import parallel_map
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import InputBundle, Mesh
+from pcwannier.matrix_io import save_cell_matrix
 from pcwannier.compute.tba import TBAModel
 
 
@@ -220,8 +222,18 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
         energy_matrix=np.array([[[[1.0, 2.0]]]]),
     )
     state = StateCollection(bundle, threads=1)
+    overlap_calls = 0
+    original_overlap = state._overlap_matrix
+
+    def counted_overlap(*index):
+        nonlocal overlap_calls
+        overlap_calls += 1
+        return original_overlap(*index)
+
+    state._overlap_matrix = counted_overlap
 
     _, initially_needs_orth = state.check_orthogonality()
+    raw_s = state.S[0, 0, 0].copy()
     state.orthogonalize()
     strict_report, strict_needs_orth = state.check_orthogonality(apply_transform=True)
     mixed_report, mixed_needs_orth = state.check_orthogonality(apply_transform=False)
@@ -231,6 +243,8 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
     assert np.max(strict_report[..., 3]) < 1e-10
     assert mixed_needs_orth
     assert np.max(mixed_report[..., 2]) > 1e-3
+    assert overlap_calls == 1
+    assert np.array_equal(state.S[0, 0, 0], raw_s)
 
 
 def test_inner_window_projection_is_not_overwritten_by_matc():
@@ -262,6 +276,144 @@ def test_inner_window_projection_is_not_overwritten_by_matc():
     assert np.array_equal(captured["V"], projected_v)
 
 
+@pytest.mark.parametrize("norm", [0.0, -1.0, np.nan])
+def test_projection_rejects_nonpositive_or_nonfinite_basis_norm(monkeypatch, norm):
+    initializer = object.__new__(StateInitializer)
+    initializer.config = SimpleNamespace(
+        band_calc_num=1,
+        projections=[{"frac_position": [0.0, 0.0], "xaxis_angluar": 0.0, "states": [[1, 0, 1.0]]}],
+        real_lattice_vectors=np.eye(2),
+        origin=[0.0, 0.0],
+        lattice_const=1.0,
+        integration_mode="nodal",
+    )
+    initializer.state = SimpleNamespace(
+        extention_mesh=SimpleNamespace(rfunc=lambda *args: np.ones(3)),
+        extention_epsilon=np.ones(3),
+        compute_backend="python",
+        E_idx=_object_grid([0]),
+    )
+    monkeypatch.setattr(
+        "pcwannier.compute.initializer.integrate_weighted_abs2_columns",
+        lambda *args, **kwargs: np.array([norm]),
+    )
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        initializer.projection()
+
+
+def test_projection_rank_check_is_shared_by_direct_and_cached_a_paths():
+    initializer = object.__new__(StateInitializer)
+    initializer.config = SimpleNamespace(
+        band_calc_num=2,
+        inner_window=False,
+        projection_rank_tolerance=1.0e-10,
+    )
+
+    with pytest.raises(ValueError, match="numerical rank 1"):
+        initializer._projection_frame_from_a(
+            np.array([[1.0, 0.0], [0.0, 0.0], [0.0, 0.0]]),
+            (0, 0, 0),
+        )
+
+    frame = initializer._projection_frame_from_a(
+        np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]),
+        (0, 0, 0),
+    )
+    assert np.allclose(frame.conj().T @ frame, np.eye(2))
+
+
+def test_frozen_projection_requires_outer_membership_and_complement_rank():
+    with pytest.raises(ValueError, match=r"Frozen bands \[2\].*not contained"):
+        StateInitializer.map_inner_to_local([0, 1], [0, 2], k_index=(0, 0, 0))
+
+    initializer = object.__new__(StateInitializer)
+    initializer.config = SimpleNamespace(
+        band_calc_num=2,
+        projection_rank_tolerance=1.0e-10,
+    )
+    initializer.state = SimpleNamespace(
+        E_idx=_object_grid([0, 1, 2]),
+        inner_E_idx=_object_grid([0]),
+        k_indices=lambda: iter(((0, 0, 0),)),
+    )
+    initializer.matA = _object_grid(
+        np.array([[1.0, 0.0], [0.0, 0.0], [0.0, 0.0]], dtype=np.complex128)
+    )
+    initializer.I_idx = _object_grid(None)
+    initializer.O_idx = _object_grid(None)
+    initializer.matV = _object_grid(None)
+
+    with pytest.raises(ValueError, match="outer complement"):
+        initializer.inner_projection()
+
+
+def test_cached_v_must_contain_frozen_projector():
+    initializer = object.__new__(StateInitializer)
+    initializer.config = SimpleNamespace(projection_rank_tolerance=1.0e-10)
+    initializer.state = SimpleNamespace(k_indices=lambda: iter(((0, 0, 0),)))
+    initializer.I_idx = _object_grid(np.array([0]))
+    initializer.matV = _object_grid(
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.complex128)
+    )
+
+    with pytest.raises(ValueError, match="does not contain the frozen projector"):
+        initializer._validate_cached_frozen_containment()
+
+
+@pytest.mark.parametrize(
+    "cached_s",
+    [
+        np.eye(3),
+        np.array([[1.0, 0.2], [0.0, 1.0]]),
+        np.array([[1.0, np.nan], [np.nan, 1.0]]),
+    ],
+)
+def test_cached_s_rejects_wrong_shape_nonhermitian_and_nonfinite(tmp_path, cached_s):
+    state = _two_band_overlap_state()
+    path = tmp_path / "S.txt"
+    data = _object_grid(np.asarray(cached_s, dtype=np.complex128))
+    save_cell_matrix(path, data, data.shape)
+    state.config.use_cached_data = ["S"]
+    state.config.S_file = str(path)
+    state.config.input_path = lambda value: value
+
+    with pytest.raises(ValueError, match="shape|Hermitian|non-finite"):
+        state.check_orthogonality()
+
+
+def test_s_cache_request_requires_enabled_file():
+    state = _two_band_overlap_state()
+    state.config.use_cached_data = ["S"]
+    state.config.S_file = False
+    state.config.input_path = lambda value: None
+
+    with pytest.raises(ValueError, match="S_file is disabled"):
+        state.check_orthogonality()
+
+
+def test_valid_cached_s_is_reused_without_integrating(tmp_path):
+    state = _two_band_overlap_state()
+    path = tmp_path / "S.txt"
+    cached = _object_grid(np.array([[1.0, 0.1], [0.1, 1.0]], dtype=np.complex128))
+    save_cell_matrix(path, cached, cached.shape)
+    state.config.use_cached_data = ["S"]
+    state.config.S_file = str(path)
+    state.config.input_path = lambda value: value
+    state._overlap_matrix = lambda *args: (_ for _ in ()).throw(
+        AssertionError("A valid S cache must not integrate fields")
+    )
+
+    report, need_orth = state.check_orthogonality()
+    state.orthogonalize()
+    strict_report, strict_need = state.check_orthogonality()
+
+    assert need_orth
+    assert np.max(report[..., 2]) == pytest.approx(0.1)
+    assert not strict_need
+    assert np.max(strict_report[..., 3]) < 1.0e-10
+
+
 def _synthetic_spectrum_model(raw_energies, projected_hamiltonian, basis):
     energies = np.empty((1, 1, 1), dtype=object)
     energies[0, 0, 0] = np.asarray(raw_energies, dtype=float)
@@ -287,3 +439,40 @@ def _synthetic_spectrum_model(raw_energies, projected_hamiltonian, basis):
     model._projected_hamiltonians = np.asarray([projected_hamiltonian], dtype=np.complex128)
     model._projected_k_cart = np.zeros((1, 2), dtype=float)
     return model
+
+
+def _object_grid(value):
+    grid = np.empty((1, 1, 1), dtype=object)
+    grid[0, 0, 0] = value
+    return grid
+
+
+def _two_band_overlap_state():
+    mesh = Mesh(
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+        np.array([[0, 1, 2]]),
+    )
+    fields = _object_grid(
+        np.array([[1.0, 0.2, 0.1], [0.4, 1.0, 0.3]], dtype=np.complex128)
+    )
+    indices = _object_grid([0, 1])
+    energies = _object_grid(np.array([1.0, 2.0]))
+    config = SimpleNamespace(
+        kdim=2,
+        integration_mode="nodal",
+        dataset_type="comsol",
+        use_cached_data=[],
+    )
+    return StateCollection(
+        InputBundle(
+            config=config,
+            mesh=mesh,
+            fields=fields,
+            epsilon=np.ones(3),
+            energies=energies,
+            band_indices=indices,
+            inner_band_indices=indices.copy(),
+            energy_matrix=np.array([[[[1.0, 2.0]]]]),
+        ),
+        threads=1,
+    )

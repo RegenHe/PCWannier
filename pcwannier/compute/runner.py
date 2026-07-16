@@ -399,6 +399,12 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         symmetry_disentanglement=symmetry_disentanglement,
         output_spectrum_diagnostics=output_spectrum_diagnostics,
         hopping_reconstruction_diagnostics=hopping_reconstruction_diagnostics,
+        sewing_matrices=(
+            None if symmetry_provider is None else symmetry_provider.cached_sewing_matrices
+        ),
+        sewing_calculation_fingerprint=(
+            None if symmetry_provider is None else symmetry_provider.sewing_cache_fingerprint
+        ),
     )
 
 

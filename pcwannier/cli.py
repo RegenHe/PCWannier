@@ -36,7 +36,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--out", default=None, help="Output directory override")
     parser.add_argument("-b", "--base", action="store_true", help="Plot projection base functions and exit")
-    parser.add_argument("-c", "--cache", action="store_true", help="Use cached M/A/V/U matrices")
+    parser.add_argument("-c", "--cache", action="store_true", help="Use cached M/A/V/U/D matrices")
     parser.add_argument("--interp", default=None, help="Interpolation mesh point path")
     parser.add_argument("--interp-wannier", default=None, help="Interpolated Wannier output path")
     parser.add_argument("--interp-epsilon", default=None, help="Interpolated epsilon output path")
@@ -47,7 +47,7 @@ def main(argv=None) -> int:
     started_at = now()
     start_memory_tracking()
     args = parse_args(argv)
-    out_dir = Path(args.out) if args.out is not None else None
+    out_dir = Path(args.out).expanduser().resolve() if args.out is not None else None
     log_path = Path(args.log)
     if out_dir is not None and not log_path.is_absolute():
         log_path = out_dir / log_path
@@ -64,7 +64,9 @@ def main(argv=None) -> int:
     if args.backend is not None:
         config.compute_backend = args.backend
     if args.cache:
-        config.use_cached_data = ["U", "V", "M", "S", "A"]
+        config.use_cached_data = ["V", "M", "S", "A", "D"]
+        if not config.symmetry_constrained:
+            config.use_cached_data.insert(0, "U")
         if out_dir is not None:
             _redirect_cache_paths_to_out_dir(config, out_dir)
 
@@ -131,8 +133,9 @@ def _log_run_summary(started_at: float) -> None:
 
 
 def _redirect_cache_paths_to_out_dir(config, out_dir: Path) -> None:
-    for attr in ("M_file", "A_file", "V_file", "U_file", "S_file"):
-        value = getattr(config, attr)
+    out_dir = Path(out_dir).expanduser().resolve()
+    for attr in ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file"):
+        value = getattr(config, attr, None)
         if value is None or value is False or str(value).lower() == "false":
             continue
         path = Path(str(value))

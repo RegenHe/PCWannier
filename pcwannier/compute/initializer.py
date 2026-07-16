@@ -161,11 +161,14 @@ class StateInitializer:
             self._validate_cached_matrix("V", self.matV, require_semiunitary=True)
 
         if self._has_cached_a and not self._has_cached_v:
-            band_count = int(self.config.band_calc_num)
             for i, j, k in self.state.k_indices():
-                u, _, vh = np.linalg.svd(self.matA[i, j, k])
-                self.matC[i, j, k] = u @ np.eye(len(self.state.E_idx[i, j, k]), band_count) @ vh
-            self.matV = self.matC.copy()
+                self.matC[i, j, k] = self._projection_frame_from_a(
+                    self.matA[i, j, k], (i, j, k)
+                )
+            if self.config.inner_window is False:
+                self.matV = self.matC.copy()
+            else:
+                self.inner_projection()
         elif not self._has_cached_v:
             self.projection()
             if self.config.inner_window is False:
@@ -173,6 +176,8 @@ class StateInitializer:
 
         if self._has_cached_a or self._has_cached_v:
             self.set_window_indices()
+        if self._has_cached_v and self.config.inner_window is not False:
+            self._validate_cached_frozen_containment()
         self._prepared = True
 
     def run_unconstrained_disentanglement(self, err_diff: float, max_iter: int) -> None:
@@ -247,8 +252,19 @@ class StateInitializer:
                 mode=self.config.integration_mode,
             )
         )
+        nonfinite_norms = np.flatnonzero(~np.isfinite(norms))
+        if nonfinite_norms.size:
+            details = ", ".join(
+                f"projection {int(index)}: norm={norms[index]!r}" for index in nonfinite_norms
+            )
+            raise ValueError(f"Projection basis norms must be finite and strictly positive ({details}).")
         norms = validated_real(norms, "projection basis norms")
-        norms = np.where(norms == 0, 1.0, norms)
+        invalid_norms = np.flatnonzero(~np.isfinite(norms) | (norms <= 0.0))
+        if invalid_norms.size:
+            details = ", ".join(
+                f"projection {int(index)}: norm={norms[index]!r}" for index in invalid_norms
+            )
+            raise ValueError(f"Projection basis norms must be finite and strictly positive ({details}).")
         gmat = hmat / np.sqrt(norms)[None, :]
 
         def calc_idx(idx):
@@ -267,8 +283,7 @@ class StateInitializer:
             )
             if self.config.proj_binarize:
                 amat = self.binarize(amat)
-            u, _, vh = np.linalg.svd(amat)
-            cmat = u @ np.eye(len(self.state.E_idx[i, j, k]), band_count) @ vh
+            cmat = self._projection_frame_from_a(amat, idx)
             return idx, amat, cmat
 
         for idx, amat, cmat in parallel_map(self.state.k_indices(), calc_idx, self.threads):
@@ -282,7 +297,11 @@ class StateInitializer:
 
     def set_window_indices(self) -> None:
         for i, j, k in self.state.k_indices():
-            self.I_idx[i, j, k] = self.map_inner_to_local(self.state.E_idx[i, j, k], self.state.inner_E_idx[i, j, k])
+            self.I_idx[i, j, k] = self.map_inner_to_local(
+                self.state.E_idx[i, j, k],
+                self.state.inner_E_idx[i, j, k],
+                k_index=(i, j, k),
+            )
             self.O_idx[i, j, k] = np.setdiff1d(
                 np.arange(len(self.state.E_idx[i, j, k])),
                 self.I_idx[i, j, k],
@@ -291,17 +310,24 @@ class StateInitializer:
 
     def inner_projection(self) -> None:
         band_count = int(self.config.band_calc_num)
-        tol = 1e-10
+        tol = self.projection_rank_tolerance
         for i, j, k in self.state.k_indices():
             n_k = len(self.state.E_idx[i, j, k])
-            self.I_idx[i, j, k] = self.map_inner_to_local(self.state.E_idx[i, j, k], self.state.inner_E_idx[i, j, k])
+            self.I_idx[i, j, k] = self.map_inner_to_local(
+                self.state.E_idx[i, j, k],
+                self.state.inner_E_idx[i, j, k],
+                k_index=(i, j, k),
+            )
             self.O_idx[i, j, k] = np.setdiff1d(np.arange(n_k), self.I_idx[i, j, k], assume_unique=True)
             m_k = self.I_idx[i, j, k].size
             p = band_count - m_k
             if p < 0 or p > self.O_idx[i, j, k].size:
-                raise ValueError("Inner window is incompatible with the projection band count.")
+                raise ValueError(
+                    f"Frozen window at k={(i, j, k)} contains {m_k} bands, which is incompatible "
+                    f"with N_W={band_count} and outer dimension {n_k}."
+                )
             u, s, _ = np.linalg.svd(self.matA[i, j, k], full_matrices=False)
-            rank = min(int(np.sum(s > tol)), band_count)
+            rank = self._numerical_rank(s)
             p_g = np.zeros((n_k, n_k), dtype=np.complex128) if rank == 0 else u[:, :rank] @ u[:, :rank].conj().T
             ui = np.eye(n_k, dtype=np.complex128)[:, self.I_idx[i, j, k]]
             p_g_oo = 0.5 * (
@@ -310,6 +336,16 @@ class StateInitializer:
             )
             evals, vecs = np.linalg.eigh(p_g_oo)
             order = np.argsort(evals)[::-1]
+            selected = np.asarray(evals[order][:p], dtype=float)
+            if p > 0 and (
+                selected.size != p
+                or not np.all(np.isfinite(selected))
+                or np.any(selected <= tol)
+            ):
+                raise ValueError(
+                    f"Projection rank is insufficient in the outer complement at k={(i, j, k)}: "
+                    f"need {p} directions with eigenvalue > {tol:.6g}, got {selected.tolist()}."
+                )
             uopt = np.zeros((n_k, p), dtype=np.complex128)
             uopt[self.O_idx[i, j, k], :] = vecs[:, order][:, :p]
             self.matV[i, j, k] = np.concatenate([ui, uopt], axis=1)
@@ -392,9 +428,17 @@ class StateInitializer:
         return out
 
     @staticmethod
-    def map_inner_to_local(outer_idx, inner_idx):
+    def map_inner_to_local(outer_idx, inner_idx, *, k_index=None):
         positions = {int(band_id): pos for pos, band_id in enumerate(np.asarray(outer_idx, dtype=int))}
-        return np.unique([positions[int(band_id)] for band_id in np.asarray(inner_idx, dtype=int) if int(band_id) in positions])
+        frozen = [int(band_id) for band_id in np.asarray(inner_idx, dtype=int)]
+        missing = [band_id for band_id in frozen if band_id not in positions]
+        if missing:
+            location = "" if k_index is None else f" at k={k_index}"
+            raise ValueError(
+                f"Frozen bands {missing}{location} are not contained in outer window "
+                f"{list(positions)}."
+            )
+        return np.unique([positions[band_id] for band_id in frozen])
 
     @staticmethod
     def get_min_max_len_idx(e_idx) -> tuple[int, int]:
@@ -416,3 +460,45 @@ class StateInitializer:
                 residual = np.linalg.norm(cell.conj().T @ cell - np.eye(band_count), ord="fro")
                 if residual > 1e-6:
                     raise ValueError(f"Cached {name} matrix at k={idx} is not semi-unitary (residual={residual:.6g}).")
+
+    @property
+    def projection_rank_tolerance(self) -> float:
+        return float(getattr(self.config, "projection_rank_tolerance", 1.0e-10))
+
+    def _numerical_rank(self, singular_values: np.ndarray) -> int:
+        values = np.asarray(singular_values, dtype=float)
+        if values.size == 0 or not np.all(np.isfinite(values)):
+            return 0
+        largest = float(np.max(values))
+        if largest <= 0.0:
+            return 0
+        return int(np.count_nonzero(values > self.projection_rank_tolerance * largest))
+
+    def _projection_frame_from_a(self, amat: np.ndarray, k_index) -> np.ndarray:
+        band_count = int(self.config.band_calc_num)
+        u, singular_values, vh = np.linalg.svd(np.asarray(amat, dtype=np.complex128))
+        rank = self._numerical_rank(singular_values)
+        if self.config.inner_window is False and rank < band_count:
+            largest = float(singular_values[0]) if singular_values.size else 0.0
+            threshold = self.projection_rank_tolerance * largest
+            raise ValueError(
+                f"Projection matrix A at k={k_index} has numerical rank {rank}; "
+                f"N_W={band_count} requires full column rank "
+                f"(relative tolerance={self.projection_rank_tolerance:.6g}, threshold={threshold:.6g})."
+            )
+        return u @ np.eye(amat.shape[0], band_count) @ vh
+
+    def _validate_cached_frozen_containment(self) -> None:
+        tolerance = max(1.0e-7, 100.0 * self.projection_rank_tolerance)
+        for idx in self.state.k_indices():
+            frozen = np.asarray(self.I_idx[idx], dtype=int)
+            if frozen.size == 0:
+                continue
+            frame = np.asarray(self.matV[idx], dtype=np.complex128)
+            selectors = np.eye(frame.shape[0], dtype=np.complex128)[:, frozen]
+            residual = float(np.linalg.norm(selectors - frame @ (frame.conj().T @ selectors), ord="fro"))
+            if not np.isfinite(residual) or residual > tolerance:
+                raise ValueError(
+                    f"Cached V subspace at k={idx} does not contain the frozen projector "
+                    f"(residual={residual:.6g}, tolerance={tolerance:.6g})."
+                )

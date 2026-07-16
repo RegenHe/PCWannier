@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 import math
@@ -64,6 +64,7 @@ class IncarConfig:
     M_file: str = "./M.txt"
     A_file: str = "./A.txt"
     S_file: str = "./S.txt"
+    D_file: str = "./D.txt"
     band_file: str = "./band.txt"
     hopping_file: str = "./hopping.txt"
     wannier_file: str = "./wannier.txt"
@@ -85,6 +86,7 @@ class IncarConfig:
     band_window: np.ndarray | EnergyWindow | None = None
     inner_window: np.ndarray | EnergyWindow | bool = False
     projections: list[dict[str, Any]] | None = None
+    projection_rank_tolerance: float = 1.0e-10
     proj_iter: bool = True
     proj_binarize: bool = False
     v_proj: bool = True
@@ -166,6 +168,26 @@ class IncarConfig:
             raise ValueError(f"Missing required incar fields: {', '.join(missing)}")
 
 
+_INTERNAL_CONFIG_FIELDS = {
+    "base_dir",
+    "kdim",
+    "b_vectors",
+    "wb",
+    "band_calc_num",
+    "symmetry_resolved_path",
+    "symmetry_context",
+    "_preprocessed",
+}
+
+
+def _user_config_fields() -> set[str]:
+    return {
+        item.name
+        for item in fields(IncarConfig)
+        if item.init and item.name not in _INTERNAL_CONFIG_FIELDS
+    }
+
+
 _MATH_NAMES = {name: value for name, value in vars(math).items() if not name.startswith("_")}
 _MATH_NAMES.update(
     {
@@ -221,14 +243,24 @@ class IncarParser:
         k_path_data: list[str] = []
         wannier_targets_data: list[str] = []
         representation_analysis_data: list[str] = []
+        assigned_fields: set[str] = set()
+        allowed_fields = _user_config_fields()
+
+        def reserve_field(name: str) -> None:
+            if name not in allowed_fields:
+                raise ValueError(f"Unknown incar field: {name!r}.")
+            if name in assigned_fields:
+                raise ValueError(f"Duplicate incar field or block: {name!r}.")
+            assigned_fields.add(name)
 
         with self.filename.open("r", encoding="utf-8") as handle:
-            for raw in handle:
+            for line_number, raw in enumerate(handle, start=1):
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue
 
                 if line == "projections":
+                    reserve_field("projections")
                     inside_projections = True
                     continue
                 if inside_projections:
@@ -241,6 +273,7 @@ class IncarParser:
                     continue
 
                 if line == "k_path":
+                    reserve_field("k_path")
                     inside_k_path = True
                     continue
                 if inside_k_path:
@@ -253,6 +286,7 @@ class IncarParser:
                     continue
 
                 if line == "wannier_targets":
+                    reserve_field("wannier_targets")
                     inside_wannier_targets = True
                     continue
                 if inside_wannier_targets:
@@ -265,6 +299,7 @@ class IncarParser:
                     continue
 
                 if line == "representation_analysis":
+                    reserve_field("representation_analysis")
                     inside_representation_analysis = True
                     continue
                 if inside_representation_analysis:
@@ -279,7 +314,9 @@ class IncarParser:
                     continue
 
                 if "=" not in line:
-                    continue
+                    raise ValueError(
+                        f"Malformed incar line {line_number}: expected 'key = value' or a known block, got {line!r}."
+                    )
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
@@ -289,6 +326,9 @@ class IncarParser:
                     )
                 if key == "symmetry":
                     raise ValueError("The boolean symmetry input has been removed; use symmetry_file = ./sym.yaml.")
+                reserve_field(key)
+                if key in {"projections", "k_path", "wannier_targets", "representation_analysis"}:
+                    raise ValueError(f"incar field {key!r} must use its block form terminated by 'end'.")
                 setattr(cfg, key, self.parse_value(key, value))
 
         unterminated = [
@@ -304,8 +344,8 @@ class IncarParser:
         if unterminated:
             raise ValueError(f"Unterminated incar block(s): {', '.join(unterminated)}.")
 
-        preprocess_config(cfg)
         cfg.validate_required()
+        preprocess_config(cfg)
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
             from .symmetry import (
@@ -431,6 +471,7 @@ class IncarParser:
             "left_dataset_file",
             "dielectric_file",
             "S_file",
+            "D_file",
             "U_file",
             "V_file",
             "A_file",
@@ -471,6 +512,7 @@ class IncarParser:
             "representation_degeneracy_absolute",
             "representation_degeneracy_relative",
             "representation_leakage_tolerance",
+            "projection_rank_tolerance",
         }:
             return float(evaluate_math_expression(value))
         if key in {
@@ -505,6 +547,8 @@ class IncarParser:
                 if len(tokens) != 3:
                     raise ValueError(f"Invalid k_points range: {part!r}")
                 start, step, stop = tokens
+                if not np.isfinite(step) or step == 0.0:
+                    raise ValueError(f"Invalid k_points range with zero or non-finite step: {part!r}")
                 ranges.append(np.arange(start, stop, step))
             return ranges
         if key == "hopping_state":
@@ -545,7 +589,12 @@ class IncarParser:
             "symmetry_constrained",
             "symmetry_validate_wannier",
         }:
-            return value.lower() == "true"
+            normalized = value.strip().lower()
+            if normalized not in {"true", "false"}:
+                raise ValueError(
+                    f"Boolean incar field {key!r} must be 'true' or 'false', got {value!r}."
+                )
+            return normalized == "true"
         if key == "neighbor":
             if not value:
                 return []
@@ -738,17 +787,215 @@ class IncarParser:
         return bands
 
 
+def _validate_band_window(name: str, window, *, allow_false: bool) -> None:
+    if window is None:
+        return
+    if window is False:
+        if allow_false:
+            return
+        raise ValueError(f"{name} must not be false.")
+    if isinstance(window, EnergyWindow):
+        if not np.isfinite(window.emin) or not np.isfinite(window.emax) or window.emin >= window.emax:
+            raise ValueError(f"{name} energy bounds must be finite and strictly increasing.")
+        return
+    values = np.asarray(window)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError(f"{name} band indices must be a non-empty one-dimensional list.")
+    numeric = np.asarray(values, dtype=float)
+    if not np.all(np.isfinite(numeric)) or not np.all(numeric == np.floor(numeric)):
+        raise ValueError(f"{name} band indices must be finite integers.")
+    indices = numeric.astype(int)
+    if np.any(indices < 0) or np.unique(indices).size != indices.size:
+        raise ValueError(f"{name} band indices must be unique and non-negative.")
+
+
+def _validate_vector_list(name: str, vectors, dimension: int, *, reject_opposites: bool) -> None:
+    if vectors is None:
+        return
+    seen: list[np.ndarray] = []
+    for index, raw in enumerate(vectors):
+        vector = np.asarray(raw, dtype=float)
+        if vector.shape != (dimension,) or not np.all(np.isfinite(vector)):
+            raise ValueError(f"{name}[{index}] must be a finite vector of dimension {dimension}.")
+        if np.linalg.norm(vector) == 0.0:
+            raise ValueError(f"{name}[{index}] must be non-zero.")
+        for previous in seen:
+            if np.array_equal(vector, previous) or (
+                reject_opposites and np.array_equal(vector, -previous)
+            ):
+                qualifier = " (including the automatically generated opposite direction)" if reject_opposites else ""
+                raise ValueError(f"{name} contains a duplicate vector{qualifier}: {vector.tolist()}.")
+        seen.append(vector)
+
+
+def _validate_config_inputs(cfg: IncarConfig) -> None:
+    dimension = None
+    if cfg.lattice_const is not None and (
+        not np.isfinite(cfg.lattice_const) or float(cfg.lattice_const) <= 0.0
+    ):
+        raise ValueError("lattice_const must be positive and finite.")
+    if cfg.real_lattice_vectors is not None:
+        lattice = np.asarray(cfg.real_lattice_vectors, dtype=float)
+        if lattice.ndim != 2 or lattice.shape[0] == 0 or lattice.shape[0] != lattice.shape[1]:
+            raise ValueError("real_lattice_vectors must be a non-empty square matrix.")
+        if not np.all(np.isfinite(lattice)):
+            raise ValueError("real_lattice_vectors must contain only finite values.")
+        if np.linalg.matrix_rank(lattice) != lattice.shape[0]:
+            raise ValueError("real_lattice_vectors must be invertible.")
+        dimension = int(lattice.shape[0])
+        origin = np.asarray(cfg.origin, dtype=float)
+        if origin.shape != (dimension,) or not np.all(np.isfinite(origin)):
+            raise ValueError(f"origin must be a finite vector of dimension {dimension}.")
+
+    if cfg.k_points is not None:
+        if dimension is not None and len(cfg.k_points) != dimension:
+            raise ValueError(f"k_points must define exactly {dimension} axes.")
+        for axis_index, raw_axis in enumerate(cfg.k_points):
+            axis = np.asarray(raw_axis, dtype=float)
+            if axis.ndim != 1 or axis.size == 0 or not np.all(np.isfinite(axis)):
+                raise ValueError(f"k_points axis {axis_index} must be non-empty and finite.")
+            if axis.size > 1:
+                spacing = np.diff(axis)
+                scale = max(float(np.max(np.abs(axis))), 1.0)
+                tolerance = max(128.0 * np.finfo(float).eps * scale, 1.0e-12)
+                if abs(float(spacing[0])) <= tolerance or not np.allclose(
+                    spacing, spacing[0], rtol=1.0e-10, atol=tolerance
+                ):
+                    raise ValueError(f"k_points axis {axis_index} must be uniformly sampled with non-zero spacing.")
+                for left in range(axis.size):
+                    for right in range(left + 1, axis.size):
+                        difference = float(axis[left] - axis[right])
+                        if abs(difference - round(difference)) <= tolerance:
+                            raise ValueError(
+                                f"k_points axis {axis_index} contains periodic duplicate samples "
+                                f"{axis[left]} and {axis[right]}."
+                            )
+
+    _validate_band_window("band_window", cfg.band_window, allow_false=False)
+    _validate_band_window("inner_window", cfg.inner_window, allow_false=True)
+    if (
+        isinstance(cfg.band_window, np.ndarray)
+        and isinstance(cfg.inner_window, np.ndarray)
+        and not set(np.asarray(cfg.inner_window, dtype=int)).issubset(
+            set(np.asarray(cfg.band_window, dtype=int))
+        )
+    ):
+        raise ValueError("All frozen inner_window bands must belong to band_window.")
+    if isinstance(cfg.band_window, EnergyWindow) and isinstance(cfg.inner_window, EnergyWindow):
+        if cfg.inner_window.emin < cfg.band_window.emin or cfg.inner_window.emax > cfg.band_window.emax:
+            raise ValueError("inner_window energy bounds must lie inside band_window.")
+
+    if cfg.max_iter < 0:
+        raise ValueError("max_iter must be non-negative.")
+    if cfg.disentangle_max_iter is not None and cfg.disentangle_max_iter < 0:
+        raise ValueError("disentangle_max_iter must be non-negative.")
+    for name, value, strictly_positive in (
+        ("epsilon", cfg.epsilon, True),
+        ("err_diff", cfg.err_diff, False),
+        ("disentangle_err_diff", cfg.disentangle_err_diff, False),
+        ("disentangle_projector_tolerance", cfg.disentangle_projector_tolerance, True),
+    ):
+        if value is None:
+            continue
+        valid = np.isfinite(value) and (value > 0.0 if strictly_positive else value >= 0.0)
+        if not valid:
+            relation = "positive" if strictly_positive else "non-negative"
+            raise ValueError(f"{name} must be finite and {relation}.")
+    if not np.isfinite(cfg.projection_rank_tolerance) or not 0.0 < cfg.projection_rank_tolerance < 1.0:
+        raise ValueError("projection_rank_tolerance must lie in (0, 1).")
+
+    if dimension is not None:
+        if cfg.extension is not None:
+            values = np.asarray(cfg.extension)
+            if values.shape != (dimension,) or not np.all(values == np.floor(values)) or np.any(values <= 0):
+                raise ValueError(f"extension must contain {dimension} positive integers.")
+        _validate_vector_list(
+            "composition_of_b", cfg.composition_of_b, dimension, reject_opposites=True
+        )
+        _validate_vector_list("neighbor", cfg.neighbor, dimension, reject_opposites=False)
+        if cfg.k_path is not None:
+            if not cfg.k_path:
+                raise ValueError("k_path must not be empty when specified.")
+            for index, point in enumerate(cfg.k_path):
+                coordinates = np.asarray(point.get("point", ()), dtype=float)
+                if coordinates.shape != (dimension,) or not np.all(np.isfinite(coordinates)):
+                    raise ValueError(f"k_path point {index} must be finite and have dimension {dimension}.")
+                count = point.get("num")
+                if isinstance(count, bool) or not isinstance(count, (int, np.integer)) or int(count) <= 0:
+                    raise ValueError(f"k_path point {index} must have a positive integer segment count.")
+
+        if cfg.projections is not None:
+            if not cfg.projections:
+                raise ValueError("projections must not be empty.")
+            for projection_index, projection in enumerate(cfg.projections):
+                center = np.asarray(projection.get("frac_position", ()), dtype=float)
+                if center.shape != (dimension,) or not np.all(np.isfinite(center)):
+                    raise ValueError(
+                        f"projection {projection_index} center must be finite and have dimension {dimension}."
+                    )
+                angle = float(projection.get("xaxis_angluar", np.nan))
+                if not np.isfinite(angle):
+                    raise ValueError(f"projection {projection_index} x-axis angle must be finite.")
+                states = projection.get("states")
+                if not states:
+                    raise ValueError(f"projection {projection_index} must define at least one state.")
+                for state_index, state in enumerate(states):
+                    definitions = state.get("lc_states") if isinstance(state, dict) else [state]
+                    coefficients = state.get("lc_coeffs") if isinstance(state, dict) else None
+                    if coefficients is not None and len(definitions) != len(coefficients):
+                        raise ValueError(
+                            f"projection {projection_index} state {state_index} has mismatched linear-combination data."
+                        )
+                    for definition in definitions:
+                        values = np.asarray(definition, dtype=float)
+                        if values.shape != (3,) or not np.all(np.isfinite(values)):
+                            raise ValueError(
+                                f"projection {projection_index} state {state_index} must use [n, l, z] definitions."
+                            )
+
+    if cfg.integration_mode not in {"nodal", "quadratic"}:
+        raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
+    cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
+    if cfg.symmetry_output_basis not in {"strict", "fem"}:
+        raise ValueError("symmetry_output_basis must be 'strict' or 'fem'.")
+    if not np.isfinite(cfg.disentangle_mixing) or not 0.0 < cfg.disentangle_mixing <= 1.0:
+        raise ValueError("disentangle_mixing must lie in (0, 1].")
+    if not np.isfinite(cfg.symmetry_tolerance) or cfg.symmetry_tolerance <= 0.0:
+        raise ValueError("symmetry_tolerance must be positive and finite.")
+    if not np.isfinite(cfg.symmetry_boundary_tolerance) or cfg.symmetry_boundary_tolerance <= 0.0:
+        raise ValueError("symmetry_boundary_tolerance must be positive and finite.")
+    if cfg.representation_leakage_tolerance is not None and (
+        not np.isfinite(cfg.representation_leakage_tolerance)
+        or cfg.representation_leakage_tolerance <= 0.0
+    ):
+        raise ValueError("representation_leakage_tolerance must be positive and finite.")
+    if cfg.symmetry_max_iter <= 0:
+        raise ValueError("symmetry_max_iter must be positive.")
+    if not np.isfinite(cfg.symmetry_svd_tolerance) or cfg.symmetry_svd_tolerance <= 0.0:
+        raise ValueError("symmetry_svd_tolerance must be positive and finite.")
+    if not np.isfinite(cfg.symmetry_real_space_tolerance) or cfg.symmetry_real_space_tolerance <= 0.0:
+        raise ValueError("symmetry_real_space_tolerance must be positive and finite.")
+    if not 0.0 < cfg.symmetry_minimum_retained_norm <= 1.0:
+        raise ValueError("symmetry_minimum_retained_norm must lie in (0, 1].")
+
+
 def preprocess_config(cfg: IncarConfig) -> IncarConfig:
     if cfg._preprocessed:
         return cfg
+    _validate_config_inputs(cfg)
     if cfg.real_lattice_vectors is None:
         return cfg
     cfg.kdim = len(cfg.real_lattice_vectors)
     reciprocal = np.asarray(cfg.reciprocal_lattice_vectors, dtype=float)
-    zeros = np.zeros((cfg.kdim, cfg.kdim), dtype=float)
-    if reciprocal.shape[:2] == zeros.shape and np.allclose(reciprocal, zeros):
+    if reciprocal.size > 0 and np.allclose(reciprocal, 0.0):
         reciprocal = (np.linalg.inv(np.asarray(cfg.real_lattice_vectors, dtype=float)) @ np.eye(cfg.kdim)).T
     cfg.reciprocal_lattice_vectors = reciprocal
+    if reciprocal.shape != (cfg.kdim, cfg.kdim) or not np.all(np.isfinite(reciprocal)):
+        raise ValueError(
+            f"reciprocal_lattice_vectors must be a finite {cfg.kdim}x{cfg.kdim} matrix."
+        )
+    if np.linalg.matrix_rank(reciprocal) != cfg.kdim:
+        raise ValueError("reciprocal_lattice_vectors must be invertible.")
 
     if cfg.composition_of_b is not None and cfg.k_points is not None:
         positive = [list(v) for v in cfg.composition_of_b]
@@ -784,45 +1031,6 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
                 "composition_of_b cannot reproduce the isotropic finite-difference tensor: "
                 f"relative residual={residual:.6g}, rank={rank}. Add independent neighbor directions."
             )
-
-    if cfg.integration_mode not in {"nodal", "quadratic"}:
-        raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
-    cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
-    if cfg.symmetry_output_basis not in {"strict", "fem"}:
-        raise ValueError("symmetry_output_basis must be 'strict' or 'fem'.")
-    if cfg.disentangle_max_iter is not None and cfg.disentangle_max_iter < 0:
-        raise ValueError("disentangle_max_iter must be non-negative.")
-    if cfg.disentangle_err_diff is not None and (
-        not np.isfinite(cfg.disentangle_err_diff) or cfg.disentangle_err_diff < 0.0
-    ):
-        raise ValueError("disentangle_err_diff must be finite and non-negative.")
-    if cfg.disentangle_projector_tolerance is not None and (
-        not np.isfinite(cfg.disentangle_projector_tolerance)
-        or cfg.disentangle_projector_tolerance <= 0.0
-    ):
-        raise ValueError("disentangle_projector_tolerance must be positive and finite.")
-    if not np.isfinite(cfg.disentangle_mixing) or not 0.0 < cfg.disentangle_mixing <= 1.0:
-        raise ValueError("disentangle_mixing must lie in (0, 1].")
-    if not np.isfinite(cfg.symmetry_tolerance) or cfg.symmetry_tolerance <= 0.0:
-        raise ValueError("symmetry_tolerance must be positive and finite.")
-    if not np.isfinite(cfg.symmetry_boundary_tolerance) or cfg.symmetry_boundary_tolerance <= 0.0:
-        raise ValueError("symmetry_boundary_tolerance must be positive and finite.")
-    if cfg.representation_leakage_tolerance is not None and (
-        not np.isfinite(cfg.representation_leakage_tolerance)
-        or cfg.representation_leakage_tolerance <= 0.0
-    ):
-        raise ValueError("representation_leakage_tolerance must be positive and finite.")
-    if cfg.symmetry_max_iter <= 0:
-        raise ValueError("symmetry_max_iter must be positive.")
-    if not np.isfinite(cfg.symmetry_svd_tolerance) or cfg.symmetry_svd_tolerance <= 0.0:
-        raise ValueError("symmetry_svd_tolerance must be positive and finite.")
-    if (
-        not np.isfinite(cfg.symmetry_real_space_tolerance)
-        or cfg.symmetry_real_space_tolerance <= 0.0
-    ):
-        raise ValueError("symmetry_real_space_tolerance must be positive and finite.")
-    if not 0.0 < cfg.symmetry_minimum_retained_norm <= 1.0:
-        raise ValueError("symmetry_minimum_retained_norm must lie in (0, 1].")
 
     if cfg.projections is not None:
         cfg.band_calc_num = sum(len(p["states"]) for p in cfg.projections)

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from itertools import product
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 from ..compute.integration import integrate_overlap_matrix
+from .cache import SewingMatrixCache, SewingMatrixCacheEntry, load_sewing_matrix_cache
 from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
 from .specs import BlochConvention, FieldKind
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..compute.state import StateCollection
@@ -336,13 +341,22 @@ class StateBlochSymmetryProvider:
             tolerance=context.model.tolerance,
         )
         self._validate_periodic_node_data(context.model.boundary_tolerance)
-        self._sewing_cache: dict[tuple[object, ...], np.ndarray] = {}
+        self._sewing_cache: dict[tuple[object, ...], SewingMatrixCacheEntry] = {}
+        self._cache_fingerprint: str | None = None
+        cached_names = {
+            str(value).upper() for value in getattr(state.config, "use_cached_data", ())
+        }
+        self._cache_required = "D" in cached_names
+        if self._cache_required:
+            value = getattr(state.config, "D_file", None)
+            input_path = getattr(state.config, "input_path", None)
+            path = input_path(value) if callable(input_path) else None
+            if path is None:
+                raise ValueError("D cache requested, but D_file is disabled.")
+            self._load_disk_cache(load_sewing_matrix_cache(path))
+            LOGGER.info("Loaded D symmetry matrix cache: file=%s matrices=%s", path, len(self._sewing_cache))
 
     def sewing_matrix(self, request: SewingMatrixRequest) -> np.ndarray:
-        cache_key = self._sewing_cache_key(request)
-        cached = self._sewing_cache.get(cache_key)
-        if cached is not None:
-            return cached.copy()
         source_index, source_representative, source_shift = self._locate_k(request.source_k_fractional)
         transformed_k = request.operation.act_reciprocal(request.source_k_fractional)
         target_index, target_representative, target_shift = self._locate_k(transformed_k)
@@ -363,11 +377,25 @@ class StateBlochSymmetryProvider:
             if request.target_band_indices is None
             else tuple(int(value) for value in request.target_band_indices)
         )
-        source = self._orthonormal_block(source_index, source_bands)
+        cache_key = self._sewing_cache_key(request)
+        cached = self._sewing_cache.get(cache_key)
+        if cached is not None:
+            return self._select_cached_bands(cached, source_bands, target_bands)
+        if self._cache_required:
+            raise ValueError(
+                "Sewing matrix cache does not contain the requested exact Seitz action: "
+                f"operation={request.operation.name or request.operation_index}, "
+                f"source_k={np.asarray(request.source_k_fractional).tolist()}, "
+                f"source_bands={source_bands}, target_bands={target_bands}."
+            )
+
+        full_source_bands = self._actual_bands(source_index)
+        full_target_bands = self._actual_bands(target_index)
+        source = self._orthonormal_block(source_index, full_source_bands)
         if np.any(source_shift):
             source = source * self._fiber_phase(source_shift)[None, :]
         transformed = self.action.apply(source, request.operation, request.source_k_fractional, request.field_kind)
-        target = self._orthonormal_block(target_index, target_bands)
+        target = self._orthonormal_block(target_index, full_target_bands)
         if np.any(target_shift):
             target = target * self._fiber_phase(target_shift)[None, :]
         matrix = integrate_overlap_matrix(
@@ -379,8 +407,30 @@ class StateBlochSymmetryProvider:
             backend=self.state.compute_backend,
             mode=self.state.integration_mode,
         )
-        self._sewing_cache[cache_key] = matrix.copy()
-        return matrix
+        entry = SewingMatrixCacheEntry(
+            operation_rotation=request.operation.rotation.copy(),
+            operation_translation=request.operation.translation.copy(),
+            source_k_fractional=np.asarray(request.source_k_fractional, dtype=float).copy(),
+            target_k_fractional=target_representative.copy(),
+            reciprocal_lattice_shift=tuple(int(value) for value in direct_shift),
+            source_band_indices=full_source_bands,
+            target_band_indices=full_target_bands,
+            field_kind=request.field_kind.value,
+            matrix=np.asarray(matrix, dtype=np.complex128).copy(),
+        )
+        self._sewing_cache[cache_key] = entry
+        return self._select_cached_bands(entry, source_bands, target_bands)
+
+    @property
+    def cached_sewing_matrices(self) -> tuple[SewingMatrixCacheEntry, ...]:
+        """Return deterministic, output-ready copies of all integrated sewing matrices."""
+        return tuple(self._sewing_cache[key] for key in sorted(self._sewing_cache))
+
+    @property
+    def sewing_cache_fingerprint(self) -> str:
+        if self._cache_fingerprint is None:
+            self._cache_fingerprint = self._calculation_fingerprint()
+        return self._cache_fingerprint
 
     def sewing_matrix_at(
         self,
@@ -501,6 +551,10 @@ class StateBlochSymmetryProvider:
         orthonormal = (block.T @ correction).T
         return orthonormal[local]
 
+    def _actual_bands(self, index) -> tuple[int, ...]:
+        state_index = self._state_index(index)
+        return tuple(int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1))
+
     def _validate_periodic_node_data(self, tolerance: float) -> None:
         classes = self.action.interpolator.periodic_node_classes
         if not classes:
@@ -548,14 +602,144 @@ class StateBlochSymmetryProvider:
         )
 
     def _sewing_cache_key(self, request: SewingMatrixRequest) -> tuple[object, ...]:
-        tolerance = self.context.model.tolerance
-        source = tuple(np.rint(np.asarray(request.source_k_fractional) / tolerance).astype(np.int64))
-        translation = tuple(np.rint(request.operation.translation / tolerance).astype(np.int64))
-        return (
-            request.operation.rotation.tobytes(),
-            translation,
-            source,
-            request.band_indices,
-            request.target_band_indices,
+        return self._cache_key(
+            request.operation.rotation,
+            request.operation.translation,
+            request.source_k_fractional,
             request.field_kind.value,
         )
+
+    def _cache_key(self, rotation, translation, source_k, field_kind: str) -> tuple[object, ...]:
+        tolerance = self.context.model.tolerance
+        source = tuple(np.rint(np.asarray(source_k) / tolerance).astype(np.int64))
+        translation_key = tuple(np.rint(np.asarray(translation) / tolerance).astype(np.int64))
+        return (
+            np.ascontiguousarray(rotation, dtype=np.int64).tobytes(),
+            translation_key,
+            source,
+            str(field_kind),
+        )
+
+    def _select_cached_bands(
+        self,
+        entry: SewingMatrixCacheEntry,
+        source_bands: tuple[int, ...],
+        target_bands: tuple[int, ...],
+    ) -> np.ndarray:
+        missing_source = sorted(set(source_bands) - set(entry.source_band_indices))
+        missing_target = sorted(set(target_bands) - set(entry.target_band_indices))
+        if missing_source or missing_target:
+            raise ValueError(
+                "Requested bands are absent from the sewing cache entry: "
+                f"source_missing={missing_source}, target_missing={missing_target}."
+            )
+        columns = [entry.source_band_indices.index(band) for band in source_bands]
+        rows = [entry.target_band_indices.index(band) for band in target_bands]
+        return np.asarray(entry.matrix[np.ix_(rows, columns)], dtype=np.complex128).copy()
+
+    def _load_disk_cache(self, cache: SewingMatrixCache) -> None:
+        expected_shape = tuple(len(axis) for axis in self.context.k_points)
+        if cache.dimension != self.dimension:
+            raise ValueError(
+                f"Sewing cache dimension {cache.dimension} does not match symmetry dimension {self.dimension}."
+            )
+        if cache.bloch_sign != self.bloch_sign:
+            raise ValueError(
+                f"Sewing cache Bloch sign {cache.bloch_sign} does not match current sign {self.bloch_sign}."
+            )
+        if cache.k_shape != expected_shape:
+            raise ValueError(
+                f"Sewing cache k shape {cache.k_shape} does not match current shape {expected_shape}."
+            )
+        if cache.calculation_fingerprint != self.sewing_cache_fingerprint:
+            raise ValueError(
+                "Sewing cache calculation fingerprint does not match the current mesh, fields, "
+                "epsilon, orthogonalization, lattice, or integration settings."
+            )
+        for entry in cache.entries:
+            try:
+                field_kind = FieldKind(entry.field_kind)
+            except ValueError as exc:
+                raise ValueError(f"Sewing cache has unknown field kind {entry.field_kind!r}.") from exc
+            source_index, _, _ = self._locate_k(entry.source_k_fractional)
+            operation = SpaceGroupOperation(
+                entry.operation_rotation,
+                entry.operation_translation,
+            )
+            transformed = operation.act_reciprocal(entry.source_k_fractional)
+            target_index, target_representative, _ = self._locate_k(transformed)
+            if np.max(np.abs(periodic_difference(target_representative, entry.target_k_fractional))) > self.context.model.tolerance:
+                raise ValueError("Sewing cache target k is inconsistent with its exact Seitz action.")
+            shift = tuple(int(value) for value in np.rint(transformed - target_representative))
+            if shift != entry.reciprocal_lattice_shift:
+                raise ValueError(
+                    f"Sewing cache reciprocal shift {entry.reciprocal_lattice_shift} does not match {shift}."
+                )
+            source_bands = self._actual_bands(source_index)
+            target_bands = self._actual_bands(target_index)
+            if entry.source_band_indices != source_bands or entry.target_band_indices != target_bands:
+                raise ValueError(
+                    "Sewing cache outer-window band ids do not match the current calculation: "
+                    f"cached=({entry.source_band_indices}, {entry.target_band_indices}), "
+                    f"current=({source_bands}, {target_bands})."
+                )
+            expected_matrix_shape = (len(target_bands), len(source_bands))
+            if entry.matrix.shape != expected_matrix_shape or not np.all(np.isfinite(entry.matrix)):
+                raise ValueError(
+                    f"Sewing cache matrix has invalid shape or values; expected {expected_matrix_shape}."
+                )
+            key = self._cache_key(
+                entry.operation_rotation,
+                entry.operation_translation,
+                entry.source_k_fractional,
+                field_kind.value,
+            )
+            previous = self._sewing_cache.get(key)
+            if previous is not None and not np.allclose(
+                previous.matrix, entry.matrix, rtol=0.0, atol=self.context.model.tolerance
+            ):
+                raise ValueError("Sewing cache contains conflicting duplicate entries.")
+            self._sewing_cache[key] = entry
+
+    def _calculation_fingerprint(self) -> str:
+        digest = hashlib.sha256()
+        digest.update(b"PCWannier sewing input v1\0")
+        for label, value in (
+            ("real_lattice_vectors", self.state.config.real_lattice_vectors),
+            ("lattice_const", [self.state.config.lattice_const]),
+            ("bloch_sign", [self.bloch_sign]),
+            ("symmetry_tolerance", [self.context.model.tolerance]),
+            ("mesh_vertices", self.state.mesh.vertices),
+            ("mesh_elements", self.state.mesh.elements),
+            ("epsilon", self.state.epsilon),
+        ):
+            _update_array_digest(digest, label, value)
+        digest.update(str(self.state.integration_mode).encode("utf-8"))
+        transforms = self.state.get_transform()
+        for k_index in self._k_indices:
+            state_index = self._state_index(k_index)
+            _update_array_digest(digest, f"bands:{state_index}", self._actual_bands(k_index))
+            _update_array_digest(digest, f"field:{state_index}", self.state.get_block(*state_index))
+            _update_array_digest(digest, f"transform:{state_index}", transforms[state_index])
+        return digest.hexdigest()
+
+
+def _update_array_digest(digest, label: str, value) -> None:
+    array = np.asarray(value)
+    if array.dtype.hasobject:
+        raise TypeError(f"Cannot fingerprint object array {label!r}.")
+    digest.update(label.encode("utf-8"))
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+    if array.flags.c_contiguous:
+        digest.update(memoryview(array).cast("B"))
+        return
+    iterator = np.nditer(
+        array,
+        flags=["external_loop", "buffered", "zerosize_ok"],
+        order="C",
+        buffersize=1 << 17,
+    )
+    for chunk in iterator:
+        contiguous = np.ascontiguousarray(chunk)
+        digest.update(memoryview(contiguous).cast("B"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..data import InputBundle, Mesh
+from ..matrix_io import load_cell_matrix
 from .integration import integrate_overlap_matrix, mesh_integral_view
 from .kspace import get_kxyz
 from .parallel import parallel_map
@@ -27,6 +28,7 @@ class StateCollection:
 
         self.S: np.ndarray | None = None
         self.transform: np.ndarray | None = None
+        self.normalization_transform: np.ndarray | None = None
         self.transform_correction: np.ndarray | None = None
         self.is_bloch = False
         self.is_orthogonalized = False
@@ -96,19 +98,23 @@ class StateCollection:
         if self.transform_correction is not None:
             return
         self.transform = self.gen_matrix_on_kmesh(lambda i, j, k: np.eye(self.get_block(i, j, k).shape[0], dtype=np.complex128))
+        self.normalization_transform = self.gen_matrix_on_kmesh(
+            lambda i, j, k: np.eye(self.get_block(i, j, k).shape[0], dtype=np.complex128)
+        )
         self.transform_correction = self.gen_matrix_on_kmesh(
             lambda i, j, k: np.eye(self.get_block(i, j, k).shape[0], dtype=np.complex128)
         )
         self._identity_transform = self.transform
 
     def orthogonalize(self, tol_rel: float = 1e-6, atol_abs: float = 1e-12) -> None:
-        self.S = self.gen_matrix_on_kmesh(lambda *_: None)
+        self._ensure_raw_overlap()
         self.transform = self.gen_matrix_on_kmesh(lambda *_: None)
+        self.normalization_transform = self.gen_matrix_on_kmesh(lambda *_: None)
         self.transform_correction = self.gen_matrix_on_kmesh(lambda *_: None)
 
         def calc_idx(idx):
             i, j, k = idx
-            smat = self._overlap_matrix(i, j, k)
+            smat = np.asarray(self.S[idx], dtype=np.complex128)
             evals, vecs = np.linalg.eigh(smat)
             lam = evals.real
             tau = max(tol_rel * np.max(lam), atol_abs)
@@ -121,27 +127,34 @@ class StateCollection:
                 if tdiag[n, n] == 0.0:
                     raise ValueError(f"Normalization failed at ({i}, {j}, {k}, {n}).")
                 scaled[n] = block[n] * tdiag[n, n]
-            return idx, smat, tfull, np.linalg.inv(tdiag) @ tfull, scaled
+            return idx, tfull, tdiag, np.linalg.inv(tdiag) @ tfull, scaled
 
-        for idx, smat, tfull, tcorr, scaled in parallel_map(self.k_indices(), calc_idx, self.configured_threads):
+        for idx, tfull, tdiag, tcorr, scaled in parallel_map(self.k_indices(), calc_idx, self.configured_threads):
             i, j, k = idx
             self.fields[i, j, k] = scaled
-            self.S[i, j, k] = smat
             self.transform[i, j, k] = tfull
+            self.normalization_transform[i, j, k] = tdiag
             self.transform_correction[i, j, k] = tcorr
         self._identity_transform = None
         self.is_orthogonalized = True
 
     def check_orthogonality(self, *, apply_transform: bool = True) -> tuple[np.ndarray, bool]:
+        self._ensure_raw_overlap()
         report = np.zeros(self.k_shape + (6,), dtype=float)
         need_orth = False
 
         def calc_idx(idx):
             i, j, k = idx
-            smat = self._overlap_matrix(i, j, k)
-            if apply_transform and self.is_orthogonalized and self.transform_correction is not None:
-                tcorr = self.transform_correction[i, j, k]
-                smat = tcorr.conj().T @ smat @ tcorr
+            smat = np.asarray(self.S[idx], dtype=np.complex128)
+            if self.is_orthogonalized:
+                if apply_transform and self.transform is not None:
+                    transform = self.transform[idx]
+                elif not apply_transform and self.normalization_transform is not None:
+                    transform = self.normalization_transform[idx]
+                else:
+                    transform = None
+                if transform is not None:
+                    smat = transform.conj().T @ smat @ transform
             nwin = smat.shape[0]
             herm_res = float(np.linalg.norm(smat - smat.conj().T, ord="fro"))
             diag = np.real(np.diag(smat))
@@ -161,6 +174,53 @@ class StateCollection:
             report[idx] = row
             need_orth = need_orth or local_need
         return report, need_orth
+
+    def _ensure_raw_overlap(self) -> None:
+        if self.S is not None:
+            return
+        use_cached = {str(name).upper() for name in getattr(self.config, "use_cached_data", ())}
+        if "S" in use_cached:
+            path_value = getattr(self.config, "S_file", None)
+            input_path = getattr(self.config, "input_path", None)
+            path = input_path(path_value) if callable(input_path) else None
+            if path is None:
+                raise ValueError("S cache requested, but S_file is disabled.")
+            raw = load_cell_matrix(path, self.k_shape)
+            self.S = self._validate_raw_overlap(raw, source=f"Cached S matrix {path}")
+            return
+
+        raw = self.gen_matrix_on_kmesh(lambda *_: None)
+
+        def calc_idx(idx):
+            return idx, self._overlap_matrix(*idx)
+
+        for idx, smat in parallel_map(self.k_indices(), calc_idx, self.configured_threads):
+            raw[idx] = smat
+        self.S = self._validate_raw_overlap(raw, source="Calculated S matrix")
+
+    def _validate_raw_overlap(self, matrix: np.ndarray, *, source: str) -> np.ndarray:
+        if np.asarray(matrix).dtype != object or np.asarray(matrix).shape != self.k_shape:
+            raise ValueError(
+                f"{source} has k-grid shape {np.asarray(matrix).shape}; expected {self.k_shape}."
+            )
+        validated = np.empty(self.k_shape, dtype=object)
+        for idx in self.k_indices():
+            cell = np.asarray(matrix[idx], dtype=np.complex128)
+            band_count = self.get_block(*idx).shape[0]
+            expected = (band_count, band_count)
+            if cell.shape != expected:
+                raise ValueError(f"{source} at k={idx} has shape {cell.shape}; expected {expected}.")
+            if not np.all(np.isfinite(cell)):
+                raise ValueError(f"{source} at k={idx} contains non-finite values.")
+            scale = max(float(np.linalg.norm(cell, ord="fro")), 1.0)
+            residual = float(np.linalg.norm(cell - cell.conj().T, ord="fro"))
+            if residual > 1.0e-8 * scale:
+                raise ValueError(
+                    f"{source} at k={idx} is not Hermitian "
+                    f"(residual={residual:.6g}, scale={scale:.6g})."
+                )
+            validated[idx] = 0.5 * (cell + cell.conj().T)
+        return validated
 
     @property
     def configured_threads(self) -> int:

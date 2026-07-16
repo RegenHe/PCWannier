@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         SymmetryDisentanglementResult,
         SymmetryGaugeResult,
         SymmetryLocalizationResult,
+        SewingMatrixCacheEntry,
     )
 
 
@@ -312,3 +313,5 @@ class RunResult:
     symmetry_disentanglement: SymmetryDisentanglementResult | None = None
     output_spectrum_diagnostics: OutputSpectrumDiagnostics | None = None
     hopping_reconstruction_diagnostics: HoppingReconstructionDiagnostics | None = None
+    sewing_matrices: tuple[SewingMatrixCacheEntry, ...] | None = None
+    sewing_calculation_fingerprint: str | None = None

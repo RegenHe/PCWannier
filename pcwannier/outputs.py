@@ -14,6 +14,8 @@ from matplotlib.tri import LinearTriInterpolator, Triangulation
 
 from .config import EnergyWindow, IncarConfig
 from .data import BandResult, Mesh, RunResult, TopologyResult
+from .matrix_io import save_cell_matrix
+from .symmetry.cache import save_sewing_matrix_cache
 from .timing import timed_step
 
 LOGGER = logging.getLogger(__name__)
@@ -58,46 +60,6 @@ def _fmt_c(value, tol=1e-12, prec=8, force_complex=False, spaced=True, zero_smal
         return f"{real:.{prec}f}{sign}{abs(imag):.{prec}f}j"
     sign = "+" if imag >= 0 else ""
     return f"{real:.{prec}f}{sign}{imag:.{prec}f}j"
-
-
-def save_cell_matrix(filename: str | Path, data, shape: tuple | None = None) -> None:
-    path = Path(filename)
-    _ensure_parent(path)
-
-    def as_matrix(obj):
-        arr = np.asarray(obj)
-        if arr.dtype == object:
-            return None
-        if arr.ndim == 2:
-            return arr
-        if arr.ndim == 1:
-            return arr.reshape(1, -1)
-        if arr.ndim == 0 and np.issubdtype(arr.dtype, np.number):
-            return arr.reshape(1, 1)
-        return None
-
-    def iter_cells(obj, prefix=()):
-        mat = as_matrix(obj)
-        if mat is not None:
-            yield prefix, mat
-            return
-        if isinstance(obj, (list, tuple, np.ndarray)):
-            for idx, sub in enumerate(obj):
-                yield from iter_cells(sub, prefix + (idx,))
-            return
-        raise TypeError(f"Unsupported cell data at {prefix}: {type(obj)}")
-
-    with path.open("w", encoding="utf-8") as handle:
-        if shape is not None:
-            handle.write(f"# Declared grid shape (top-level): {shape}\n")
-        handle.write("# Each CELL may have its own matrix shape (ragged supported).\n")
-        for idx, matrix in iter_cells(data):
-            matrix = np.asarray(matrix)
-            handle.write(f"CELL{idx if idx else '(root)'} shape={tuple(matrix.shape)}:\n")
-            if matrix.size:
-                for row in matrix:
-                    handle.write(_fmt_c(row, force_complex=True, spaced=True, zero_small_imag=True) + "\n")
-            handle.write("\n")
 
 
 def save_dict(filename: str | Path, data: dict) -> None:
@@ -360,6 +322,10 @@ def _save_tri_field(filename: str | Path, mesh: Mesh, values: np.ndarray, label:
 
 def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir: str | Path | None = None) -> None:
     config = config or result.config
+    s_path = _resolve_output(config.S_file, config, out_dir)
+    if s_path is not None and result.S is not None:
+        with timed_step("write raw S matrix", LOGGER, file=s_path):
+            save_cell_matrix(s_path, result.S, result.S.shape)
     m_path = _resolve_output(config.M_file, config, out_dir)
     if m_path is not None:
         with timed_step("write M0 matrix", LOGGER, file=m_path):
@@ -376,6 +342,27 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
     if u_path is not None:
         with timed_step("write U matrix", LOGGER, file=u_path):
             save_cell_matrix(u_path, result.U, result.U.shape)
+
+    d_path = _resolve_output(config.D_file, config, out_dir)
+    if d_path is not None and result.sewing_matrices:
+        if result.symmetry is None:
+            raise ValueError("Sewing matrices are present without a symmetry context.")
+        if result.sewing_calculation_fingerprint is None:
+            raise ValueError("Sewing matrices are present without their calculation fingerprint.")
+        with timed_step(
+            "write D symmetry matrices",
+            LOGGER,
+            file=d_path,
+            count=len(result.sewing_matrices),
+        ):
+            save_sewing_matrix_cache(
+                d_path,
+                result.sewing_matrices,
+                dimension=result.symmetry.model.dimension,
+                bloch_sign=result.symmetry.model.bloch_convention.sign,
+                k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
+                calculation_fingerprint=result.sewing_calculation_fingerprint,
+            )
 
     hopping_path = _resolve_output(config.hopping_file, config, out_dir)
     if hopping_path is not None:

@@ -75,9 +75,15 @@ def test_cli_cache_paths_and_base_mode_are_dataset_independent(tmp_path, monkeyp
 
     cache_out = tmp_path / "cache-out"
     assert main(["-i", "example-incar", "--out", str(cache_out), "--cache"]) == 0
-    assert cache_config.use_cached_data == ["U", "V", "M", "S", "A"]
-    for attr in ("M_file", "A_file", "V_file", "U_file", "S_file"):
+    assert cache_config.use_cached_data == ["U", "V", "M", "S", "A", "D"]
+    for attr in ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file"):
         assert Path(getattr(cache_config, attr)).parent == cache_out
+
+    constrained_config = _config(tmp_path)
+    constrained_config.symmetry_constrained = True
+    monkeypatch.setattr(cli_module, "load_config", lambda path: constrained_config)
+    assert main(["-i", "example-incar", "--cache"]) == 0
+    assert constrained_config.use_cached_data == ["V", "M", "S", "A", "D"]
 
     base_config = _config(tmp_path)
     mesh = object()
@@ -97,6 +103,29 @@ def test_cli_cache_paths_and_base_mode_are_dataset_independent(tmp_path, monkeyp
     base_out = tmp_path / "base-out"
     assert main(["-i", "example-incar", "--out", str(base_out), "--base"]) == 0
     assert calls["base"] == (base_config, mesh, base_out)
+
+
+def test_relative_out_is_resolved_once_for_cache_input_and_output(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = _config(tmp_path)
+    calls = {}
+    monkeypatch.setattr(cli_module, "load_config", lambda path: config)
+    monkeypatch.setattr(cli_module, "load_input", lambda actual_config: object())
+    monkeypatch.setattr(cli_module, "run_calculation", lambda bundle, **kwargs: object())
+    monkeypatch.setattr(
+        cli_module,
+        "write_outputs",
+        lambda result, actual_config, out_dir: calls.setdefault("out_dir", out_dir),
+    )
+
+    assert main(["-i", "example-incar", "--out", "relative-out", "--cache"]) == 0
+
+    expected = (tmp_path / "relative-out").resolve()
+    assert calls["out_dir"] == expected
+    for attr in ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file"):
+        cache_path = Path(getattr(config, attr))
+        assert cache_path.is_absolute()
+        assert cache_path.parent == expected
 
 
 def test_interpolation_outputs_require_points_file(tmp_path):
@@ -136,6 +165,7 @@ def _config(base_dir: Path):
         V_file="V.txt",
         U_file="U.txt",
         S_file="S.txt",
+        D_file="D.txt",
         base_dir=base_dir,
     )
     config.input_path = lambda value: base_dir / str(value)

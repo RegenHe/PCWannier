@@ -10,13 +10,29 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 Set-Location $repoRoot
 
-if ($Clean -and (Test-Path $OutDir)) {
-    Remove-Item -LiteralPath $OutDir -Recurse -Force
+function Resolve-RepositoryPath([string]$Path) {
+    if ([IO.Path]::IsPathRooted($Path)) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    return [IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
 }
-New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+function Test-StrictDescendant([string]$Candidate, [string]$Root) {
+    $prefix = $Root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    return $Candidate.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+$OutDir = Resolve-RepositoryPath $OutDir
+$cleanRoots = @(
+    (Resolve-RepositoryPath "dist"),
+    (Resolve-RepositoryPath "build")
+)
+if ($Clean -and -not ($cleanRoots | Where-Object { Test-StrictDescendant $OutDir $_ })) {
+    throw "Refusing to clean '$OutDir'. Clean targets must be strict descendants of '$repoRoot\dist' or '$repoRoot\build'."
+}
 
 $entry = Join-Path $repoRoot "scripts\nuitka_entry.py"
 
@@ -45,11 +61,19 @@ Write-Host "Repository: $repoRoot"
 Write-Host "Python: $Python"
 Write-Host "Output: $OutDir"
 Write-Host "Command: $Python $($argsList -join ' ')"
+if ($Clean) {
+    Write-Host "Clean target: $OutDir"
+}
 
 if ($DryRun) {
     Write-Host "Dry run only; Nuitka was not executed."
     exit 0
 }
+
+if ($Clean -and (Test-Path -LiteralPath $OutDir)) {
+    Remove-Item -LiteralPath $OutDir -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $timer = [Diagnostics.Stopwatch]::StartNew()
 & $Python @argsList

@@ -6,7 +6,7 @@ from typing import Iterable
 
 import numpy as np
 
-from .group import SpaceGroup
+from .group import SeitzProduct, SpaceGroup
 
 
 @dataclass(frozen=True)
@@ -197,9 +197,9 @@ class ConcreteFiniteGroup:
         multiplication = np.empty((len(indices), len(indices)), dtype=np.int64)
         for left_local, left_global in enumerate(indices):
             for right_local, right_global in enumerate(indices):
-                product_global = group.operation_index(
-                    group.operations[left_global] * group.operations[right_global]
-                )
+                product_global = group.multiply_mod_lattice(
+                    left_global, right_global
+                ).result_index
                 if product_global not in global_to_local:
                     raise ValueError("The supplied Seitz representative subset is not closed.")
                 multiplication[left_local, right_local] = global_to_local[product_global]
@@ -220,6 +220,32 @@ class ConcreteFiniteGroup:
 
     def global_index(self, local_index: int) -> int:
         return self.operation_indices[int(local_index)]
+
+    def seitz_product(self, left_index: int, right_index: int) -> SeitzProduct:
+        """Return the exact representative product for local co-group indices."""
+
+        left = int(left_index)
+        right = int(right_index)
+        if not 0 <= left < self.order or not 0 <= right < self.order:
+            raise IndexError("Concrete finite-group element index is out of range.")
+        result = self.group.multiply_mod_lattice(
+            self.global_index(left), self.global_index(right)
+        )
+        expected = self.global_index(int(self.table.multiplication[left, right]))
+        if result.result_index != expected:
+            raise RuntimeError("Finite co-group and Seitz multiplication tables are inconsistent.")
+        return result
+
+    @cached_property
+    def lattice_shifts(self) -> np.ndarray:
+        shifts = np.empty(
+            (self.order, self.order, self.group.dimension), dtype=np.int64
+        )
+        for left in range(self.order):
+            for right in range(self.order):
+                shifts[left, right] = self.seitz_product(left, right).lattice_shift
+        shifts.setflags(write=False)
+        return shifts
 
     @property
     def rotations(self) -> tuple[np.ndarray, ...]:

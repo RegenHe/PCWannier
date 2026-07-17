@@ -10,6 +10,7 @@ from .bloch import StateBlochSymmetryProvider
 from .gauge import SymmetryGaugeResult, project_intertwiner
 from .representation import SymmetryContext, combined_target_matrix
 from .stars import SymmetryKStar, SymmetryStarPartition
+from .twisted import build_little_group_twisted_pair
 
 
 LOGGER = logging.getLogger(__name__)
@@ -473,10 +474,18 @@ def _updated_representative_frame(
         )
         target.append(combined_target_matrix(context.model.targets, path.operation_index, representative_k))
 
-    projected = project_intertwiner(
-        candidate,
+    physical_representation, target_representation = build_little_group_twisted_pair(
+        context,
+        representative_k,
+        tuple(path.operation_index for path in little_paths),
         physical,
         target,
+    )
+
+    projected = project_intertwiner(
+        candidate,
+        physical_representation,
+        target_representation,
         tolerance=tolerance,
         max_iterations=max_iterations,
         svd_relative_tolerance=svd_relative_tolerance,
@@ -528,10 +537,17 @@ def _restore_representative_constraints(
             combined_target_matrix(context.model.targets, path.operation_index, representative_k)
             for path in paths
         ]
-        projected = project_intertwiner(
-            candidate,
+        physical_representation, target_representation = build_little_group_twisted_pair(
+            context,
+            representative_k,
+            tuple(path.operation_index for path in paths),
             physical,
             target,
+        )
+        projected = project_intertwiner(
+            candidate,
+            physical_representation,
+            target_representation,
             tolerance=tolerance,
             max_iterations=max_iterations,
             svd_relative_tolerance=svd_relative_tolerance,

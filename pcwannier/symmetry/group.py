@@ -16,6 +16,19 @@ class PeriodicImage:
     lattice_shift: np.ndarray
 
 
+@dataclass(frozen=True)
+class SeitzProduct:
+    """A product reduced to the stored Seitz representative set.
+
+    ``g_left g_right = t_lattice_shift g_result`` uses a lattice
+    translation on the left. ``result_index`` is an index into the owning
+    :class:`SpaceGroup` operation list.
+    """
+
+    result_index: int
+    lattice_shift: tuple[int, ...]
+
+
 def reduce_fractional(vector, tolerance: float = 1e-8) -> PeriodicImage:
     values = np.asarray(vector, dtype=float)
     if values.ndim != 1 or not np.all(np.isfinite(values)):
@@ -196,12 +209,32 @@ class SpaceGroup:
                 return operation
         raise KeyError(f"Unknown space-group operation name: {name!r}.")
 
+    def multiply_mod_lattice(self, left_index: int, right_index: int) -> SeitzProduct:
+        """Multiply representatives and expose the discarded lattice shift."""
+
+        left = int(left_index)
+        right = int(right_index)
+        if not 0 <= left < len(self.operations) or not 0 <= right < len(self.operations):
+            raise IndexError("Space-group operation index is out of range.")
+        exact_product = self.operations[left] * self.operations[right]
+        result_index = self.operation_index(exact_product)
+        representative = self.operations[result_index]
+        lattice_shift = _integer_shift(
+            exact_product.translation - representative.translation,
+            self.tolerance,
+            description="Seitz representative product translation",
+        )
+        return SeitzProduct(
+            result_index,
+            tuple(int(value) for value in lattice_shift),
+        )
+
     def _validate_group_laws(self) -> None:
         for operation in self.operations:
             self.operation_index(operation.inverse())
-        for left in self.operations:
-            for right in self.operations:
-                self.operation_index(left * right)
+        for left in range(len(self.operations)):
+            for right in range(len(self.operations)):
+                self.multiply_mod_lattice(left, right)
 
 
 @dataclass(frozen=True)

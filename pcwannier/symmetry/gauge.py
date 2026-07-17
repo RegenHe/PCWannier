@@ -8,6 +8,7 @@ import numpy as np
 from .bloch import StateBlochSymmetryProvider
 from .representation import SymmetryContext, combined_target_matrix
 from .stars import SymmetryStarPartition, build_symmetry_stars
+from .twisted import TwistedRepresentation, build_little_group_twisted_pair
 
 if TYPE_CHECKING:
     from .wannier_validation import WannierSymmetryValidation
@@ -190,9 +191,17 @@ def construct_symmetry_gauge(
             target.append(combined_target_matrix(targets, path.operation_index, representative_k))
             operation_indices.append(path.operation_index)
 
-        hom = solve_intertwiner_space(
+        physical_representation, target_representation = build_little_group_twisted_pair(
+            context,
+            representative_k,
+            operation_indices,
             physical,
             target,
+        )
+
+        hom = solve_intertwiner_space(
+            physical_representation,
+            target_representation,
             relative_tolerance=svd_relative_tolerance,
         )
         if hom.dimension == 0:
@@ -201,14 +210,14 @@ def construct_symmetry_gauge(
                 f"k={star.representative_index}: dim Hom=0."
             )
         commutant = solve_intertwiner_space(
-            target,
-            target,
+            target_representation,
+            target_representation,
             relative_tolerance=svd_relative_tolerance,
         )
         projected = project_intertwiner(
             initial_gauge[representative_state_index],
-            physical,
-            target,
+            physical_representation,
+            target_representation,
             tolerance=tolerance,
             max_iterations=max_iterations,
             svd_relative_tolerance=svd_relative_tolerance,
@@ -344,7 +353,21 @@ def evaluate_symmetry_gauge(
 
 
 def _paired_representations(physical_matrices, target_matrices):
-    if isinstance(physical_matrices, Mapping) or isinstance(target_matrices, Mapping):
+    if isinstance(physical_matrices, TwistedRepresentation) or isinstance(
+        target_matrices, TwistedRepresentation
+    ):
+        if not isinstance(physical_matrices, TwistedRepresentation) or not isinstance(
+            target_matrices, TwistedRepresentation
+        ):
+            raise ValueError(
+                "Physical and target representations must both be TwistedRepresentation objects."
+            )
+        physical_matrices.assert_compatible(target_matrices)
+        physical_matrices.require_valid()
+        target_matrices.require_valid()
+        physical = physical_matrices.matrices
+        target = target_matrices.matrices
+    elif isinstance(physical_matrices, Mapping) or isinstance(target_matrices, Mapping):
         if not isinstance(physical_matrices, Mapping) or not isinstance(target_matrices, Mapping):
             raise ValueError("Physical and target representations must use the same container type.")
         if tuple(physical_matrices) != tuple(target_matrices):

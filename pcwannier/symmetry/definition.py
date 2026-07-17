@@ -170,6 +170,47 @@ class FactorSystem:
     bloch_sign: int = 1
     tolerance: float = 1.0e-8
 
+    def __post_init__(self) -> None:
+        tolerance = float(self.tolerance)
+        if not np.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("Factor-system tolerance must be finite and positive.")
+        raw_shifts = np.asarray(self.lattice_shifts)
+        if raw_shifts.ndim != 3 or raw_shifts.shape[0] != raw_shifts.shape[1]:
+            raise ValueError("Factor-system lattice shifts must have shape (order, order, dimension).")
+        shifts = np.rint(raw_shifts).astype(np.int64)
+        if not np.allclose(raw_shifts, shifts, rtol=0.0, atol=tolerance):
+            raise ValueError("Factor-system lattice shifts must contain integers.")
+        phases = np.asarray(self.phases, dtype=np.complex128)
+        if phases.shape != shifts.shape[:2] or not np.all(np.isfinite(phases)):
+            raise ValueError("Factor-system phases must be a finite order x order matrix.")
+        if not np.allclose(np.abs(phases), 1.0, rtol=0.0, atol=max(tolerance, 1.0e-12)):
+            raise ValueError("Factor-system phases must have unit modulus.")
+        if self.bloch_sign not in {-1, 1}:
+            raise ValueError("Factor-system Bloch sign must be +1 or -1.")
+        if not np.isfinite(self.cocycle_residual) or self.cocycle_residual < 0.0:
+            raise ValueError("Factor-system cocycle residual must be finite and non-negative.")
+        cochain = self.trivializing_cochain
+        if cochain is not None:
+            cochain = np.asarray(cochain, dtype=np.complex128)
+            if cochain.shape != (phases.shape[0],) or not np.all(np.isfinite(cochain)):
+                raise ValueError("Factor-system trivializing cochain has an invalid shape or value.")
+            if not np.allclose(
+                np.abs(cochain), 1.0, rtol=0.0, atol=max(tolerance, 1.0e-12)
+            ):
+                raise ValueError("Factor-system trivializing cochain must have unit modulus.")
+            cochain = cochain.copy()
+            cochain.setflags(write=False)
+        shifts = shifts.copy()
+        phases = phases.copy()
+        shifts.setflags(write=False)
+        phases.setflags(write=False)
+        object.__setattr__(self, "lattice_shifts", shifts)
+        object.__setattr__(self, "phases", phases)
+        object.__setattr__(self, "trivializing_cochain", cochain)
+        object.__setattr__(self, "cocycle_residual", float(self.cocycle_residual))
+        object.__setattr__(self, "bloch_sign", int(self.bloch_sign))
+        object.__setattr__(self, "tolerance", tolerance)
+
     @property
     def is_trivial(self) -> bool:
         """Compatibility alias for cohomologically_trivial."""
@@ -188,6 +229,44 @@ class FactorSystem:
     def phase_residual(self) -> float:
         return float(np.max(np.abs(self.phases - 1.0), initial=0.0))
 
+    def cocycle_residual_for(self, product_table) -> float:
+        product = np.asarray(product_table, dtype=np.int64)
+        order = self.phases.shape[0]
+        if product.shape != (order, order):
+            raise ValueError("Factor-system product table has an incompatible shape.")
+        if np.any(product < 0) or np.any(product >= order):
+            raise ValueError("Factor-system product table contains an invalid element index.")
+        residual = 0.0
+        for left in range(order):
+            for middle in range(order):
+                for right in range(order):
+                    lm = int(product[left, middle])
+                    mr = int(product[middle, right])
+                    lhs = self.phases[left, middle] * self.phases[lm, right]
+                    rhs = self.phases[left, mr] * self.phases[middle, right]
+                    residual = max(residual, float(abs(lhs - rhs)))
+        return residual
+
+    def assert_compatible(self, other: "FactorSystem", *, tolerance: float | None = None) -> None:
+        if not isinstance(other, FactorSystem):
+            raise TypeError("Expected another FactorSystem.")
+        requested = 0.0 if tolerance is None else float(tolerance)
+        if not np.isfinite(requested) or requested < 0.0:
+            raise ValueError("Factor-system comparison tolerance must be finite and non-negative.")
+        threshold = max(
+            self.tolerance,
+            other.tolerance,
+            requested,
+        )
+        if self.bloch_sign != other.bloch_sign:
+            raise ValueError("Physical and target representations use different Bloch signs.")
+        if self.lattice_shifts.shape != other.lattice_shifts.shape or not np.array_equal(
+            self.lattice_shifts, other.lattice_shifts
+        ):
+            raise ValueError("Physical and target representations use different Seitz lattice shifts.")
+        if not np.allclose(self.phases, other.phases, rtol=0.0, atol=threshold):
+            raise ValueError("Physical and target representations use different factor-system phases.")
+
 
 class ProjectiveIrrepResolver(Protocol):
     def resolve(
@@ -204,6 +283,8 @@ class ResolvedLittleGroup:
     identification: FiniteGroupIdentification
     factor_system: FactorSystem
     irreps: tuple[ResolvedIrrep, ...]
+    k_fractional: np.ndarray | None = None
+    reciprocal_lattice_shifts: tuple[tuple[int, ...], ...] = ()
 
     @property
     def table(self) -> FiniteGroupTable:
@@ -272,9 +353,20 @@ class SpaceGroupDefinition:
                 return cached
         identification = self.identify_operations(indices)
         concrete = identification.concrete
+        reciprocal_shifts = []
+        for operation_index in indices:
+            displacement = self.group.operations[operation_index].act_reciprocal(reduced_k) - reduced_k
+            rounded = np.rint(displacement).astype(np.int64)
+            if not np.allclose(displacement, rounded, rtol=0.0, atol=self.tolerance):
+                operation = self.group.operations[operation_index]
+                raise ValueError(
+                    f"Operation {operation.name or operation_index!r} is not in the little group "
+                    f"at k={reduced_k.tolist()}."
+                )
+            reciprocal_shifts.append(tuple(int(value) for value in rounded))
         factor = build_factor_system(
             concrete,
-            kpoint,
+            reduced_k,
             self.tolerance,
             bloch_convention=convention,
         )
@@ -287,12 +379,16 @@ class SpaceGroupDefinition:
             irreps = tuple(projective_resolver.resolve(identification, factor))
         else:
             irreps = ()
+        stored_k = reduced_k.copy()
+        stored_k.setflags(write=False)
         result = ResolvedLittleGroup(
             identification.canonical.name,
             concrete,
             identification,
             factor,
             irreps,
+            stored_k,
+            tuple(reciprocal_shifts),
         )
         if projective_resolver is None:
             self._little_group_cache[cache_key] = result
@@ -346,45 +442,27 @@ def build_factor_system(
     kpoint = np.asarray(k_fractional, dtype=float)
     if kpoint.shape != (concrete.group.dimension,):
         raise ValueError(f"k_fractional must have shape {(concrete.group.dimension,)}.")
-    shifts = np.empty(
-        (concrete.order, concrete.order, concrete.group.dimension), dtype=np.int64
-    )
-    for left in range(concrete.order):
-        for right in range(concrete.order):
-            left_operation = concrete.group.operations[concrete.global_index(left)]
-            right_operation = concrete.group.operations[concrete.global_index(right)]
-            product_operation = left_operation * right_operation
-            target = int(concrete.table.multiplication[left, right])
-            representative = concrete.group.operations[concrete.global_index(target)]
-            difference = product_operation.translation - representative.translation
-            rounded = np.rint(difference).astype(np.int64)
-            if not np.allclose(difference, rounded, rtol=0.0, atol=tolerance):
-                raise ValueError("Seitz representatives differ by a non-lattice translation.")
-            shifts[left, right] = rounded
+    shifts = concrete.lattice_shifts
     phases = np.exp(
         -convention.sign
         * 2j
         * np.pi
         * np.einsum("abd,d->ab", shifts, kpoint)
     )
-    cocycle_residual = 0.0
-    for left in range(concrete.order):
-        for middle in range(concrete.order):
-            for right in range(concrete.order):
-                lm = int(concrete.table.multiplication[left, middle])
-                mr = int(concrete.table.multiplication[middle, right])
-                lhs = phases[left, middle] * phases[lm, right]
-                rhs = phases[left, mr] * phases[middle, right]
-                cocycle_residual = max(cocycle_residual, float(abs(lhs - rhs)))
+    provisional = FactorSystem(
+        shifts,
+        phases,
+        0.0,
+        None,
+        convention.sign,
+        tolerance,
+    )
+    cocycle_residual = provisional.cocycle_residual_for(concrete.table.multiplication)
     if cocycle_residual > max(100.0 * tolerance, 1.0e-8):
         raise ValueError(
             f"Computed factor system violates the cocycle condition (residual={cocycle_residual:.6g})."
         )
     cochain = _trivializing_cochain(concrete.table, phases, tolerance)
-    shifts.setflags(write=False)
-    phases.setflags(write=False)
-    if cochain is not None:
-        cochain.setflags(write=False)
     return FactorSystem(
         shifts,
         phases,

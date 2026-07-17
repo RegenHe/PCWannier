@@ -11,6 +11,7 @@ from .specs import (
     FieldKind,
     RepresentationPointSpec,
 )
+from .twisted import TwistedRepresentation, build_twisted_representation
 
 if TYPE_CHECKING:
     from ..compute.state import StateCollection
@@ -96,6 +97,7 @@ class SewingDiagnostics:
     unitarity_error: float
     leakage: float
     max_composition_residual: float
+    max_twisted_composition_residual: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,9 @@ class HighSymmetryPointAnalysis:
     conjugacy_classes: tuple[tuple[str, ...], ...] = ()
     finite_group_mapping: tuple[tuple[str, str], ...] = ()
     factor_system: FactorSystem | None = None
+    physical_twisted_representation: TwistedRepresentation | None = None
+    target_twisted_representation: TwistedRepresentation | None = None
+    intertwiner_dimension: int | None = None
 
 
 @dataclass(frozen=True)
@@ -373,6 +378,7 @@ def _analyze_point(
     )
     matrices: dict[str, np.ndarray] = {}
     characters: dict[str, complex] = {}
+    matrices_by_operation: dict[int, np.ndarray] = {}
     for element in elements:
         mapping = provider.mapping(element.operation_index, k_index)
         request = provider.request_for_mapping(
@@ -386,6 +392,25 @@ def _analyze_point(
         name = _operation_name(group, element.operation_index)
         matrices[name] = matrix
         characters[name] = complex(np.trace(matrix))
+        matrices_by_operation[element.operation_index] = matrix
+
+    physical_twisted = (
+        None
+        if resolved_little_group is None
+        else build_twisted_representation(
+            resolved_little_group,
+            operation_indices,
+            tuple(matrices_by_operation[index] for index in operation_indices),
+        )
+    )
+    if physical_twisted is not None:
+        analysis_spec = context.model.representation_analysis
+        representation_tolerance = (
+            context.model.tolerance
+            if analysis_spec is None
+            else max(context.model.tolerance, analysis_spec.leakage_tolerance)
+        )
+        physical_twisted.require_valid(tolerance=representation_tolerance)
 
     diagnostics = SewingDiagnostics(
         unitarity_error=max(
@@ -401,6 +426,9 @@ def _analyze_point(
         ),
         max_composition_residual=_composition_residual(
             provider, point.k_fractional, k_index, bands, operation_indices, matrices
+        ),
+        max_twisted_composition_residual=(
+            0.0 if physical_twisted is None else physical_twisted.product_residual
         ),
     )
 
@@ -441,7 +469,10 @@ def _analyze_point(
                 f"{leakage_tolerance:.6g}. Increase the degeneracy tolerance or select a closed "
                 "band subspace before assigning irreducible representations."
             )
-        if resolved_little_group is not None:
+        if (
+            resolved_little_group is not None
+            and resolved_little_group.factor_system.cohomologically_trivial
+        ):
             decomposition = decompose_little_group_characters(
                 resolved_little_group, block_characters
             )
@@ -458,15 +489,46 @@ def _analyze_point(
             )
         )
 
-    if resolved_little_group is not None:
+    if (
+        resolved_little_group is not None
+        and resolved_little_group.factor_system.cohomologically_trivial
+    ):
         physical_decomposition = decompose_little_group_characters(
             resolved_little_group, characters
         )
     else:
         physical_decomposition = None
     targets = _selected_targets(context, point)
-    target_characters = _target_characters(targets, operation_indices, point.k_fractional)
-    if targets and resolved_little_group is not None:
+    target_matrices_by_operation = {
+        operation_index: _combined_target_matrix(targets, operation_index, point.k_fractional)
+        for operation_index in operation_indices
+    } if targets else {}
+    target_characters = {
+        _operation_name(group, operation_index): complex(
+            np.trace(target_matrices_by_operation[operation_index])
+        )
+        for operation_index in operation_indices
+    } if targets else {}
+    target_twisted = (
+        None
+        if not targets or resolved_little_group is None
+        else build_twisted_representation(
+            resolved_little_group,
+            operation_indices,
+            tuple(target_matrices_by_operation[index] for index in operation_indices),
+        )
+    )
+    if target_twisted is not None:
+        target_twisted.require_valid(tolerance=context.model.tolerance)
+        if physical_twisted is None:
+            raise RuntimeError("Target twisted representation has no physical counterpart.")
+        physical_twisted.assert_compatible(target_twisted)
+
+    if (
+        targets
+        and resolved_little_group is not None
+        and resolved_little_group.factor_system.cohomologically_trivial
+    ):
         target_decomposition = decompose_little_group_characters(
             resolved_little_group, target_characters
         )
@@ -482,6 +544,14 @@ def _analyze_point(
         if target_decomposition is not None and physical_decomposition is not None
         else None
     )
+    intertwiner_dimension = None
+    if physical_twisted is not None and target_twisted is not None:
+        from .gauge import solve_intertwiner_space
+
+        intertwiner_dimension = solve_intertwiner_space(
+            physical_twisted,
+            target_twisted,
+        ).dimension
     return HighSymmetryPointAnalysis(
         point.name,
         np.asarray(point.k_fractional).copy(),
@@ -523,6 +593,9 @@ def _analyze_point(
             )
         ),
         None if resolved_little_group is None else resolved_little_group.factor_system,
+        physical_twisted,
+        target_twisted,
+        intertwiner_dimension,
     )
 
 
@@ -582,6 +655,16 @@ def _target_characters(
         )
         for operation_index in operation_indices
     }
+
+
+def _combined_target_matrix(
+    targets: tuple[WannierTargetRepresentation, ...],
+    operation_index: int,
+    kpoint,
+) -> np.ndarray:
+    from .representation import combined_target_matrix
+
+    return combined_target_matrix(targets, operation_index, kpoint)
 
 
 def _selected_targets(

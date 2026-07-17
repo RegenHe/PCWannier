@@ -38,6 +38,7 @@ from .group import (
     OrbitAction,
     OrbitPoint,
     PeriodicImage,
+    SeitzProduct,
     SiteSymmetryElement,
     SiteSymmetryGroup,
     SpaceGroup,
@@ -125,6 +126,11 @@ from .specs import (
     WannierTargetSpec,
 )
 from .tables import AutomaticIrrepCharacter, ConcreteFiniteGroup, ConjugacyClass, FiniteGroupTable
+from .twisted import (
+    TwistedRepresentation,
+    build_little_group_twisted_pair,
+    build_twisted_representation,
+)
 from .stars import (
     SymmetryKStar,
     SymmetryStarMember,
@@ -163,6 +169,7 @@ __all__ = [
     "OrbitAction",
     "OrbitPoint",
     "PeriodicImage",
+    "SeitzProduct",
     "PeriodicTriangleInterpolator",
     "ProjectedIntertwiner",
     "ProjectorSymmetryReport",
@@ -200,6 +207,7 @@ __all__ = [
     "SymmetryStarPartition",
     "TargetGaugeProjection",
     "TargetGaugePropagation",
+    "TwistedRepresentation",
     "SymmetryModel",
     "WannierTargetSpec",
     "WannierTargetRepresentation",
@@ -209,9 +217,11 @@ __all__ = [
     "analyze_little_group",
     "build_crystallographic_orbit",
     "build_k_mappings",
+    "build_little_group_twisted_pair",
     "build_factor_system",
     "build_symmetry_context",
     "build_symmetry_stars",
+    "build_twisted_representation",
     "build_wannier_target_from_group_irrep",
     "cartesian_field_matrix",
     "coefficient_metric_overlap",

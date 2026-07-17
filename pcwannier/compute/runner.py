@@ -418,7 +418,7 @@ def _log_symmetry_analysis(result) -> None:
         LOGGER.info(
             "Symmetry point %s: little_group=%s classes=%s mapping=%s k=%s "
             "bands(actual,1-based)=%s blocks=%s unitarity=%.6g leakage=%.6g "
-            "composition=%.6g factor_phase=%.6g factor_cocycle=%.6g "
+            "composition=%.6g twisted_composition=%.6g factor_phase=%.6g factor_cocycle=%.6g "
             "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s characters=%s",
             point.name,
             point.little_group_name or "unresolved",
@@ -430,6 +430,7 @@ def _log_symmetry_analysis(result) -> None:
             point.diagnostics.unitarity_error,
             point.diagnostics.leakage,
             point.diagnostics.max_composition_residual,
+            point.diagnostics.max_twisted_composition_residual,
             point.factor_system.phase_residual if point.factor_system is not None else 0.0,
             point.factor_system.cocycle_residual if point.factor_system is not None else 0.0,
             point.factor_system.raw_trivial if point.factor_system is not None else True,
@@ -450,6 +451,13 @@ def _log_symmetry_analysis(result) -> None:
                 point.compatibility.compatible if point.compatibility else None,
                 point.physical_decomposition.max_residual,
                 point.target_decomposition.max_residual if point.target_decomposition else 0.0,
+            )
+        elif point.factor_system is not None and not point.factor_system.cohomologically_trivial:
+            LOGGER.info(
+                "Symmetry point %s uses a non-trivial projective factor: "
+                "ordinary irrep labels unavailable, direct intertwiner dimension=%s",
+                point.name,
+                point.intertwiner_dimension,
             )
 
 

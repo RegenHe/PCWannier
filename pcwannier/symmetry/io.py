@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
+import cmath
 from functools import lru_cache
 from importlib import resources
+import math
 from pathlib import Path
 from typing import Any
 
@@ -374,9 +377,7 @@ def _nonempty_string(value: Any, description: str) -> str:
 
 
 def _integer_matrix(value: Any, dimension: int, description: str) -> np.ndarray:
-    raw = np.asarray(value)
-    if raw.shape != (dimension, dimension):
-        raise ValueError(f"{description} must have shape {(dimension, dimension)}.")
+    raw = _real_matrix(value, dimension, description)
     matrix = np.rint(raw).astype(np.int64)
     if not np.allclose(raw, matrix, rtol=0.0, atol=1.0e-12):
         raise ValueError(f"{description} must contain integers.")
@@ -384,10 +385,27 @@ def _integer_matrix(value: Any, dimension: int, description: str) -> np.ndarray:
 
 
 def _vector(value: Any, dimension: int, description: str) -> np.ndarray:
-    array = np.asarray(value, dtype=float)
-    if array.shape != (dimension,) or not np.all(np.isfinite(array)):
+    if not isinstance(value, list) or len(value) != dimension:
         raise ValueError(f"{description} must be a finite vector with length {dimension}.")
+    array = np.asarray(
+        [_real_scalar(entry, f"{description}[{index}]") for index, entry in enumerate(value)],
+        dtype=float,
+    )
     return array
+
+
+def _real_matrix(value: Any, dimension: int, description: str) -> np.ndarray:
+    if not isinstance(value, list) or len(value) != dimension:
+        raise ValueError(f"{description} must have shape {(dimension, dimension)}.")
+    matrix = np.empty((dimension, dimension), dtype=float)
+    for row_index, row in enumerate(value):
+        if not isinstance(row, list) or len(row) != dimension:
+            raise ValueError(f"{description} must have shape {(dimension, dimension)}.")
+        for column_index, scalar in enumerate(row):
+            matrix[row_index, column_index] = _real_scalar(
+                scalar, f"{description}[{row_index},{column_index}]"
+            )
+    return matrix
 
 
 def _complex_matrix(value: Any, dimension: int, description: str) -> np.ndarray:
@@ -408,17 +426,77 @@ def _complex_scalar(value: Any, description: str) -> complex:
     if isinstance(value, (int, float, complex, np.number)):
         result = complex(value)
     elif isinstance(value, str):
-        text = value.strip().replace("−", "-").replace("i", "j")
-        if text == "j":
-            text = "1j"
-        elif text == "-j":
-            text = "-1j"
+        text = value.strip().replace("−", "-")
+        direct_text = text.replace("i", "j")
+        if direct_text == "j":
+            direct_text = "1j"
+        elif direct_text == "-j":
+            direct_text = "-1j"
         try:
-            result = complex(text)
-        except ValueError as exc:
-            raise ValueError(f"{description} contains invalid complex value {value!r}.") from exc
+            result = complex(direct_text)
+        except ValueError:
+            result = _evaluate_scalar_expression(text, description)
     else:
         raise ValueError(f"{description} contains unsupported value {value!r}.")
     if not np.isfinite(result.real) or not np.isfinite(result.imag):
         raise ValueError(f"{description} contains a non-finite value.")
     return result
+
+
+def _real_scalar(value: Any, description: str) -> float:
+    result = _complex_scalar(value, description)
+    if abs(result.imag) > 1.0e-12:
+        raise ValueError(f"{description} must evaluate to a real number, got {result!r}.")
+    return float(result.real)
+
+
+def _evaluate_scalar_expression(expression: str, description: str) -> complex:
+    try:
+        tree = ast.parse(expression, mode="eval")
+        result = _evaluate_scalar_node(tree.body)
+    except (SyntaxError, TypeError, ValueError, ZeroDivisionError, OverflowError) as exc:
+        raise ValueError(
+            f"{description} contains invalid scalar expression {expression!r}."
+        ) from exc
+    return complex(result)
+
+
+def _evaluate_scalar_node(node: ast.AST) -> complex:
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float, complex)):
+            raise ValueError("Only numeric constants are allowed.")
+        return complex(node.value)
+    if isinstance(node, ast.Name):
+        constants = {
+            "pi": complex(math.pi),
+            "e": complex(math.e),
+            "i": 1.0j,
+            "j": 1.0j,
+        }
+        if node.id not in constants:
+            raise ValueError(f"Unknown scalar name {node.id!r}.")
+        return constants[node.id]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _evaluate_scalar_node(node.operand)
+        return value if isinstance(node.op, ast.UAdd) else -value
+    if isinstance(node, ast.BinOp):
+        left = _evaluate_scalar_node(node.left)
+        right = _evaluate_scalar_node(node.right)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.Div):
+            return left / right
+        raise ValueError("Only +, -, *, and / are allowed.")
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "sqrt"
+        and len(node.args) == 1
+        and not node.keywords
+    ):
+        return cmath.sqrt(_evaluate_scalar_node(node.args[0]))
+    raise ValueError("Unsupported scalar expression.")

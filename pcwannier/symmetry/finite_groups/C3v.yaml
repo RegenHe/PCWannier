@@ -1,3 +1,5 @@
+# point_action uses the 120-degree hexagonal fractional basis. Irrep matrices
+# use an orthonormal internal (x, y) basis and may therefore contain sqrt(3).
 name: C3v
 dimension: 2
 elements:
@@ -24,5 +26,6 @@ irreps:
     dimension: 2
     characters: {E: 2, C3: -1, C3_inv: -1, sigma_1: 0, sigma_2: 0, sigma_3: 0}
     generators:
-      C3: [[-0.5, -0.8660254037844386], [0.8660254037844386, -0.5]]
-      sigma_1: [[1.0, 0.0], [0.0, -1.0]]
+      C3: [["-1/2", "-sqrt(3)/2"], ["sqrt(3)/2", "-1/2"]]
+      # sigma_2 is the x-axis mirror for a1=(1,0), a2=(-1/2,sqrt(3)/2).
+      sigma_2: [[1, 0], [0, -1]]

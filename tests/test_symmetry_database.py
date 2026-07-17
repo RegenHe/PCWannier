@@ -1,7 +1,9 @@
+import json
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from pcwannier.symmetry import (
     ConcreteFiniteGroup,
@@ -148,3 +150,121 @@ def test_common_short_space_group_symbols_resolve_to_modern_resources(tmp_path):
     }
     for alias, modern in aliases.items():
         assert resolve_symmetry_file(alias, tmp_path).name == modern
+
+
+@pytest.mark.parametrize(("filename", "irrep_name"), [("C3v.yaml", "E"), ("C6v.yaml", "E1")])
+def test_hexagonal_vector_irreps_match_fractional_point_actions(filename, irrep_name):
+    definition = load_finite_group(Path("pcwannier/symmetry/finite_groups") / filename)
+    irrep = next(value for value in definition.irreps if value.name == irrep_name)
+    lattice = np.array([[1.0, 0.0], [-0.5, np.sqrt(3.0) / 2.0]])
+
+    assert definition.point_actions is not None
+    assert all(np.issubdtype(action.dtype, np.integer) for action in definition.point_actions)
+    for index, fractional_action in enumerate(definition.point_actions):
+        cartesian_action = lattice.T @ fractional_action @ np.linalg.inv(lattice.T)
+        assert np.allclose(
+            irrep.matrix(index), cartesian_action, rtol=0.0, atol=1.0e-12
+        ), definition.table.element_names[index]
+
+
+def test_radical_and_complex_expressions_are_evaluated_in_finite_group_yaml(tmp_path):
+    path = tmp_path / "C1-expression.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "name: C1_expression",
+                "dimension: 2",
+                "elements:",
+                "  - name: E",
+                '    point_action: [["sqrt(1)", 0], [0, "2/2"]]',
+                "irreps:",
+                "  A:",
+                "    dimension: 1",
+                '    characters: {E: "sqrt(4)/2"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    definition = load_finite_group(path)
+
+    assert np.array_equal(definition.point_actions[0], np.eye(2, dtype=int))
+    assert definition.irreps[0].characters == (1.0 + 0.0j,)
+
+    c3 = load_finite_group(Path("pcwannier/symmetry/finite_groups/C3.yaml"))
+    e_plus = next(value for value in c3.irreps if value.name == "E_plus")
+    assert e_plus.characters[c3.table.element_index("C3")] == pytest.approx(
+        np.exp(2.0j * np.pi / 3.0)
+    )
+
+
+def test_radical_expressions_are_supported_in_space_group_translations(tmp_path):
+    path = tmp_path / "p1-expression.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "name: p1_expression",
+                "dimension: 2",
+                "operations:",
+                "  - name: E",
+                "    rotation: [[1, 0], [0, 1]]",
+                '    translation: ["sqrt(0)", "1/3 - 1/3"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    definition = load_space_group(path)
+
+    assert np.array_equal(definition.group.operations[0].rotation, np.eye(2, dtype=int))
+    assert np.array_equal(definition.group.operations[0].translation, np.zeros(2))
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["__import__('os').system('echo unsafe')", "sqrt.__call__(3)", "open('file')"],
+)
+def test_symmetry_scalar_expressions_reject_code_execution(tmp_path, expression):
+    path = tmp_path / "unsafe.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "name: unsafe",
+                "dimension: 1",
+                "elements:",
+                "  - name: E",
+                "    point_action: [[1]]",
+                "irreps:",
+                "  A:",
+                "    dimension: 1",
+                f"    characters: {{E: {json.dumps(expression)}}}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid scalar expression"):
+        load_finite_group(path)
+
+
+def test_point_actions_remain_integer_in_fractional_coordinates(tmp_path):
+    path = tmp_path / "noninteger-action.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "name: invalid",
+                "dimension: 2",
+                "elements:",
+                "  - name: E",
+                '    point_action: [[1, 0], [0, "sqrt(3)/2"]]',
+                "irreps:",
+                "  A:",
+                "    dimension: 1",
+                "    characters: {E: 1}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must contain integers"):
+        load_finite_group(path)

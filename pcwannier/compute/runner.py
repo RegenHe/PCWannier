@@ -109,7 +109,11 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         bundle.symmetry.model.representation_analysis is not None
         or config.symmetry_constrained
     ):
-        symmetry_provider = StateBlochSymmetryProvider(state, bundle.symmetry)
+        symmetry_provider = StateBlochSymmetryProvider(
+            state,
+            bundle.symmetry,
+            field_kind=bundle.maxwell.symmetry_field_kind,
+        )
     if bundle.symmetry is not None and bundle.symmetry.model.representation_analysis is not None:
         with timed_step("analyze Bloch symmetry representations", LOGGER):
             symmetry_analysis = run_symmetry_analysis(
@@ -377,7 +381,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         config=config,
         mesh=state.mesh,
         extended_mesh=state.extention_mesh,
-        extended_epsilon=state.extention_epsilon,
+        extended_metric_material=state.extended_metric_material,
         orthogonality_report=report,
         S=state.S,
         M0=mset.mM0,

@@ -12,6 +12,7 @@ from pcwannier.compute import (
 from pcwannier.data import FieldData, Mesh, RawData
 from pcwannier.outputs import _interpolate_real_mesh
 from pcwannier.sources.comsol import (
+    _metric_on_mesh,
     _validate_header_k_grid,
     _values_on_mesh,
     load_comsol_data,
@@ -118,6 +119,44 @@ def test_values_on_mesh_averages_duplicate_rows_all_columns():
     assert np.allclose(mapped[0], [2.0 + 2.0j, 4.0])
     assert np.allclose(mapped[1], [5.0, 7.0])
     assert np.allclose(mapped[2], [9.0, 11.0])
+
+
+def test_metric_material_requires_one_finite_real_column():
+    mesh = Mesh(
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+        np.array([[0, 1, 2]]),
+    )
+    points = mesh.vertices.copy()
+
+    metric = _metric_on_mesh(
+        mesh,
+        RawData(points, np.array([[1.0], [2.0], [3.0]])),
+        material="mu",
+        path="mu.txt",
+    )
+    assert np.array_equal(metric, [1.0, 2.0, 3.0])
+
+    with pytest.raises(ValueError, match="exactly one value column"):
+        _metric_on_mesh(
+            mesh,
+            RawData(points, np.ones((3, 2))),
+            material="epsilon",
+            path="eps.txt",
+        )
+    with pytest.raises(ValueError, match="must be real"):
+        _metric_on_mesh(
+            mesh,
+            RawData(points, np.array([[1.0 + 1.0j], [2.0], [3.0]])),
+            material="mu",
+            path="mu.txt",
+        )
+    with pytest.raises(ValueError, match="finite real value"):
+        _metric_on_mesh(
+            mesh,
+            RawData(points, np.array([[1.0], [np.nan], [3.0]])),
+            material="mu",
+            path="mu.txt",
+        )
 
 
 def test_match_data_to_mesh_rejects_far_points():

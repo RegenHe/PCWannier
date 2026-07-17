@@ -1,7 +1,14 @@
 import numpy as np
 import pytest
 
-from pcwannier import EnergyWindow, load_config
+from pcwannier import (
+    EnergyWindow,
+    FieldComponents,
+    FieldKind,
+    MaterialKind,
+    PrimaryField,
+    load_config,
+)
 from pcwannier.config import IncarConfig, evaluate_math_expression, preprocess_config
 
 
@@ -24,6 +31,10 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert len(cfg.projections[0]["states"]) == 3
     assert cfg.compute_backend == "python"
     assert cfg.integration_mode == "nodal"
+    assert cfg.field_components == FieldComponents.EZ.value
+    assert cfg.maxwell_problem.primary_field == PrimaryField.ELECTRIC
+    assert cfg.maxwell_problem.metric_material == MaterialKind.EPSILON
+    assert cfg.maxwell_problem.curl_material == MaterialKind.MU
     assert cfg.symmetry_constrained is True
     assert cfg.symmetry_output_basis == "strict"
     assert cfg.symmetry_context is not None
@@ -45,7 +56,7 @@ def test_energy_window_parser(tmp_path):
                 "composition_of_b = 1 0, 0 1",
                 "band_window = 0.1, 0.9",
                 "dataset_file = ./Ez.txt",
-                "dielectric_file = ./eps.txt",
+                "metric_file = ./eps.txt",
                 "mesh_file = ./mesh.mphtxt",
                 "E_file = ./E.txt",
                 "compute_backend = auto",
@@ -115,7 +126,7 @@ def test_rank_deficient_b_vectors_are_rejected(tmp_path):
                 "composition_of_b = 1 0",
                 "band_window = 0:1",
                 "dataset_file = Ez.txt",
-                "dielectric_file = eps.txt",
+                "metric_file = eps.txt",
                 "mesh_file = mesh.mphtxt",
                 "E_file = E.txt",
                 "extension = 1, 1",
@@ -143,6 +154,8 @@ def test_removed_w_center_input_is_rejected(tmp_path):
     ("suffix", "message"),
     [
         ("unknown_option = 1", "Unknown incar field"),
+        ("dielectric_file = eps.txt", "Unknown incar field"),
+        ("representation_field_kind = scalar", "Unknown incar field"),
         ("lattice_const = 2", "Duplicate incar field"),
         ("this is not an assignment", "Malformed incar line"),
     ],
@@ -164,6 +177,73 @@ def test_boolean_fields_accept_only_true_or_false(tmp_path, value):
     incar.write_text(source, encoding="utf-8")
 
     with pytest.raises(ValueError, match="must be 'true' or 'false'"):
+        load_config(incar)
+
+
+@pytest.mark.parametrize(
+    ("components", "primary", "metric", "curl", "field_kind"),
+    [
+        (
+            "eZ",
+            PrimaryField.ELECTRIC,
+            MaterialKind.EPSILON,
+            MaterialKind.MU,
+            FieldKind.ELECTRIC_Z,
+        ),
+        (
+            "hZ",
+            PrimaryField.MAGNETIC,
+            MaterialKind.MU,
+            MaterialKind.EPSILON,
+            FieldKind.MAGNETIC_AXIAL_Z,
+        ),
+    ],
+)
+def test_field_components_select_maxwell_problem(
+    tmp_path, components, primary, metric, curl, field_kind
+):
+    incar = tmp_path / "incar"
+    source = _minimal_symmetry_incar().replace(
+        "field_components = Ez", f"field_components = {components}"
+    )
+    source += "\nrepresentation_analysis\nGamma; 0.0, 0.0; 0:3\nend\n"
+    incar.write_text(source, encoding="utf-8")
+
+    cfg = load_config(incar)
+
+    assert cfg.maxwell_problem.primary_field == primary
+    assert cfg.maxwell_problem.metric_material == metric
+    assert cfg.maxwell_problem.curl_material == curl
+    assert (
+        cfg.symmetry_context.model.representation_analysis.field_kind == field_kind
+    )
+
+
+def test_full_vector_and_invalid_field_components_are_rejected(tmp_path):
+    incar = tmp_path / "incar"
+    source = _minimal_symmetry_incar()
+    incar.write_text(
+        source.replace("field_components = Ez", "field_components = full_vector"),
+        encoding="utf-8",
+    )
+    with pytest.raises(NotImplementedError, match="scalar Ez and Hz"):
+        load_config(incar)
+
+    incar.write_text(
+        source.replace("field_components = Ez", "field_components = Ex"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="field_components must be one of"):
+        load_config(incar)
+
+
+def test_metric_file_is_required(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        _minimal_symmetry_incar().replace("metric_file = eps.txt\n", ""),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="metric_file"):
         load_config(incar)
 
 
@@ -211,8 +291,9 @@ def _minimal_symmetry_incar() -> str:
             "k_points = -0.5:0.5:0.5, -0.5:0.5:0.5",
             "composition_of_b = 1 0, 0 1",
             "band_window = 0:3",
+            "field_components = Ez",
             "dataset_file = Ez.txt",
-            "dielectric_file = eps.txt",
+            "metric_file = eps.txt",
             "mesh_file = mesh.mphtxt",
             "E_file = E.txt",
             "extension = 1, 1",

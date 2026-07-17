@@ -233,19 +233,22 @@ def match_data_to_mesh(
 
 
 def load_input(config: IncarConfig) -> InputBundle:
-    mesh_path, dataset_path, dielectric_path, energy_path = _required_input_paths(config)
+    mesh_path, dataset_path, metric_path, energy_path = _required_input_paths(config)
+    if config.maxwell_problem is None:
+        raise ValueError("Maxwell field configuration has not been initialized.")
     LOGGER.info(
-        "COMSOL input paths: mesh=%s dataset=%s dielectric=%s energy=%s dataset_order=%s",
+        "COMSOL input paths: mesh=%s dataset=%s metric=%s(%s) energy=%s dataset_order=%s",
         mesh_path,
         dataset_path,
-        dielectric_path,
+        metric_path,
+        config.maxwell_problem.metric_material.value,
         energy_path,
         config.dataset_order,
     )
 
     mesh = load_comsol_mesh(mesh_path)
     raw_data = load_comsol_data(dataset_path)
-    epsilon_raw = load_comsol_data(dielectric_path, real_only=True)
+    metric_raw = load_comsol_data(metric_path)
     energy_raw = load_comsol_data(energy_path, real_only=config.E_is_real or config.hermitian)
     _validate_header_k_grid(config, raw_data, dataset_path)
     _validate_header_k_grid(config, energy_raw, energy_path)
@@ -260,7 +263,12 @@ def load_input(config: IncarConfig) -> InputBundle:
     with timed_step("prepare COMSOL tensors", LOGGER):
         energy_matrix, energies, band_indices, inner_band_indices = _handle_energy_data(config, energy_raw)
         fields = _distribute_fields(config, _values_on_mesh(mesh, raw_data), band_indices)
-        epsilon = _values_on_mesh(mesh, epsilon_raw).reshape(-1)
+        metric_material = _metric_on_mesh(
+            mesh,
+            metric_raw,
+            material=config.maxwell_problem.metric_material.value,
+            path=metric_path,
+        )
 
     periodic_residuals = _periodic_boundary_residuals(config, mesh, fields)
     for axis, residuals in enumerate(periodic_residuals):
@@ -278,20 +286,26 @@ def load_input(config: IncarConfig) -> InputBundle:
 
     band_lengths = [len(band_indices[idx]) for idx in np.ndindex(band_indices.shape)]
     LOGGER.info(
-        "Input bundle prepared: k_shape=%s energy_shape=%s field_blocks=%s bands_per_k=min:%s max:%s epsilon_shape=%s",
+        "Input bundle prepared: field=%s primary=%s metric=%s curl=%s k_shape=%s "
+        "energy_shape=%s field_blocks=%s bands_per_k=min:%s max:%s metric_shape=%s",
+        config.maxwell_problem.field_components.value,
+        config.maxwell_problem.primary_field.value,
+        config.maxwell_problem.metric_material.value,
+        config.maxwell_problem.curl_material.value,
         fields.shape,
         energy_matrix.shape,
         fields.size,
         min(band_lengths) if band_lengths else 0,
         max(band_lengths) if band_lengths else 0,
-        epsilon.shape,
+        metric_material.shape,
     )
 
     return InputBundle(
         config=config,
+        maxwell=config.maxwell_problem,
         mesh=mesh,
         fields=fields,
-        epsilon=epsilon,
+        metric_material=metric_material,
         energies=energies,
         band_indices=band_indices,
         inner_band_indices=inner_band_indices,
@@ -375,12 +389,41 @@ def _required_input_paths(config: IncarConfig) -> tuple[Path, Path, Path, Path]:
     paths = (
         config.input_path(config.mesh_file),
         config.input_path(config.dataset_file),
-        config.input_path(config.dielectric_file),
+        config.input_path(config.metric_file),
         config.input_path(config.E_file),
     )
     if any(path is None for path in paths):
-        raise ValueError("mesh_file, dataset_file, dielectric_file, and E_file are required.")
+        raise ValueError("mesh_file, dataset_file, metric_file, and E_file are required.")
     return paths
+
+
+def _metric_on_mesh(
+    mesh: Mesh,
+    data: RawData,
+    *,
+    material: str,
+    path: str | Path,
+) -> np.ndarray:
+    if data.value_matrix.shape[1] != 1:
+        raise ValueError(
+            "COMSOL metric material file must contain exactly one value column; "
+            f"got {data.value_matrix.shape[1]} in {path}."
+        )
+    mapped = np.asarray(_values_on_mesh(mesh, data)[:, 0])
+    imag_scale = max(float(np.max(np.abs(mapped.real), initial=0.0)), 1.0)
+    imag_residual = float(np.max(np.abs(mapped.imag), initial=0.0))
+    if imag_residual > 1.0e-12 * imag_scale:
+        raise ValueError(
+            f"COMSOL {material} metric must be real; "
+            f"imaginary residual={imag_residual:.6g}."
+        )
+    metric = np.asarray(mapped.real, dtype=float)
+    expected = (mesh.vertices.shape[0],)
+    if metric.shape != expected or not np.all(np.isfinite(metric)):
+        raise ValueError(
+            f"COMSOL {material} metric must contain one finite real value per mesh vertex."
+        )
+    return metric
 
 
 def _values_on_mesh(mesh: Mesh, data: RawData) -> np.ndarray:

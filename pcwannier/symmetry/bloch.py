@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ..compute.integration import integrate_overlap_matrix
 from .cache import SewingMatrixCache, SewingMatrixCacheEntry, load_sewing_matrix_cache
 from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
 from .specs import BlochConvention, FieldKind
@@ -236,8 +235,12 @@ class BlochSymmetryAction:
         component_matrix = _cartesian_field_matrix(
             operation, self.real_lattice_vectors, field_kind, self.tolerance
         )
-        if field_kind == FieldKind.SCALAR:
-            transformed = sampled
+        if field_kind in {
+            FieldKind.SCALAR,
+            FieldKind.ELECTRIC_Z,
+            FieldKind.MAGNETIC_AXIAL_Z,
+        }:
+            transformed = component_matrix[0, 0] * sampled
         else:
             if sampled.ndim != 3 or sampled.shape[2] != operation.dimension:
                 raise ValueError(
@@ -274,8 +277,10 @@ def _cartesian_field_matrix(
     residual = float(np.linalg.norm(rotation.T @ rotation - np.eye(operation.dimension), ord="fro"))
     if residual > tolerance:
         raise ValueError(f"Fractional rotation is not a lattice isometry (residual={residual:.6g}).")
-    if field_kind == FieldKind.SCALAR:
+    if field_kind in {FieldKind.SCALAR, FieldKind.ELECTRIC_Z}:
         return np.ones((1, 1), dtype=float)
+    if field_kind == FieldKind.MAGNETIC_AXIAL_Z:
+        return np.asarray([[float(np.linalg.det(rotation))]], dtype=float)
     if field_kind == FieldKind.ELECTRIC_POLAR_VECTOR:
         return rotation
     if field_kind == FieldKind.MAGNETIC_AXIAL_VECTOR:
@@ -298,18 +303,29 @@ def coefficient_metric_overlap(left, right, metric) -> np.ndarray:
 
 
 class StateBlochSymmetryProvider:
-    """Sewing matrices for internally orthonormalized periodic COMSOL states."""
+    """Metric-weighted sewing matrices for periodic scalar COMSOL states."""
 
     def __init__(
         self,
         state: StateCollection,
         context: SymmetryContext,
         *,
-        field_kind: FieldKind = FieldKind.SCALAR,
+        field_kind: FieldKind | None = None,
     ):
         if not state.is_bloch:
             raise ValueError("StateCollection must store periodic Bloch parts before symmetry analysis.")
-        if field_kind != FieldKind.SCALAR:
+        if field_kind is None:
+            maxwell = getattr(state, "maxwell", None)
+            field_kind = (
+                FieldKind.SCALAR
+                if maxwell is None
+                else maxwell.symmetry_field_kind
+            )
+        if field_kind not in {
+            FieldKind.SCALAR,
+            FieldKind.ELECTRIC_Z,
+            FieldKind.MAGNETIC_AXIAL_Z,
+        }:
             raise NotImplementedError(
                 "Automatic StateCollection sewing currently supports scalar COMSOL fields only."
             )
@@ -357,6 +373,11 @@ class StateBlochSymmetryProvider:
             LOGGER.info("Loaded D symmetry matrix cache: file=%s matrices=%s", path, len(self._sewing_cache))
 
     def sewing_matrix(self, request: SewingMatrixRequest) -> np.ndarray:
+        if request.field_kind != self.field_kind:
+            raise ValueError(
+                f"Sewing request field kind {request.field_kind.value!r} does not match "
+                f"the configured Maxwell field kind {self.field_kind.value!r}."
+            )
         source_index, source_representative, source_shift = self._locate_k(request.source_k_fractional)
         transformed_k = request.operation.act_reciprocal(request.source_k_fractional)
         target_index, target_representative, target_shift = self._locate_k(transformed_k)
@@ -398,14 +419,10 @@ class StateBlochSymmetryProvider:
         target = self._orthonormal_block(target_index, full_target_bands)
         if np.any(target_shift):
             target = target * self._fiber_phase(target_shift)[None, :]
-        matrix = integrate_overlap_matrix(
-            self.state.integral_view,
+        matrix = self.state.metric_overlap(
             target,
             transformed,
-            self.state.epsilon,
             chunk_size=64,
-            backend=self.state.compute_backend,
-            mode=self.state.integration_mode,
         )
         entry = SewingMatrixCacheEntry(
             operation_rotation=request.operation.rotation.copy(),
@@ -559,16 +576,16 @@ class StateBlochSymmetryProvider:
         classes = self.action.interpolator.periodic_node_classes
         if not classes:
             return
-        epsilon = np.asarray(self.state.epsilon).reshape(-1)
-        if epsilon.size != self.fractional_vertices.shape[0]:
-            raise ValueError("Epsilon size does not match the symmetry FEM mesh.")
-        epsilon_scale = max(float(np.max(np.abs(epsilon), initial=0.0)), np.finfo(float).tiny)
+        metric = np.asarray(self.state.metric_material).reshape(-1)
+        if metric.size != self.fractional_vertices.shape[0]:
+            raise ValueError("Metric material size does not match the symmetry FEM mesh.")
+        metric_scale = max(float(np.max(np.abs(metric), initial=0.0)), np.finfo(float).tiny)
         for nodes in classes:
-            values = epsilon[np.asarray(nodes, dtype=np.intp)]
-            residual = float(np.max(np.abs(values - values[0]), initial=0.0) / epsilon_scale)
+            values = metric[np.asarray(nodes, dtype=np.intp)]
+            residual = float(np.max(np.abs(values - values[0]), initial=0.0) / metric_scale)
             if residual > tolerance:
                 raise ValueError(
-                    "Periodic-equivalent FEM nodes have inconsistent epsilon values: "
+                    "Periodic-equivalent FEM nodes have inconsistent metric material values: "
                     f"nodes={nodes}, relative_residual={residual:.6g}, tolerance={tolerance:.6g}."
                 )
 
@@ -654,7 +671,7 @@ class StateBlochSymmetryProvider:
         if cache.calculation_fingerprint != self.sewing_cache_fingerprint:
             raise ValueError(
                 "Sewing cache calculation fingerprint does not match the current mesh, fields, "
-                "epsilon, orthogonalization, lattice, or integration settings."
+                "metric material, field components, orthogonalization, lattice, or integration settings."
             )
         for entry in cache.entries:
             try:
@@ -703,7 +720,7 @@ class StateBlochSymmetryProvider:
 
     def _calculation_fingerprint(self) -> str:
         digest = hashlib.sha256()
-        digest.update(b"PCWannier sewing input v1\0")
+        digest.update(b"PCWannier sewing input v2\0")
         for label, value in (
             ("real_lattice_vectors", self.state.config.real_lattice_vectors),
             ("lattice_const", [self.state.config.lattice_const]),
@@ -711,9 +728,14 @@ class StateBlochSymmetryProvider:
             ("symmetry_tolerance", [self.context.model.tolerance]),
             ("mesh_vertices", self.state.mesh.vertices),
             ("mesh_elements", self.state.mesh.elements),
-            ("epsilon", self.state.epsilon),
+            ("metric_material", self.state.metric_material),
         ):
             _update_array_digest(digest, label, value)
+        digest.update(self.field_kind.value.encode("utf-8"))
+        maxwell = getattr(self.state, "maxwell", None)
+        if maxwell is not None:
+            digest.update(maxwell.field_components.value.encode("utf-8"))
+            digest.update(maxwell.metric_material.value.encode("utf-8"))
         digest.update(str(self.state.integration_mode).encode("utf-8"))
         transforms = self.state.get_transform()
         for k_index in self._k_indices:

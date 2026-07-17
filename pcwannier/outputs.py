@@ -153,7 +153,7 @@ def write_interpolation_outputs(
     result: RunResult,
     interp_path: str | Path,
     interp_wannier: str | Path | None = None,
-    interp_epsilon: str | Path | None = None,
+    interp_metric: str | Path | None = None,
     out_dir: str | Path | None = None,
 ) -> None:
     points = load_interpolation_points(interp_path)
@@ -171,11 +171,21 @@ def write_interpolation_outputs(
         with timed_step("write interpolated Wannier data", LOGGER, file=wannier_path):
             save_points_with_values(wannier_path, points, np.asarray(values))
 
-    epsilon_path = _resolve_interpolation_output(interp_path, interp_epsilon, "interp-epsilon", out_dir)
-    if epsilon_path is not None:
-        epsilon = _interpolate_real_mesh(mesh, result.extended_epsilon, points, tile_count)
-        with timed_step("write interpolated epsilon data", LOGGER, file=epsilon_path):
-            save_points_with_values(epsilon_path, points, epsilon.reshape(1, -1))
+    metric_path = _resolve_interpolation_output(
+        interp_path, interp_metric, "interp-metric", out_dir
+    )
+    if metric_path is not None:
+        metric = _interpolate_real_mesh(
+            mesh, result.extended_metric_material, points, tile_count
+        )
+        material = result.config.maxwell_problem.metric_material.value
+        with timed_step(
+            "write interpolated metric material",
+            LOGGER,
+            file=metric_path,
+            material=material,
+        ):
+            save_points_with_values(metric_path, points, metric.reshape(1, -1))
 
 
 def _resolve_interpolation_output(

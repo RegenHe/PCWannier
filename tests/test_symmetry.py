@@ -240,7 +240,7 @@ def test_incar_loads_relative_space_group_file(tmp_path):
                 "composition_of_b = 1 0, 0 1",
                 "band_window = 0:2",
                 "dataset_file = Ez.txt",
-                "dielectric_file = eps.txt",
+                "metric_file = eps.txt",
                 "mesh_file = mesh.mphtxt",
                 "E_file = E.txt",
                 "extension = 1, 1",
@@ -311,6 +311,14 @@ def test_little_group_sewing_character_and_field_kinds():
 
     mirror = SpaceGroupOperation([[-1, 0], [0, 1]], [0.0, 0.0])
     assert np.allclose(cartesian_field_matrix(mirror, np.eye(2), FieldKind.SCALAR), [[1.0]])
+    assert np.allclose(
+        cartesian_field_matrix(mirror, np.eye(2), FieldKind.ELECTRIC_Z),
+        [[1.0]],
+    )
+    assert np.allclose(
+        cartesian_field_matrix(mirror, np.eye(2), FieldKind.MAGNETIC_AXIAL_Z),
+        [[-1.0]],
+    )
     assert np.allclose(
         cartesian_field_matrix(mirror, np.eye(2), FieldKind.ELECTRIC_POLAR_VECTOR),
         [[-1.0, 0.0], [0.0, 1.0]],

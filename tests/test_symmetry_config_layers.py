@@ -256,7 +256,7 @@ def _minimal_incar() -> str:
             "composition_of_b = 1 0, 0 1",
             "band_window = 0:3",
             "dataset_file = Ez.txt",
-            "dielectric_file = eps.txt",
+            "metric_file = eps.txt",
             "mesh_file = mesh.mphtxt",
             "E_file = E.txt",
             "extension = 1, 1",

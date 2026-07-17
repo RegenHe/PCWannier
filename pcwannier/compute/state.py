@@ -4,7 +4,12 @@ import numpy as np
 
 from ..data import InputBundle, Mesh
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_overlap_matrix, mesh_integral_view
+from .integration import (
+    integrate_overlap_matrix,
+    integrate_weighted_abs2_columns,
+    mesh_integral_view,
+    validated_real,
+)
 from .kspace import get_kxyz
 from .parallel import parallel_map
 
@@ -12,13 +17,30 @@ from .parallel import parallel_map
 class StateCollection:
     def __init__(self, bundle: InputBundle, *, backend: str = "python", threads: int = 1):
         self.config = bundle.config
+        self.maxwell = bundle.maxwell
+        configured_maxwell = getattr(self.config, "maxwell_problem", None)
+        if configured_maxwell is not None and configured_maxwell != self.maxwell:
+            raise ValueError(
+                "InputBundle Maxwell metadata does not match the calculation config."
+            )
         self.compute_backend = backend
         self.integration_mode = self.config.integration_mode
         self.threads = max(1, int(threads))
         self.mesh = bundle.mesh
         self.fields = bundle.fields
         self._normalize_field_blocks()
-        self.epsilon = np.asarray(bundle.epsilon)
+        raw_metric = np.asarray(bundle.metric_material)
+        if np.iscomplexobj(raw_metric) and np.any(np.abs(raw_metric.imag) > 1.0e-12):
+            raise ValueError("Metric material must contain real values.")
+        self.metric_material = np.asarray(raw_metric.real, dtype=float)
+        expected_metric_shape = (self.mesh.vertices.shape[0],)
+        if self.metric_material.shape != expected_metric_shape or not np.all(
+            np.isfinite(self.metric_material)
+        ):
+            raise ValueError(
+                f"Metric material must contain one finite value per mesh vertex; "
+                f"expected {expected_metric_shape}, got {self.metric_material.shape}."
+            )
         self.E = bundle.energies
         self.E_idx = bundle.band_indices
         self.inner_E_idx = bundle.inner_band_indices
@@ -36,7 +58,7 @@ class StateCollection:
         self.integral_view = mesh_integral_view(self.mesh)
         self.extention_integral_view = None
         self.space_to_original_mapping: np.ndarray | None = None
-        self.extention_epsilon: np.ndarray | None = None
+        self.extended_metric_material: np.ndarray | None = None
         self._identity_transform: np.ndarray | None = None
         self._phase_cache: dict[tuple[int, int, int], np.ndarray] = {}
 
@@ -228,14 +250,10 @@ class StateCollection:
 
     def _overlap_matrix(self, i: int, j: int, k: int) -> np.ndarray:
         wblock = self.get_block(i, j, k)
-        smat = integrate_overlap_matrix(
-            self.integral_view,
+        smat = self.metric_overlap(
             wblock,
             wblock,
-            self.epsilon,
             chunk_size=64,
-            backend=self.compute_backend,
-            mode=self.integration_mode,
         )
         scale = max(float(np.linalg.norm(smat, ord="fro")), 1.0)
         residual = float(np.linalg.norm(smat - smat.conj().T, ord="fro"))
@@ -298,7 +316,7 @@ class StateCollection:
             float(self.config.lattice_const),
         )
         self.extention_integral_view = mesh_integral_view(self.extention_mesh)
-        self.get_extention_epsilon()
+        self.get_extended_metric_material()
 
     def get_extention_field(self, i: int, j: int, k: int, n: int) -> np.ndarray:
         if self.extention_mesh is None or self.space_to_original_mapping is None:
@@ -313,9 +331,80 @@ class StateCollection:
         scale = np.sqrt(float(np.prod(self.config.extension[: self.config.kdim])))
         return self.get_block(i, j, k)[:, self.space_to_original_mapping] / scale
 
-    def get_extention_epsilon(self) -> np.ndarray:
+    def get_extended_metric_material(self) -> np.ndarray:
         if self.extention_mesh is None or self.space_to_original_mapping is None:
             raise ValueError("The field has not been extended.")
-        if self.extention_epsilon is None:
-            self.extention_epsilon = np.asarray(self.epsilon)[self.space_to_original_mapping]
-        return self.extention_epsilon
+        if self.extended_metric_material is None:
+            self.extended_metric_material = self.metric_material[
+                self.space_to_original_mapping
+            ]
+        return self.extended_metric_material
+
+    def metric_overlap(
+        self,
+        left: np.ndarray,
+        right: np.ndarray,
+        *,
+        extended: bool = False,
+        view=None,
+        conjugate_left: bool = True,
+        chunk_size: int | None = None,
+    ) -> np.ndarray:
+        if extended:
+            weights = self.get_extended_metric_material()
+            integral_view = self.extention_integral_view if view is None else view
+        else:
+            weights = self.metric_material
+            integral_view = self.integral_view if view is None else view
+        return integrate_overlap_matrix(
+            integral_view,
+            left,
+            right,
+            weights,
+            conjugate_left=conjugate_left,
+            chunk_size=chunk_size,
+            backend=self.compute_backend,
+            mode=self.integration_mode,
+        )
+
+    def metric_norms(
+        self,
+        values: np.ndarray,
+        *,
+        extended: bool = False,
+        view=None,
+        chunk_size: int | None = None,
+        name: str = "metric norms",
+    ) -> np.ndarray:
+        if extended:
+            weights = self.get_extended_metric_material()
+            integral_view = self.extention_integral_view if view is None else view
+        else:
+            weights = self.metric_material
+            integral_view = self.integral_view if view is None else view
+        result = integrate_weighted_abs2_columns(
+            integral_view,
+            weights,
+            values,
+            chunk_size=chunk_size,
+            backend=self.compute_backend,
+            mode=self.integration_mode,
+        )
+        return validated_real(np.atleast_1d(result), name)
+
+    def metric_field_norm(
+        self,
+        field: np.ndarray,
+        *,
+        extended: bool = False,
+        view=None,
+        name: str = "metric field norm",
+    ) -> float:
+        values = self.metric_norms(
+            np.asarray(field).reshape(-1, 1),
+            extended=extended,
+            view=view,
+            chunk_size=1,
+            name=name,
+        )
+        return float(values[0])

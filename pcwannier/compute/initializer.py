@@ -5,7 +5,7 @@ import logging
 import numpy as np
 
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_overlap_matrix, integrate_weighted_abs2_columns, validated_real
+from .integration import validated_real
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .matrix import MSet
 from .parallel import parallel_map
@@ -205,7 +205,7 @@ class StateInitializer:
             LOGGER.info("V-only cache: projection-gauge alignment skipped because A is unavailable")
 
     def projection(self) -> None:
-        if self.state.extention_mesh is None or self.state.extention_epsilon is None:
+        if self.state.extention_mesh is None or self.state.extended_metric_material is None:
             raise ValueError("StateCollection must be extended before projection.")
         band_count = int(self.config.band_calc_num)
         min_len, _ = self.get_min_max_len_idx(self.state.E_idx)
@@ -242,15 +242,11 @@ class StateInitializer:
                 h_columns.append(self.state.extention_mesh.rfunc(fn, cart_position, projection["xaxis_angluar"]))
 
         hmat = np.column_stack(h_columns)
-        norms = np.atleast_1d(
-            integrate_weighted_abs2_columns(
-                self.state.extention_mesh,
-                self.state.extention_epsilon,
-                hmat,
-                chunk_size=2048,
-                backend=self.state.compute_backend,
-                mode=self.config.integration_mode,
-            )
+        norms = self.state.metric_norms(
+            hmat,
+            extended=True,
+            chunk_size=2048,
+            name="projection basis norms",
         )
         nonfinite_norms = np.flatnonzero(~np.isfinite(norms))
         if nonfinite_norms.size:
@@ -272,14 +268,11 @@ class StateInitializer:
             phase = self.state.get_extention_phase(i, j, k)
             fields = self.state.get_extention_block(i, j, k)
             fields *= phase[None, :]
-            amat = integrate_overlap_matrix(
-                self.state.extention_integral_view,
+            amat = self.state.metric_overlap(
                 fields,
                 gmat.T,
-                self.state.extention_epsilon,
+                extended=True,
                 chunk_size=64,
-                backend=self.state.compute_backend,
-                mode=self.config.integration_mode,
             )
             if self.config.proj_binarize:
                 amat = self.binarize(amat)

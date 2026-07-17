@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 
 from .context import CalculationContext
-from .integration import integrate_weighted_abs2_columns, validated_real
 from .kspace import get_kxyz
 
 
@@ -33,15 +32,10 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
         coeff = ctx.output_state_coefficients_at(i, j, k)
         wsum += (emat @ coeff) * pvec[:, None]
     wsum /= np.sqrt(float(state.get_k_num()))
-    norms = np.atleast_1d(
-        integrate_weighted_abs2_columns(
-            state.extention_mesh,
-            state.extention_epsilon,
-            wsum,
-            chunk_size=2048,
-            backend=state.compute_backend,
-            mode=config.integration_mode,
-        )
+    norms = state.metric_norms(
+        wsum,
+        extended=True,
+        chunk_size=2048,
+        name="Wannier norms",
     )
-    norms = validated_real(norms, "Wannier norms")
     return tuple(r_use), wsum, norms

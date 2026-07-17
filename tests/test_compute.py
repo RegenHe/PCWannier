@@ -10,6 +10,7 @@ from pcwannier.compute.parallel import parallel_map
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import InputBundle, Mesh
 from pcwannier.matrix_io import save_cell_matrix
+from pcwannier.maxwell import MaxwellProblem
 from pcwannier.compute.tba import TBAModel
 
 
@@ -213,9 +214,10 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
     config = SimpleNamespace(kdim=2, integration_mode="nodal", dataset_type="comsol")
     bundle = InputBundle(
         config=config,
+        maxwell=MaxwellProblem.for_components("Ez"),
         mesh=mesh,
         fields=fields,
-        epsilon=np.ones(3),
+        metric_material=np.ones(3),
         energies=energies,
         band_indices=indices,
         inner_band_indices=indices.copy(),
@@ -277,7 +279,7 @@ def test_inner_window_projection_is_not_overwritten_by_matc():
 
 
 @pytest.mark.parametrize("norm", [0.0, -1.0, np.nan])
-def test_projection_rejects_nonpositive_or_nonfinite_basis_norm(monkeypatch, norm):
+def test_projection_rejects_nonpositive_or_nonfinite_basis_norm(norm):
     initializer = object.__new__(StateInitializer)
     initializer.config = SimpleNamespace(
         band_calc_num=1,
@@ -289,13 +291,10 @@ def test_projection_rejects_nonpositive_or_nonfinite_basis_norm(monkeypatch, nor
     )
     initializer.state = SimpleNamespace(
         extention_mesh=SimpleNamespace(rfunc=lambda *args: np.ones(3)),
-        extention_epsilon=np.ones(3),
+        extended_metric_material=np.ones(3),
         compute_backend="python",
         E_idx=_object_grid([0]),
-    )
-    monkeypatch.setattr(
-        "pcwannier.compute.initializer.integrate_weighted_abs2_columns",
-        lambda *args, **kwargs: np.array([norm]),
+        metric_norms=lambda *args, **kwargs: np.array([norm]),
     )
 
     with pytest.raises(ValueError, match="strictly positive"):
@@ -447,7 +446,7 @@ def _object_grid(value):
     return grid
 
 
-def _two_band_overlap_state():
+def _two_band_overlap_state(metric_material=None, components="Ez"):
     mesh = Mesh(
         np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
         np.array([[0, 1, 2]]),
@@ -462,17 +461,48 @@ def _two_band_overlap_state():
         integration_mode="nodal",
         dataset_type="comsol",
         use_cached_data=[],
+        real_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
+        extension=[1, 1],
+    )
+    metric = (
+        np.ones(mesh.vertices.shape[0])
+        if metric_material is None
+        else np.asarray(metric_material, dtype=float)
     )
     return StateCollection(
         InputBundle(
             config=config,
+            maxwell=MaxwellProblem.for_components(components),
             mesh=mesh,
             fields=fields,
-            epsilon=np.ones(3),
+            metric_material=metric,
             energies=energies,
             band_indices=indices,
             inner_band_indices=indices.copy(),
             energy_matrix=np.array([[[[1.0, 2.0]]]]),
         ),
         threads=1,
+    )
+
+
+def test_state_metric_interface_controls_overlap_norms_and_extension():
+    metric = np.array([1.0, 2.0, 4.0])
+    state = _two_band_overlap_state(metric, components="Hz")
+    block = state.get_block(0, 0, 0)
+
+    expected_overlap = state.metric_overlap(block, block)
+    assert np.allclose(state._overlap_matrix(0, 0, 0), expected_overlap)
+    assert not np.allclose(
+        expected_overlap,
+        _two_band_overlap_state(np.ones(3))._overlap_matrix(0, 0, 0),
+    )
+
+    expected_norms = np.real(np.diag(expected_overlap))
+    assert np.allclose(state.metric_norms(block.T), expected_norms)
+
+    state.extention([2, 1])
+    assert np.array_equal(
+        state.extended_metric_material,
+        metric[state.space_to_original_mapping],
     )

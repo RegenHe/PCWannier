@@ -9,6 +9,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from .config import IncarConfig
+from .maxwell import MaxwellProblem
 
 if TYPE_CHECKING:
     from .symmetry import (
@@ -227,9 +228,10 @@ class FieldData:
 @dataclass
 class InputBundle:
     config: IncarConfig
+    maxwell: MaxwellProblem
     mesh: Mesh
     fields: np.ndarray
-    epsilon: np.ndarray
+    metric_material: np.ndarray
     energies: np.ndarray
     band_indices: np.ndarray
     inner_band_indices: np.ndarray
@@ -291,7 +293,7 @@ class RunResult:
     config: IncarConfig
     mesh: Mesh
     extended_mesh: Mesh
-    extended_epsilon: np.ndarray
+    extended_metric_material: np.ndarray
     orthogonality_report: np.ndarray
     S: np.ndarray | None
     M0: np.ndarray

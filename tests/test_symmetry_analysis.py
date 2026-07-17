@@ -9,6 +9,7 @@ import pytest
 
 from pcwannier.compute.integration import integrate_overlap_matrix, mesh_integral_view
 from pcwannier.data import Mesh
+from pcwannier.maxwell import MaxwellProblem
 from pcwannier.matrix_io import load_cell_matrix
 from pcwannier.symmetry import (
     BlochSymmetryAction,
@@ -73,20 +74,31 @@ def _synthetic_state(fields: np.ndarray, energies=None):
         lattice_const=1.0,
         dataset_type="synthetic",
     )
-    return SimpleNamespace(
+    state = SimpleNamespace(
         is_bloch=True,
         config=config,
+        maxwell=MaxwellProblem.for_components("Ez"),
         mesh=mesh,
         fields=blocks,
         E_idx=band_ids,
         energy_matrix=energy_matrix,
-        epsilon=np.ones(mesh.vertices.shape[0]),
+        metric_material=np.ones(mesh.vertices.shape[0]),
         integral_view=mesh_integral_view(mesh),
         compute_backend="python",
         integration_mode="nodal",
         get_block=lambda i, j, k: blocks[i, j, k],
         get_transform=lambda: transforms,
     )
+    state.metric_overlap = lambda left, right, **kwargs: integrate_overlap_matrix(
+        state.integral_view,
+        left,
+        right,
+        state.metric_material,
+        chunk_size=kwargs.get("chunk_size"),
+        backend=state.compute_backend,
+        mode=state.integration_mode,
+    )
+    return state
 
 
 def test_bloch_action_uses_comsol_translation_phase_and_periodic_part():
@@ -101,6 +113,46 @@ def test_bloch_action_uses_comsol_translation_phase_and_periodic_part():
     field = np.ones((1, mesh.vertices.shape[0]), dtype=np.complex128)
     transformed = action.apply(field, operation, np.array([0.25, 0.0]), FieldKind.SCALAR)
     assert np.allclose(transformed, 1j * field, atol=1e-12)
+
+
+def test_scalar_ez_and_hz_have_distinct_mirror_actions():
+    mesh = _square_mesh()
+    mirror = SpaceGroupOperation([[-1, 0], [0, 1]], [0.0, 0.0])
+    action = BlochSymmetryAction(mesh.vertices, mesh.elements, np.eye(2))
+    field = np.ones((1, mesh.vertices.shape[0]), dtype=np.complex128)
+
+    electric = action.apply(field, mirror, [0.0, 0.0], FieldKind.ELECTRIC_Z)
+    magnetic = action.apply(
+        field, mirror, [0.0, 0.0], FieldKind.MAGNETIC_AXIAL_Z
+    )
+
+    assert np.allclose(electric, field)
+    assert np.allclose(magnetic, -field)
+
+
+def test_state_sewing_uses_maxwell_ez_or_hz_field_action():
+    model = square_2c_model(analysis=False)
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    field = np.ones((1, _square_mesh().vertices.shape[0]))
+    mirror_index = model.group.operation_index(
+        model.group.operation_by_name("sigma_x")
+    )
+
+    electric_state = _synthetic_state(field, energies=[1.0])
+    electric_provider = StateBlochSymmetryProvider(electric_state, context)
+    electric = electric_provider.sewing_matrix_for_mapping(
+        electric_provider.mapping(mirror_index, (0, 0)), (0,)
+    )
+
+    magnetic_state = _synthetic_state(field, energies=[1.0])
+    magnetic_state.maxwell = MaxwellProblem.for_components("Hz")
+    magnetic_provider = StateBlochSymmetryProvider(magnetic_state, context)
+    magnetic = magnetic_provider.sewing_matrix_for_mapping(
+        magnetic_provider.mapping(mirror_index, (0, 0)), (0,)
+    )
+
+    assert np.allclose(electric, [[1.0]], atol=1.0e-12)
+    assert np.allclose(magnetic, [[-1.0]], atol=1.0e-12)
 
 
 def test_full_bloch_and_periodic_part_symmetry_formulas_agree():
@@ -207,7 +259,7 @@ def test_state_provider_roundtrips_full_outer_sewing_cache(tmp_path, monkeypatch
     def fail_integration(*args, **kwargs):
         raise AssertionError("A cache hit must not integrate Bloch fields again.")
 
-    monkeypatch.setattr("pcwannier.symmetry.bloch.integrate_overlap_matrix", fail_integration)
+    cached_state.metric_overlap = fail_integration
     actual = cached_provider.sewing_matrix_between_mapping(mapping, (1,), (0, 1))
     assert np.allclose(actual, expected, atol=1e-12)
 
@@ -251,6 +303,14 @@ def test_state_provider_rejects_sewing_cache_for_different_calculation(tmp_path)
     with pytest.raises(ValueError, match="calculation fingerprint does not match"):
         StateBlochSymmetryProvider(changed, context)
 
+    magnetic = _synthetic_state(fields, energies=[1.0, 1.0])
+    magnetic.maxwell = MaxwellProblem.for_components("Hz")
+    magnetic.config.use_cached_data = ["D"]
+    magnetic.config.D_file = str(path)
+    magnetic.config.input_path = lambda value: Path(value)
+    with pytest.raises(ValueError, match="calculation fingerprint does not match"):
+        StateBlochSymmetryProvider(magnetic, context)
+
 
 def test_state_provider_rejects_inconsistent_periodic_duplicate_nodes():
     model = square_2c_model(analysis=False)
@@ -263,10 +323,10 @@ def test_state_provider_rejects_inconsistent_periodic_duplicate_nodes():
     with pytest.raises(ValueError, match="inconsistent periodic Bloch fields"):
         StateBlochSymmetryProvider(field_state, context)
 
-    epsilon_state = _synthetic_state(field, energies=[1.0])
-    epsilon_state.epsilon[-1] = 2.0
-    with pytest.raises(ValueError, match="inconsistent epsilon"):
-        StateBlochSymmetryProvider(epsilon_state, context)
+    metric_state = _synthetic_state(field, energies=[1.0])
+    metric_state.metric_material[-1] = 2.0
+    with pytest.raises(ValueError, match="inconsistent metric material"):
+        StateBlochSymmetryProvider(metric_state, context)
 
 
 def test_representation_analysis_rejects_noninvariant_energy_block():

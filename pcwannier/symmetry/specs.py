@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-
 import numpy as np
 
-
-class FieldKind(str, Enum):
-    SCALAR = "scalar"
-    ELECTRIC_POLAR_VECTOR = "electric_polar_vector"
-    MAGNETIC_AXIAL_VECTOR = "magnetic_axial_vector"
+from ..maxwell import FieldKind
 
 
 @dataclass(frozen=True)

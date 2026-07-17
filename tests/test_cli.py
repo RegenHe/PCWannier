@@ -5,6 +5,7 @@ import pytest
 
 import pcwannier.cli as cli_module
 from pcwannier.cli import main, parse_args
+from pcwannier.maxwell import MaxwellProblem
 
 
 def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path, monkeypatch):
@@ -23,8 +24,8 @@ def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path
     def write_outputs(actual_result, actual_config, out_dir):
         calls["outputs"] = (actual_result, actual_config, out_dir)
 
-    def write_interpolation(actual_result, points, wannier, epsilon, *, out_dir):
-        calls["interpolation"] = (actual_result, points, wannier, epsilon, out_dir)
+    def write_interpolation(actual_result, points, wannier, metric, *, out_dir):
+        calls["interpolation"] = (actual_result, points, wannier, metric, out_dir)
 
     monkeypatch.setattr(cli_module, "run_calculation", run_calculation)
     monkeypatch.setattr(cli_module, "write_outputs", write_outputs)
@@ -45,8 +46,8 @@ def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path
             "points.txt",
             "--interp-wannier",
             "wannier.txt",
-            "--interp-epsilon",
-            "epsilon.txt",
+            "--interp-metric",
+            "metric.txt",
         ]
     ) == 0
 
@@ -56,7 +57,7 @@ def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path
         result,
         "points.txt",
         "wannier.txt",
-        "epsilon.txt",
+        "metric.txt",
         out,
     )
     log_text = (out / "log.txt").read_text(encoding="utf-8")
@@ -151,6 +152,8 @@ def _config(base_dir: Path):
     config = SimpleNamespace(
         name="synthetic",
         dataset_type="comsol",
+        maxwell_problem=MaxwellProblem.for_components("Ez"),
+        metric_file="eps.txt",
         kdim=2,
         k_points=[[0.0], [0.0]],
         band_calc_num=1,

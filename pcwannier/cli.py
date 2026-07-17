@@ -39,7 +39,7 @@ def parse_args(argv=None):
     parser.add_argument("-c", "--cache", action="store_true", help="Use cached M/A/V/U/D matrices")
     parser.add_argument("--interp", default=None, help="Interpolation mesh point path")
     parser.add_argument("--interp-wannier", default=None, help="Interpolated Wannier output path")
-    parser.add_argument("--interp-epsilon", default=None, help="Interpolated epsilon output path")
+    parser.add_argument("--interp-metric", default=None, help="Interpolated metric-material output path")
     return parser.parse_args(argv)
 
 
@@ -53,8 +53,8 @@ def main(argv=None) -> int:
         log_path = out_dir / log_path
     configure_logging(log_path, getattr(logging, args.log_level))
 
-    if args.interp is None and (args.interp_wannier is not None or args.interp_epsilon is not None):
-        raise ValueError("--interp is required when --interp-wannier or --interp-epsilon is provided.")
+    if args.interp is None and (args.interp_wannier is not None or args.interp_metric is not None):
+        raise ValueError("--interp is required when --interp-wannier or --interp-metric is provided.")
 
     LOGGER.info("=========  PCWannier v%s  =========", __version__)
     LOGGER.info("input=%s out_dir=%s log=%s threads=%s backend_override=%s", args.input, out_dir, log_path, args.threads, args.backend)
@@ -71,9 +71,15 @@ def main(argv=None) -> int:
             _redirect_cache_paths_to_out_dir(config, out_dir)
 
     LOGGER.info(
-        "config name=%s dataset_type=%s kdim=%s k_shape=%s band_calc_num=%s backend=%s",
+        "config name=%s dataset_type=%s field=%s primary=%s metric=%s curl=%s "
+        "metric_file=%s kdim=%s k_shape=%s band_calc_num=%s backend=%s",
         config.name,
         config.dataset_type,
+        config.maxwell_problem.field_components.value,
+        config.maxwell_problem.primary_field.value,
+        config.maxwell_problem.metric_material.value,
+        config.maxwell_problem.curl_material.value,
+        config.input_path(config.metric_file),
         config.kdim,
         [len(axis) for axis in config.k_points],
         config.band_calc_num,
@@ -121,7 +127,13 @@ def main(argv=None) -> int:
         write_outputs(result, config, out_dir)
     if args.interp is not None:
         with timed_step("write interpolation outputs", LOGGER, interp=args.interp):
-            write_interpolation_outputs(result, args.interp, args.interp_wannier, args.interp_epsilon, out_dir=out_dir)
+            write_interpolation_outputs(
+                result,
+                args.interp,
+                args.interp_wannier,
+                args.interp_metric,
+                out_dir=out_dir,
+            )
     _log_run_summary(started_at)
     return 0
 

@@ -5,12 +5,9 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ..compute.integration import (
-    MeshIntegralView,
-    integrate_weighted_abs2_columns,
-    validated_real,
-)
+from ..compute.integration import MeshIntegralView
 from ..compute.wannier import generate_wannier
+from .analysis import cartesian_field_matrix
 from .bloch import fractional_mesh_vertices
 
 
@@ -142,7 +139,7 @@ def validate_wannier_symmetry(
     if ctx.symmetry_gauge is None:
         raise ValueError("Real-space symmetry validation requires a symmetry-adapted Bloch gauge.")
     state = ctx.state
-    if state.extention_mesh is None or state.extention_epsilon is None:
+    if state.extention_mesh is None or state.extended_metric_material is None:
         raise ValueError("Wannier symmetry validation requires the extended mesh.")
     target_items = tuple(targets)
     if not target_items:
@@ -193,23 +190,38 @@ def validate_wannier_symmetry(
             np.asarray(mesh.tri_weights[valid_elements], dtype=float),
             mesh.vertices.shape[0],
         )
-        operation_data[operation_index] = (stencil, view)
+        field_matrix = cartesian_field_matrix(
+            operation,
+            lattice,
+            state.maxwell.symmetry_field_kind,
+            group.tolerance,
+        )
+        if field_matrix.shape != (1, 1):
+            raise NotImplementedError(
+                "Real-space Wannier symmetry validation currently supports scalar Ez/Hz fields only."
+            )
+        operation_data[operation_index] = (
+            stencil,
+            view,
+            complex(field_matrix[0, 0]),
+        )
 
     full_view = state.extention_integral_view
-    epsilon = state.extention_epsilon
     entries = []
     offset = 0
     for target in target_items:
         irrep_dimension = target.site_irrep.dimension
         for operation_index, operation in enumerate(group.operations):
-            stencil, valid_view = operation_data[operation_index]
+            stencil, valid_view, component_factor = operation_data[operation_index]
             for orbit_index in range(target.multiplicity):
                 action = target.orbit.action(operation_index, orbit_index)
                 shift = tuple(int(value) for value in action.lattice_shift)
                 site_matrix = target.site_irrep.matrix(action.site_element_index)
                 for irrep_index in range(irrep_dimension):
                     source_index = offset + target.wannier_index(irrep_index, orbit_index)
-                    transformed = stencil.apply(zero_cell[:, source_index])
+                    transformed = component_factor * stencil.apply(
+                        zero_cell[:, source_index]
+                    )
                     target_indices = tuple(
                         offset + target.wannier_index(row, action.target_index)
                         for row in range(irrep_dimension)
@@ -219,11 +231,13 @@ def validate_wannier_symmetry(
                         for row in range(irrep_dimension)
                     )
                     residual_field = transformed - expected
-                    residual_norm = _field_norm(valid_view, epsilon, residual_field, state)
-                    transformed_norm = _field_norm(valid_view, epsilon, transformed, state)
-                    expected_norm = _field_norm(valid_view, epsilon, expected, state)
-                    full_source_norm = _field_norm(full_view, epsilon, zero_cell[:, source_index], state)
-                    full_expected_norm = _field_norm(full_view, epsilon, expected, state)
+                    residual_norm = _field_norm(valid_view, residual_field, state)
+                    transformed_norm = _field_norm(valid_view, transformed, state)
+                    expected_norm = _field_norm(valid_view, expected, state)
+                    full_source_norm = _field_norm(
+                        full_view, zero_cell[:, source_index], state
+                    )
+                    full_expected_norm = _field_norm(full_view, expected, state)
                     denominator = max(np.sqrt(transformed_norm), np.sqrt(expected_norm), 1.0e-15)
                     residual = float(np.sqrt(residual_norm) / denominator)
                     retained = float(
@@ -262,13 +276,10 @@ def validate_wannier_symmetry(
     return result
 
 
-def _field_norm(view, epsilon, field, state) -> float:
-    value = integrate_weighted_abs2_columns(
-        view,
-        epsilon,
-        np.asarray(field).reshape(-1, 1),
-        chunk_size=1,
-        backend=state.compute_backend,
-        mode=state.integration_mode,
+def _field_norm(view, field, state) -> float:
+    return state.metric_field_norm(
+        field,
+        extended=True,
+        view=view,
+        name="Wannier symmetry norm",
     )
-    return float(validated_real(np.atleast_1d(value), "Wannier symmetry norm")[0])

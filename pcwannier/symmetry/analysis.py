@@ -38,8 +38,10 @@ def cartesian_field_matrix(
         raise ValueError(
             f"Fractional rotation is not an isometry of the supplied lattice (residual={orthogonal_residual:.6g})."
         )
-    if field_kind == FieldKind.SCALAR:
+    if field_kind in {FieldKind.SCALAR, FieldKind.ELECTRIC_Z}:
         return np.ones((1, 1), dtype=float)
+    if field_kind == FieldKind.MAGNETIC_AXIAL_Z:
+        return np.asarray([[float(np.linalg.det(cartesian_rotation))]], dtype=float)
     if field_kind == FieldKind.ELECTRIC_POLAR_VECTOR:
         return cartesian_rotation
     if field_kind == FieldKind.MAGNETIC_AXIAL_VECTOR:

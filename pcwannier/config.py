@@ -8,6 +8,7 @@ import math
 import numpy as np
 
 if TYPE_CHECKING:
+    from .maxwell import MaxwellProblem
     from .symmetry import SymmetryContext
 
 
@@ -29,7 +30,8 @@ class IncarConfig:
     dataset_type: str = "comsol"
     dataset_file: str | bool | None = None
     dataset_order: list[str] = field(default_factory=lambda: ["k1", "k2", "E"])
-    dielectric_file: str | bool | None = None
+    field_components: str = "Ez"
+    metric_file: str | bool | None = None
     mesh_file: str | bool | None = None
     E_file: str | bool = "./E.txt"
     E_is_real: bool = True
@@ -45,7 +47,6 @@ class IncarConfig:
     symmetry_real_space_tolerance: float = 1.0e-6
     symmetry_minimum_retained_norm: float = 0.99
     symmetry_boundary_tolerance: float = 1.0e-6
-    representation_field_kind: str = "scalar"
     representation_degeneracy_absolute: float = 1.0e-6
     representation_degeneracy_relative: float = 1.0e-8
     representation_leakage_tolerance: float | None = None
@@ -57,6 +58,7 @@ class IncarConfig:
     disentangle_projector_tolerance: float | None = None
     disentangle_mixing: float = 0.5
     symmetry_context: SymmetryContext | None = field(default=None, init=False, repr=False)
+    maxwell_problem: MaxwellProblem | None = field(default=None, init=False, repr=False)
 
     N_file: str = "./N.txt"
     U_file: str = "./U.txt"
@@ -137,6 +139,8 @@ class IncarConfig:
         return path if path.is_absolute() else self.base_dir / path
 
     def validate_runtime_scope(self) -> None:
+        from .maxwell import FieldComponents
+
         if self.dataset_type.lower() != "comsol":
             raise NotImplementedError("Only COMSOL input is implemented in PCWannier v1.")
         if not self.hermitian:
@@ -145,6 +149,11 @@ class IncarConfig:
             raise NotImplementedError("Finite-system calculations are not implemented in PCWannier v1.")
         if self.eff_k is not False:
             raise NotImplementedError("Effective Hamiltonian expansion is not implemented in PCWannier v1.")
+        if FieldComponents.parse(self.field_components) == FieldComponents.FULL_VECTOR:
+            raise NotImplementedError(
+                "field_components=full_vector is not implemented; the current COMSOL "
+                "reader supports scalar Ez and Hz fields only."
+            )
 
     def validate_required(self) -> None:
         missing = [
@@ -158,11 +167,12 @@ class IncarConfig:
                 "projections",
                 "extension",
                 "dataset_file",
-                "dielectric_file",
+                "metric_file",
                 "mesh_file",
                 "E_file",
             )
             if getattr(self, name) is None
+            or (name == "metric_file" and getattr(self, name) is False)
         ]
         if missing:
             raise ValueError(f"Missing required incar fields: {', '.join(missing)}")
@@ -176,6 +186,7 @@ _INTERNAL_CONFIG_FIELDS = {
     "band_calc_num",
     "symmetry_resolved_path",
     "symmetry_context",
+    "maxwell_problem",
     "_preprocessed",
 }
 
@@ -393,7 +404,7 @@ class IncarParser:
                     for item in cfg.representation_analysis
                 )
                 analysis = RepresentationAnalysisSpec(
-                    FieldKind(cfg.representation_field_kind),
+                    cfg.maxwell_problem.symmetry_field_kind,
                     degeneracy,
                     points,
                     (
@@ -464,12 +475,12 @@ class IncarParser:
             "dataset_type",
             "compute_backend",
             "integration_mode",
-            "representation_field_kind",
+                "field_components",
             "symmetry_file",
             "symmetry_output_basis",
             "dataset_file",
             "left_dataset_file",
-            "dielectric_file",
+                "metric_file",
             "S_file",
             "D_file",
             "U_file",
@@ -983,6 +994,12 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
     if cfg._preprocessed:
         return cfg
     _validate_config_inputs(cfg)
+    from .maxwell import FieldComponents, MaxwellProblem
+
+    components = FieldComponents.parse(cfg.field_components)
+    cfg.field_components = components.value
+    if components != FieldComponents.FULL_VECTOR:
+        cfg.maxwell_problem = MaxwellProblem.for_components(components)
     if cfg.real_lattice_vectors is None:
         return cfg
     cfg.kdim = len(cfg.real_lattice_vectors)

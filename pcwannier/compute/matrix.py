@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 
 from ..matrix_io import load_cell_matrix
-from .integration import integrate_overlap_matrix
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .parallel import parallel_map
 from .state import StateCollection
@@ -58,14 +57,10 @@ class MSet:
                     phase2 = self.state.get_phase(*k_raw)
                     right = right * (phase1 * np.conj(phase2))[None, :]
                 result.append(
-                    integrate_overlap_matrix(
-                        self.state.integral_view,
+                    self.state.metric_overlap(
                         left,
                         right,
-                        self.state.epsilon,
                         chunk_size=64,
-                        backend=self.state.compute_backend,
-                        mode=self.config.integration_mode,
                     )
                 )
             return idx, result

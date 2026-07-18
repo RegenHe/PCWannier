@@ -92,7 +92,8 @@ def main(argv=None) -> int:
         ) or "none"
         LOGGER.info(
             "symmetry file=%s group=%s operations=%s targets=%s target_dimensions=%s "
-            "constrained_localization=%s output_basis=%s bloch_convention=%s(sign=%s)",
+            "constrained_localization=%s output_basis=%s bloch_convention=%s(sign=%s) "
+            "magnetic_bias=%s unitary=%s antiunitary=%s",
             config.symmetry_resolved_path or config.input_path(config.symmetry_file),
             (
                 symmetry_model.group_definition.name
@@ -106,6 +107,13 @@ def main(argv=None) -> int:
             config.symmetry_output_basis,
             symmetry_model.bloch_convention.name,
             symmetry_model.bloch_convention.sign,
+            (
+                None
+                if symmetry_model.magnetic_bias_direction is None
+                else symmetry_model.magnetic_bias_direction.tolist()
+            ),
+            sum(not operation.antiunitary for operation in symmetry_model.group.operations),
+            sum(operation.antiunitary for operation in symmetry_model.group.operations),
         )
 
     if args.base:

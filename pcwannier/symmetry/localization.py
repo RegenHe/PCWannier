@@ -75,7 +75,9 @@ def symmetrize_gradient(
             member_gradient = np.asarray(raw_gradient[_state_index(member.k_index)], dtype=np.complex128)
             for path in member.paths:
                 dmat = combined_target_matrix(targets, path.operation_index, representative_k)
-                accumulator += dmat.conj().T @ member_gradient @ dmat
+                operation = context.model.group.operations[path.operation_index]
+                pulled = member_gradient.conj() if operation.antiunitary else member_gradient
+                accumulator += dmat.conj().T @ pulled @ dmat
                 path_count += 1
         if path_count != len(context.model.group.operations):
             raise RuntimeError(
@@ -86,14 +88,15 @@ def symmetrize_gradient(
         # The denominator is |G_k|, so this is equivalently one contribution
         # from every distinct member of the star.
         constrained = accumulator / little_count
-        constrained = sum(
-            (
-                combined_target_matrix(targets, path.operation_index, representative_k).conj().T
-                @ constrained
-                @ combined_target_matrix(targets, path.operation_index, representative_k)
+        little_projected = []
+        for path in little_member.paths:
+            dmat = combined_target_matrix(
+                targets, path.operation_index, representative_k
             )
-            for path in little_member.paths
-        ) / little_count
+            operation = context.model.group.operations[path.operation_index]
+            pulled = constrained.conj() if operation.antiunitary else constrained
+            little_projected.append(dmat.conj().T @ pulled @ dmat)
+        constrained = sum(little_projected) / little_count
         constrained = 0.5 * (constrained - constrained.conj().T)
         if not np.all(np.isfinite(constrained)):
             raise FloatingPointError(
@@ -123,7 +126,9 @@ def propagate_target_gauge(
             candidates = []
             for path in member.paths:
                 dmat = combined_target_matrix(targets, path.operation_index, representative_k)
-                candidates.append(dmat @ matrix @ dmat.conj().T)
+                operation = context.model.group.operations[path.operation_index]
+                source = matrix.conj() if operation.antiunitary else matrix
+                candidates.append(dmat @ source @ dmat.conj().T)
             if not candidates:
                 raise RuntimeError(f"Star member k={member.k_index} has no propagation path.")
             if member.flat_index == star.representative_flat_index:
@@ -171,24 +176,32 @@ def project_target_gauge_to_stars(
                 )
             for path in member.paths:
                 dmat = combined_target_matrix(targets, path.operation_index, representative_k)
-                pulled_back.append(dmat.conj().T @ member_matrix @ dmat)
+                operation = context.model.group.operations[path.operation_index]
+                pulled = member_matrix.conj() if operation.antiunitary else member_matrix
+                pulled_back.append(dmat.conj().T @ pulled @ dmat)
         matrix = sum(pulled_back) / len(pulled_back)
         little_paths = _representative_member(star).paths
         for iteration in range(1, max_iterations + 1):
-            projected = sum(
-                (
-                    combined_target_matrix(targets, path.operation_index, representative_k).conj().T
-                    @ matrix
-                    @ combined_target_matrix(targets, path.operation_index, representative_k)
+            projected_terms = []
+            for path in little_paths:
+                dmat = combined_target_matrix(
+                    targets, path.operation_index, representative_k
                 )
-                for path in little_paths
-            ) / len(little_paths)
+                operation = context.model.group.operations[path.operation_index]
+                source = matrix.conj() if operation.antiunitary else matrix
+                projected_terms.append(dmat.conj().T @ source @ dmat)
+            projected = sum(projected_terms) / len(little_paths)
             matrix = _polar_unitary(projected, svd_relative_tolerance)
             little_residual = max(
                 (
                     float(
                         np.linalg.norm(
-                            combined_target_matrix(targets, path.operation_index, representative_k) @ matrix
+                            combined_target_matrix(targets, path.operation_index, representative_k)
+                            @ (
+                                matrix.conj()
+                                if context.model.group.operations[path.operation_index].antiunitary
+                                else matrix
+                            )
                             - matrix
                             @ combined_target_matrix(targets, path.operation_index, representative_k),
                             ord="fro",

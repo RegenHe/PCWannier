@@ -251,6 +251,13 @@ class ConcreteFiniteGroup:
     def rotations(self) -> tuple[np.ndarray, ...]:
         return tuple(self.group.operations[index].rotation for index in self.operation_indices)
 
+    @property
+    def antiunitary_flags(self) -> tuple[bool, ...]:
+        return tuple(
+            bool(self.group.operations[index].antiunitary)
+            for index in self.operation_indices
+        )
+
 
 def _eigenvalue_clusters(values: np.ndarray) -> tuple[np.ndarray, ...]:
     if values.size == 0:

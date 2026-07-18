@@ -16,6 +16,7 @@ from .group import (
     SymmetryKMapping,
     build_crystallographic_orbit,
     build_k_mappings,
+    apply_magnetic_bias,
 )
 from .specs import BlochConvention
 
@@ -41,7 +42,12 @@ def _validate_site_representation(
     for left_index, left in enumerate(orbit.site_symmetry.elements):
         for right_index, right in enumerate(orbit.site_symmetry.elements):
             product_index = orbit.site_symmetry.element_index(left.operation * right.operation)
-            expected = matrices[left_index] @ matrices[right_index]
+            right_matrix = (
+                matrices[right_index].conj()
+                if left.operation.antiunitary
+                else matrices[right_index]
+            )
+            expected = matrices[left_index] @ right_matrix
             if not np.allclose(
                 matrices[product_index],
                 expected,
@@ -155,12 +161,24 @@ class SymmetryModel:
     group_definition: SpaceGroupDefinition | None = None
     bloch_convention: BlochConvention = field(default_factory=BlochConvention)
     boundary_tolerance: float = 1.0e-6
+    magnetic_bias_direction: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.boundary_tolerance) or self.boundary_tolerance <= 0.0:
             raise ValueError("Symmetry boundary tolerance must be positive and finite.")
         if any(target.bloch_convention != self.bloch_convention for target in self.targets):
             raise ValueError("Symmetry targets and model must use the same Bloch convention.")
+        bias = self.magnetic_bias_direction
+        if bias is not None:
+            bias = np.asarray(bias, dtype=float)
+            if bias.shape != (3,) or not np.all(np.isfinite(bias)):
+                raise ValueError("Magnetic bias must be a finite Cartesian three-vector.")
+            norm = float(np.linalg.norm(bias))
+            if norm <= self.tolerance:
+                raise ValueError("Magnetic bias direction must have non-zero length.")
+            bias = bias / norm
+            bias.setflags(write=False)
+            object.__setattr__(self, "magnetic_bias_direction", bias)
 
     def target(self, name: str) -> WannierTargetRepresentation:
         for target in self.targets:
@@ -186,6 +204,46 @@ def build_symmetry_context(model: SymmetryModel, k_points) -> SymmetryContext:
         axis.setflags(write=False)
     mappings = build_k_mappings(model.group, axes)
     return SymmetryContext(model, axes, mappings)
+
+
+def apply_magnetic_bias_to_model(
+    model: SymmetryModel,
+    real_lattice_vectors,
+    magnetic_bias_direction,
+) -> SymmetryModel:
+    """Classify spatial operations and return the preserved magnetic group."""
+
+    if model.targets:
+        raise ValueError("Magnetic bias must be applied before Wannier targets are constructed.")
+    group = apply_magnetic_bias(
+        model.group,
+        real_lattice_vectors,
+        magnetic_bias_direction,
+        tolerance=model.tolerance,
+    )
+    definition = model.group_definition
+    if definition is not None:
+        from .definition import SpaceGroupDefinition
+
+        definition = SpaceGroupDefinition(
+            definition.name,
+            definition.dimension,
+            definition.tolerance,
+            group,
+            definition.finite_groups,
+        )
+    return SymmetryModel(
+        model.dimension,
+        model.tolerance,
+        group,
+        (),
+        model.representation_analysis,
+        model.symmetry_gauge,
+        definition,
+        model.bloch_convention,
+        model.boundary_tolerance,
+        np.asarray(magnetic_bias_direction, dtype=float),
+    )
 
 
 def build_wannier_target_from_group_irrep(

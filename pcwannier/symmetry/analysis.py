@@ -310,7 +310,14 @@ def compare_representations(
     )
 
 
-def intertwiner_residual(U_source, U_target, D, d_tilde) -> float:
+def intertwiner_residual(
+    U_source,
+    U_target,
+    D,
+    d_tilde,
+    *,
+    antiunitary: bool = False,
+) -> float:
     source = np.asarray(U_source, dtype=np.complex128)
     target = np.asarray(U_target, dtype=np.complex128)
     target_representation = np.asarray(D, dtype=np.complex128)
@@ -326,7 +333,9 @@ def intertwiner_residual(U_source, U_target, D, d_tilde) -> float:
         raise ValueError("d_tilde must have shape M x M.")
     return float(
         np.linalg.norm(
-            target @ target_representation - physical_representation @ source,
+            target @ target_representation
+            - physical_representation
+            @ (source.conj() if antiunitary else source),
             ord="fro",
         )
     )
@@ -472,6 +481,7 @@ def _analyze_point(
         if (
             resolved_little_group is not None
             and resolved_little_group.factor_system.cohomologically_trivial
+            and not any(resolved_little_group.factor_system.antiunitary_flags)
         ):
             decomposition = decompose_little_group_characters(
                 resolved_little_group, block_characters
@@ -492,6 +502,7 @@ def _analyze_point(
     if (
         resolved_little_group is not None
         and resolved_little_group.factor_system.cohomologically_trivial
+        and not any(resolved_little_group.factor_system.antiunitary_flags)
     ):
         physical_decomposition = decompose_little_group_characters(
             resolved_little_group, characters
@@ -528,6 +539,7 @@ def _analyze_point(
         targets
         and resolved_little_group is not None
         and resolved_little_group.factor_system.cohomologically_trivial
+        and not any(resolved_little_group.factor_system.antiunitary_flags)
     ):
         target_decomposition = decompose_little_group_characters(
             resolved_little_group, target_characters
@@ -634,9 +646,14 @@ def _composition_residual(
             )
             product_matrix = provider.sewing_matrix(product_request)
             right_matrix = matrices[_operation_name(group, right_index)]
+            composed = (
+                left_matrix @ right_matrix.conj()
+                if left.antiunitary
+                else left_matrix @ right_matrix
+            )
             residual = max(
                 residual,
-                float(np.linalg.norm(left_matrix @ right_matrix - product_matrix, ord="fro")),
+                float(np.linalg.norm(composed - product_matrix, ord="fro")),
             )
     return residual
 

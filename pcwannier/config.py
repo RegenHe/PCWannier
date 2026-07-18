@@ -38,6 +38,7 @@ class IncarConfig:
     compute_backend: str = "python"
     integration_mode: str = "nodal"
     symmetry_file: str | bool = False
+    magnetic_bias_direction: list[float] | None = None
     symmetry_constrained: bool = False
     symmetry_output_basis: str = "strict"
     symmetry_tolerance: float = 1.0e-8
@@ -368,6 +369,7 @@ class IncarParser:
                 SymmetryCalculationSpec,
                 SymmetryGaugeSpec,
                 WannierTargetSpec,
+                apply_magnetic_bias_to_model,
                 build_symmetry_context,
                 cartesian_field_matrix,
                 compose_symmetry_model,
@@ -381,6 +383,12 @@ class IncarParser:
             symmetry_path = resolve_symmetry_file(str(cfg.symmetry_file), cfg.base_dir)
             cfg.symmetry_resolved_path = symmetry_path
             model = load_symmetry(symmetry_path, tolerance=cfg.symmetry_tolerance)
+            if cfg.magnetic_bias_direction is not None:
+                model = apply_magnetic_bias_to_model(
+                    model,
+                    cfg.real_lattice_vectors,
+                    cfg.magnetic_bias_direction,
+                )
             target_specs = None
             if cfg.wannier_targets is not None:
                 target_specs = tuple(
@@ -540,9 +548,9 @@ class IncarParser:
             return False if value.lower() == "false" else int(evaluate_math_expression(value))
         if key in {"extension", "k_num", "DOS_Brillouin_mesh"}:
             return [int(evaluate_math_expression(x.strip())) for x in value.split(",")]
-        if key in {"origin", "eff_k", "finite_k"}:
+        if key in {"origin", "eff_k", "finite_k", "magnetic_bias_direction"}:
             if value.lower() == "false":
-                return False
+                return None if key == "magnetic_bias_direction" else False
             return [float(evaluate_math_expression(x.strip())) for x in value.split(",")]
         if key == "lattice_const":
             return float(evaluate_math_expression(value))
@@ -973,6 +981,16 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         raise ValueError("disentangle_mixing must lie in (0, 1].")
     if not np.isfinite(cfg.symmetry_tolerance) or cfg.symmetry_tolerance <= 0.0:
         raise ValueError("symmetry_tolerance must be positive and finite.")
+    if cfg.magnetic_bias_direction is not None:
+        bias = np.asarray(cfg.magnetic_bias_direction, dtype=float)
+        if bias.shape != (3,) or not np.all(np.isfinite(bias)):
+            raise ValueError(
+                "magnetic_bias_direction must be a finite Cartesian vector with three components."
+            )
+        if np.linalg.norm(bias) <= cfg.symmetry_tolerance:
+            raise ValueError("magnetic_bias_direction must have non-zero length.")
+        if cfg.symmetry_file is False or str(cfg.symmetry_file).strip().lower() == "false":
+            raise ValueError("magnetic_bias_direction requires symmetry_file.")
     if not np.isfinite(cfg.symmetry_boundary_tolerance) or cfg.symmetry_boundary_tolerance <= 0.0:
         raise ValueError("symmetry_boundary_tolerance must be positive and finite.")
     if cfg.representation_leakage_tolerance is not None and (

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class TwistedRepresentation:
-    """A unitary little-co-group representation with a shared factor system."""
+    """A unitary or antiunitary little-co-group matrix representation."""
 
     matrices: tuple[np.ndarray, ...]
     product_table: np.ndarray
@@ -43,6 +43,10 @@ class TwistedRepresentation:
         flags = tuple(bool(value) for value in flags)
         if len(flags) != order:
             raise ValueError("antiunitary_flags must contain one value per group element.")
+        if flags != self.factor_system.antiunitary_flags:
+            raise ValueError(
+                "Twisted-representation antiunitary flags differ from its factor system."
+            )
 
         frozen_matrices = []
         for matrix in matrices:
@@ -69,18 +73,19 @@ class TwistedRepresentation:
 
     @property
     def product_residual(self) -> float:
-        if any(self.antiunitary_flags):
-            raise NotImplementedError(
-                "Antiunitary twisted-representation products are not implemented."
-            )
         residual = 0.0
         for left in range(self.order):
             for right in range(self.order):
                 result = int(self.product_table[left, right])
                 expected = self.factor_system.phases[left, right] * self.matrices[result]
+                right_matrix = (
+                    self.matrices[right].conj()
+                    if self.antiunitary_flags[left]
+                    else self.matrices[right]
+                )
                 residual = max(
                     residual,
-                    float(np.linalg.norm(self.matrices[left] @ self.matrices[right] - expected, ord="fro")),
+                    float(np.linalg.norm(self.matrices[left] @ right_matrix - expected, ord="fro")),
                 )
         return residual
 
@@ -114,7 +119,7 @@ class TwistedRepresentation:
         self.factor_system.assert_compatible(other.factor_system, tolerance=tolerance)
 
     def trivialized_matrices(self, *, tolerance: float | None = None) -> tuple[np.ndarray, ...]:
-        """Return ordinary matrices rho'_a = c_a rho_a when omega is a coboundary."""
+        """Return untwisted matrix parts rho'_a = c_a rho_a."""
 
         cochain = self.factor_system.trivializing_cochain
         if cochain is None:
@@ -123,10 +128,14 @@ class TwistedRepresentation:
             )
         matrices = tuple(cochain[index] * matrix for index, matrix in enumerate(self.matrices))
         threshold = _validation_tolerance(self.factor_system.tolerance, tolerance)
-        residual = _ordinary_product_residual(matrices, self.product_table)
+        residual = _semilinear_product_residual(
+            matrices,
+            self.product_table,
+            self.antiunitary_flags,
+        )
         if residual > threshold:
             raise ValueError(
-                f"Trivialized matrices do not form an ordinary representation: "
+                f"Trivialized matrices do not form a semilinear representation: "
                 f"residual={residual:.6g}, tolerance={threshold:.6g}."
             )
         output = []
@@ -156,7 +165,10 @@ def build_twisted_representation(
     matrix_by_operation = dict(zip(indices, values))
 
     if antiunitary_flags is None:
-        flags_by_operation: Mapping[int, bool] = {index: False for index in indices}
+        flags_by_operation: Mapping[int, bool] = {
+            index: bool(little_group.concrete.group.operations[index].antiunitary)
+            for index in indices
+        }
     else:
         flags = tuple(bool(value) for value in antiunitary_flags)
         if len(flags) != len(indices):
@@ -193,14 +205,15 @@ def build_little_group_twisted_pair(
     return physical, target
 
 
-def _ordinary_product_residual(matrices, product_table) -> float:
+def _semilinear_product_residual(matrices, product_table, antiunitary_flags) -> float:
     residual = 0.0
     for left in range(len(matrices)):
         for right in range(len(matrices)):
             result = int(product_table[left, right])
+            right_matrix = matrices[right].conj() if antiunitary_flags[left] else matrices[right]
             residual = max(
                 residual,
-                float(np.linalg.norm(matrices[left] @ matrices[right] - matrices[result], ord="fro")),
+                float(np.linalg.norm(matrices[left] @ right_matrix - matrices[result], ord="fro")),
             )
     return residual
 

@@ -145,14 +145,16 @@ def _matrix_mesh(shape, matrix):
 def _max_target_residual(gauge, context) -> float:
     maximum = 0.0
     for operation_index, mappings in enumerate(context.k_mappings):
+        operation = context.model.group.operations[operation_index]
         for mapping in mappings:
             source = _state_index(mapping.source_k_index)
             target = _state_index(mapping.target_k_index)
             source_k = _fractional_at(context, mapping.source_k_index)
             dmat = combined_target_matrix(context.model.targets, operation_index, source_k)
+            source_gauge = gauge[source].conj() if operation.antiunitary else gauge[source]
             maximum = max(
                 maximum,
-                float(np.linalg.norm(dmat @ gauge[source] - gauge[target] @ dmat, ord="fro")),
+                float(np.linalg.norm(dmat @ source_gauge - gauge[target] @ dmat, ord="fro")),
             )
     return maximum
 

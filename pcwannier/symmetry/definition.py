@@ -169,6 +169,7 @@ class FactorSystem:
     trivializing_cochain: np.ndarray | None
     bloch_sign: int = 1
     tolerance: float = 1.0e-8
+    antiunitary_flags: tuple[bool, ...] = ()
 
     def __post_init__(self) -> None:
         tolerance = float(self.tolerance)
@@ -187,6 +188,10 @@ class FactorSystem:
             raise ValueError("Factor-system phases must have unit modulus.")
         if self.bloch_sign not in {-1, 1}:
             raise ValueError("Factor-system Bloch sign must be +1 or -1.")
+        flags = self.antiunitary_flags or (False,) * phases.shape[0]
+        flags = tuple(bool(value) for value in flags)
+        if len(flags) != phases.shape[0]:
+            raise ValueError("Factor-system antiunitary flags must match the group order.")
         if not np.isfinite(self.cocycle_residual) or self.cocycle_residual < 0.0:
             raise ValueError("Factor-system cocycle residual must be finite and non-negative.")
         cochain = self.trivializing_cochain
@@ -210,6 +215,7 @@ class FactorSystem:
         object.__setattr__(self, "cocycle_residual", float(self.cocycle_residual))
         object.__setattr__(self, "bloch_sign", int(self.bloch_sign))
         object.__setattr__(self, "tolerance", tolerance)
+        object.__setattr__(self, "antiunitary_flags", flags)
 
     @property
     def is_trivial(self) -> bool:
@@ -243,7 +249,10 @@ class FactorSystem:
                     lm = int(product[left, middle])
                     mr = int(product[middle, right])
                     lhs = self.phases[left, middle] * self.phases[lm, right]
-                    rhs = self.phases[left, mr] * self.phases[middle, right]
+                    right_phase = self.phases[middle, right]
+                    if self.antiunitary_flags[left]:
+                        right_phase = np.conj(right_phase)
+                    rhs = self.phases[left, mr] * right_phase
                     residual = max(residual, float(abs(lhs - rhs)))
         return residual
 
@@ -260,6 +269,8 @@ class FactorSystem:
         )
         if self.bloch_sign != other.bloch_sign:
             raise ValueError("Physical and target representations use different Bloch signs.")
+        if self.antiunitary_flags != other.antiunitary_flags:
+            raise ValueError("Physical and target representations use different antiunitary flags.")
         if self.lattice_shifts.shape != other.lattice_shifts.shape or not np.array_equal(
             self.lattice_shifts, other.lattice_shifts
         ):
@@ -291,6 +302,11 @@ class ResolvedLittleGroup:
         return self.concrete.table
 
     def require_irreps(self) -> tuple[ResolvedIrrep, ...]:
+        if any(self.factor_system.antiunitary_flags):
+            raise NotImplementedError(
+                f"Little group {self.name!r} contains antiunitary operations; ordinary character "
+                "tables do not describe magnetic corepresentations."
+            )
         if not self.factor_system.is_trivial:
             raise NotImplementedError(
                 f"Little co-group {self.name!r} has a non-trivial factor system "
@@ -370,7 +386,7 @@ class SpaceGroupDefinition:
             self.tolerance,
             bloch_convention=convention,
         )
-        if factor.cohomologically_trivial:
+        if factor.cohomologically_trivial and not any(factor.antiunitary_flags):
             irreps = tuple(
                 identification.resolved_irrep(irrep.name)
                 for irrep in identification.canonical.irreps
@@ -456,13 +472,19 @@ def build_factor_system(
         None,
         convention.sign,
         tolerance,
+        concrete.antiunitary_flags,
     )
     cocycle_residual = provisional.cocycle_residual_for(concrete.table.multiplication)
     if cocycle_residual > max(100.0 * tolerance, 1.0e-8):
         raise ValueError(
             f"Computed factor system violates the cocycle condition (residual={cocycle_residual:.6g})."
         )
-    cochain = _trivializing_cochain(concrete.table, phases, tolerance)
+    cochain = _trivializing_cochain(
+        concrete.table,
+        phases,
+        tolerance,
+        concrete.antiunitary_flags,
+    )
     return FactorSystem(
         shifts,
         phases,
@@ -470,6 +492,7 @@ def build_factor_system(
         cochain,
         convention.sign,
         tolerance,
+        concrete.antiunitary_flags,
     )
 
 
@@ -652,7 +675,11 @@ def _trivializing_cochain(
     table: FiniteGroupTable,
     phases: np.ndarray,
     tolerance: float,
+    antiunitary_flags: tuple[bool, ...] = (),
 ) -> np.ndarray | None:
+    flags = antiunitary_flags or (False,) * table.order
+    if len(flags) != table.order:
+        raise ValueError("Antiunitary flags must match the finite-group order.")
     if np.max(np.abs(phases - 1.0), initial=0.0) <= tolerance:
         return np.ones(table.order, dtype=np.complex128)
     generators = _minimal_generators(table)
@@ -661,13 +688,24 @@ def _trivializing_cochain(
         order = table.element_orders[generator]
         current = table.identity_index
         accumulated = 1.0 + 0.0j
+        exponent = 0
         for _ in range(order):
             accumulated *= phases[current, generator]
+            exponent += -1 if flags[current] else 1
             current = int(table.multiplication[current, generator])
-        base_angle = -np.angle(accumulated) / order
-        root_choices.append(
-            tuple(np.exp(1j * (base_angle + 2.0 * np.pi * branch / order)) for branch in range(order))
-        )
+        if exponent == 0:
+            if abs(accumulated - 1.0) > max(100.0 * tolerance, 1.0e-8):
+                return None
+            root_choices.append((1.0 + 0.0j,))
+        else:
+            count = abs(exponent)
+            base_angle = -np.angle(accumulated) / exponent
+            root_choices.append(
+                tuple(
+                    np.exp(1j * (base_angle + 2.0 * np.pi * branch / count))
+                    for branch in range(count)
+                )
+            )
     for selected in product(*root_choices):
         cochain = np.full(table.order, np.nan + 1j * np.nan, dtype=np.complex128)
         cochain[table.identity_index] = 1.0
@@ -681,7 +719,10 @@ def _trivializing_cochain(
             for left in known:
                 for generator in generators:
                     target = int(table.multiplication[left, generator])
-                    candidate = cochain[left] * cochain[generator] * phases[left, generator]
+                    right_value = (
+                        np.conj(cochain[generator]) if flags[left] else cochain[generator]
+                    )
+                    candidate = cochain[left] * right_value * phases[left, generator]
                     if not np.isfinite(cochain[target].real):
                         cochain[target] = candidate / abs(candidate)
                         changed = True
@@ -693,7 +734,9 @@ def _trivializing_cochain(
         residual = max(
             abs(
                 cochain[int(table.multiplication[left, right])]
-                - cochain[left] * cochain[right] * phases[left, right]
+                - cochain[left]
+                * (np.conj(cochain[right]) if flags[left] else cochain[right])
+                * phases[left, right]
             )
             for left in range(table.order)
             for right in range(table.order)

@@ -28,6 +28,7 @@ class SewingMatrixCacheEntry:
     target_band_indices: tuple[int, ...]
     field_kind: str
     matrix: np.ndarray
+    antiunitary: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ def save_sewing_matrix_cache(
             "source_band_indices": [int(value) for value in entry.source_band_indices],
             "target_band_indices": [int(value) for value in entry.target_band_indices],
             "field_kind": str(entry.field_kind),
+            "antiunitary": bool(entry.antiunitary),
         }
         cell_comments[(index,)] = (_ENTRY_PREFIX + _compact_json(record),)
 
@@ -170,6 +172,7 @@ def load_sewing_matrix_cache(filename: str | Path) -> SewingMatrixCache:
                 target_band_indices=target_bands,
                 field_kind=str(record.get("field_kind", "")),
                 matrix=matrix.copy(),
+                antiunitary=bool(record.get("antiunitary", False)),
             )
         )
     return SewingMatrixCache(dimension, bloch_sign, k_shape, fingerprint, tuple(entries))

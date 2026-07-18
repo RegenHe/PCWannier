@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+import numpy as np
+
 class FieldComponents(str, Enum):
     EZ = "Ez"
     HZ = "Hz"
@@ -71,4 +73,16 @@ class MaxwellProblem:
         raise NotImplementedError(
             "field_components=full_vector is not implemented; the current COMSOL "
             "reader supports scalar Ez and Hz fields only."
+        )
+
+    def apply_time_reversal(self, values):
+        """Apply spinless Maxwell time reversal to the configured primary field."""
+
+        array = np.asarray(values)
+        if self.field_components == FieldComponents.EZ:
+            return np.conj(array)
+        if self.field_components == FieldComponents.HZ:
+            return -np.conj(array)
+        raise NotImplementedError(
+            "Time reversal for field_components=full_vector is not implemented."
         )

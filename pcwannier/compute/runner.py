@@ -124,6 +124,11 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     if config.symmetry_constrained:
         with timed_step("projection initialization", LOGGER):
             initializer.prepare()
+            # Frozen selectors define the subspace but not the target-column
+            # gauge.  Align that frame to (p_x, p_y, s, ...) before applying
+            # little-group projection; otherwise circularly split frozen
+            # eigenstates can be assigned directly to real target columns.
+            initializer.align_to_projection()
     else:
         with timed_step("projection initialization", LOGGER, max_iter=config.max_iter, err_diff=config.err_diff):
             initializer.iter(config.err_diff, config.max_iter)
@@ -452,6 +457,13 @@ def _log_symmetry_analysis(result) -> None:
                 point.physical_decomposition.max_residual,
                 point.target_decomposition.max_residual if point.target_decomposition else 0.0,
             )
+        elif point.factor_system is not None and any(point.factor_system.antiunitary_flags):
+            LOGGER.info(
+                "Symmetry point %s contains antiunitary operations: ordinary irrep labels "
+                "unavailable, direct real-linear intertwiner dimension=%s",
+                point.name,
+                point.intertwiner_dimension,
+            )
         elif point.factor_system is not None and not point.factor_system.cohomologically_trivial:
             LOGGER.info(
                 "Symmetry point %s uses a non-trivial projective factor: "
@@ -524,6 +536,10 @@ def _validate_symmetry_gauge_prerequisites(analysis, tolerance: float) -> None:
     for point in analysis.points:
         if point.compatibility is not None and not point.compatibility.compatible:
             raise RuntimeError(f"Target representation is incompatible at symmetry point {point.name}.")
+        if point.target_twisted_representation is not None and point.intertwiner_dimension == 0:
+            raise RuntimeError(
+                f"Target representation has no direct intertwiner at symmetry point {point.name}."
+            )
         if point.diagnostics.unitarity_error > tolerance:
             raise RuntimeError(
                 f"Physical sewing space is not closed at {point.name}: "

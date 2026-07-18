@@ -20,6 +20,7 @@ class IntertwinerSpace:
     singular_values: np.ndarray
     constraint_rank: int
     dimension: int
+    scalar_field: str = "complex"
 
 
 @dataclass(frozen=True)
@@ -80,25 +81,62 @@ def solve_intertwiner_space(
     absolute_tolerance: float = 1.0e-12,
 ) -> IntertwinerSpace:
     """Solve d_g U = U D_g as a common column-major null space."""
-    physical, target = _paired_representations(physical_matrices, target_matrices)
+    physical, target, antiunitary = _paired_representations(
+        physical_matrices, target_matrices
+    )
     m = physical[0].shape[0]
     n = target[0].shape[0]
     identity_m = np.eye(m, dtype=np.complex128)
     identity_n = np.eye(n, dtype=np.complex128)
-    constraints = [
-        np.kron(identity_n, dmat) - np.kron(dmat_target.T, identity_m)
-        for dmat, dmat_target in zip(physical, target)
-    ]
-    stacked = np.vstack(constraints)
-    _, singular_values, vh = np.linalg.svd(stacked, full_matrices=True)
+    if any(antiunitary):
+        constraints = []
+        for dmat, dmat_target, is_antiunitary in zip(
+            physical, target, antiunitary
+        ):
+            left = np.kron(identity_n, dmat)
+            right = np.kron(dmat_target.T, identity_m)
+            if is_antiunitary:
+                coefficient_x = left - right
+                coefficient_y = -1j * (left + right)
+            else:
+                coefficient_x = left - right
+                coefficient_y = 1j * (left - right)
+            constraints.append(
+                np.block(
+                    [
+                        [coefficient_x.real, coefficient_y.real],
+                        [coefficient_x.imag, coefficient_y.imag],
+                    ]
+                )
+            )
+        stacked = np.vstack(constraints)
+        _, singular_values, vh = np.linalg.svd(stacked, full_matrices=True)
+    else:
+        constraints = [
+            np.kron(identity_n, dmat) - np.kron(dmat_target.T, identity_m)
+            for dmat, dmat_target in zip(physical, target)
+        ]
+        stacked = np.vstack(constraints)
+        _, singular_values, vh = np.linalg.svd(stacked, full_matrices=True)
     largest = float(singular_values[0]) if singular_values.size else 0.0
     threshold = max(float(absolute_tolerance), float(relative_tolerance) * largest)
     rank = int(np.sum(singular_values > threshold))
     null_vectors = vh[rank:].conj()
-    basis = tuple(vector.reshape((m, n), order="F") for vector in null_vectors)
+    if any(antiunitary):
+        complex_size = m * n
+        basis = tuple(
+            (vector[:complex_size].real + 1j * vector[complex_size:].real).reshape(
+                (m, n), order="F"
+            )
+            for vector in null_vectors
+        )
+        scalar_field = "real"
+    else:
+        basis = tuple(vector.reshape((m, n), order="F") for vector in null_vectors)
+        scalar_field = "complex"
     frozen_singular = np.asarray(singular_values, dtype=float)
     frozen_singular.setflags(write=False)
-    return IntertwinerSpace(basis, frozen_singular, rank, len(basis))
+    return IntertwinerSpace(basis, frozen_singular, rank, len(basis), scalar_field)
 
 
 def project_intertwiner(
@@ -111,7 +149,9 @@ def project_intertwiner(
     svd_relative_tolerance: float = 1.0e-10,
 ) -> ProjectedIntertwiner:
     """Alternate finite-group projection and polar semiunitarization."""
-    physical, target = _paired_representations(physical_matrices, target_matrices)
+    physical, target, antiunitary = _paired_representations(
+        physical_matrices, target_matrices
+    )
     matrix = np.asarray(initial, dtype=np.complex128)
     m = physical[0].shape[0]
     n = target[0].shape[0]
@@ -124,12 +164,35 @@ def project_intertwiner(
 
     latest_singular = np.empty(0, dtype=float)
     for iteration in range(1, int(max_iterations) + 1):
-        projected = sum(
-            dmat @ matrix @ dmat_target.conj().T
-            for dmat, dmat_target in zip(physical, target)
-        ) / len(physical)
-        matrix, latest_singular = _polar_semiunitary(projected, svd_relative_tolerance)
-        residual = _fixed_k_residual(matrix, physical, target)
+        projected = _average_intertwiner(matrix, physical, target, antiunitary)
+        try:
+            matrix, latest_singular = _polar_semiunitary(
+                projected, svd_relative_tolerance
+            )
+        except RuntimeError:
+            # Antiunitary projection is real-linear.  A perfectly valid trial
+            # column can therefore be orthogonal to the required real form
+            # solely because its phase is 1 instead of i.  Probe only column
+            # phases before declaring the physical/target pair incompatible;
+            # this preserves the trial subspace and its localization.
+            if iteration != 1 or not any(antiunitary):
+                raise
+            phase_seed = _antiunitary_phase_seed(
+                matrix,
+                physical,
+                target,
+                antiunitary,
+                svd_relative_tolerance,
+            )
+            if phase_seed is None:
+                raise
+            projected = _average_intertwiner(
+                phase_seed, physical, target, antiunitary
+            )
+            matrix, latest_singular = _polar_semiunitary(
+                projected, svd_relative_tolerance
+            )
+        residual = _fixed_k_residual(matrix, physical, target, antiunitary)
         semiunitarity = float(np.linalg.norm(matrix.conj().T @ matrix - np.eye(n), ord="fro"))
         if residual <= tolerance and semiunitarity <= tolerance:
             return ProjectedIntertwiner(
@@ -144,6 +207,72 @@ def project_intertwiner(
         f"residual={residual:.6g}, semiunitarity={semiunitarity:.6g}, "
         f"iterations={max_iterations}."
     )
+
+
+def _average_intertwiner(matrix, physical, target, antiunitary) -> np.ndarray:
+    return sum(
+        dmat
+        @ (matrix.conj() if is_antiunitary else matrix)
+        @ dmat_target.conj().T
+        for dmat, dmat_target, is_antiunitary in zip(
+            physical, target, antiunitary
+        )
+    ) / len(physical)
+
+
+def _antiunitary_phase_seed(
+    initial,
+    physical,
+    target,
+    antiunitary,
+    relative_tolerance: float,
+) -> np.ndarray | None:
+    """Find a full-rank real-form projection without changing the trial span."""
+    column_count = initial.shape[1]
+    if column_count <= 12:
+        masks = range(1, 1 << column_count)
+    else:
+        patterns = []
+        for column in range(column_count):
+            pattern = np.zeros(column_count, dtype=bool)
+            pattern[column] = True
+            patterns.append(pattern)
+        patterns.extend(
+            (
+                np.arange(column_count) % 2 == 0,
+                np.arange(column_count) % 2 == 1,
+                np.ones(column_count, dtype=bool),
+            )
+        )
+        rng = np.random.default_rng(0)
+        patterns.extend(
+            rng.integers(0, 2, size=column_count, dtype=np.int8).astype(bool)
+            for _ in range(64)
+        )
+        masks = patterns
+
+    best_seed = None
+    best_ratio = -np.inf
+    for item in masks:
+        if isinstance(item, (int, np.integer)):
+            use_i = np.array(
+                [bool(int(item) & (1 << column)) for column in range(column_count)]
+            )
+        else:
+            use_i = np.asarray(item, dtype=bool)
+        phases = np.where(use_i, 1.0j, 1.0)
+        seed = initial * phases[None, :]
+        projected = _average_intertwiner(seed, physical, target, antiunitary)
+        singular = np.linalg.svd(projected, compute_uv=False)
+        if singular.size != column_count or singular[0] == 0.0:
+            continue
+        ratio = float(singular[-1] / singular[0])
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_seed = seed
+    if best_seed is None or best_ratio <= float(relative_tolerance):
+        return None
+    return best_seed
 
 
 def construct_symmetry_gauge(
@@ -214,14 +343,20 @@ def construct_symmetry_gauge(
             target_representation,
             relative_tolerance=svd_relative_tolerance,
         )
-        projected = project_intertwiner(
-            initial_gauge[representative_state_index],
-            physical_representation,
-            target_representation,
-            tolerance=tolerance,
-            max_iterations=max_iterations,
-            svd_relative_tolerance=svd_relative_tolerance,
-        )
+        try:
+            projected = project_intertwiner(
+                initial_gauge[representative_state_index],
+                physical_representation,
+                target_representation,
+                tolerance=tolerance,
+                max_iterations=max_iterations,
+                svd_relative_tolerance=svd_relative_tolerance,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Cannot construct a full-rank symmetry gauge at representative "
+                f"k={star.representative_index}: {exc}"
+            ) from exc
         representative_gauge = projected.matrix
         representative_diagnostics.append(
             RepresentativeGaugeDiagnostics(
@@ -246,7 +381,13 @@ def construct_symmetry_gauge(
                     path, source_bands, target_bands
                 )
                 target_matrix = combined_target_matrix(targets, path.operation_index, representative_k)
-                candidates.append(dmat @ representative_gauge @ target_matrix.conj().T)
+                operation = context.model.group.operations[path.operation_index]
+                source_matrix = (
+                    representative_gauge.conj()
+                    if operation.antiunitary
+                    else representative_gauge
+                )
+                candidates.append(dmat @ source_matrix @ target_matrix.conj().T)
             canonical = candidates[0]
             for candidate in candidates[1:]:
                 path_residual = max(
@@ -323,8 +464,14 @@ def evaluate_symmetry_gauge(
             target_matrix = combined_target_matrix(targets, operation_index, source_k)
             source_gauge = gauge[_state_index(source_index)]
             target_gauge = gauge[_state_index(mapping.target_k_index)]
+            transformed_source = (
+                source_gauge.conj() if operation.antiunitary else source_gauge
+            )
             value = float(
-                np.linalg.norm(dmat @ source_gauge - target_gauge @ target_matrix, ord="fro")
+                np.linalg.norm(
+                    dmat @ transformed_source - target_gauge @ target_matrix,
+                    ord="fro",
+                )
             )
             values[source_index] = value
             residual_per_k[source_index] = max(residual_per_k[source_index], value)
@@ -367,6 +514,7 @@ def _paired_representations(physical_matrices, target_matrices):
         target_matrices.require_valid()
         physical = physical_matrices.matrices
         target = target_matrices.matrices
+        antiunitary = physical_matrices.antiunitary_flags
     elif isinstance(physical_matrices, Mapping) or isinstance(target_matrices, Mapping):
         if not isinstance(physical_matrices, Mapping) or not isinstance(target_matrices, Mapping):
             raise ValueError("Physical and target representations must use the same container type.")
@@ -374,9 +522,11 @@ def _paired_representations(physical_matrices, target_matrices):
             raise ValueError("Physical and target representation keys must have the same order.")
         physical = tuple(np.asarray(physical_matrices[key], dtype=np.complex128) for key in physical_matrices)
         target = tuple(np.asarray(target_matrices[key], dtype=np.complex128) for key in target_matrices)
+        antiunitary = (False,) * len(physical)
     else:
         physical = tuple(np.asarray(matrix, dtype=np.complex128) for matrix in physical_matrices)
         target = tuple(np.asarray(matrix, dtype=np.complex128) for matrix in target_matrices)
+        antiunitary = (False,) * len(physical)
     if not physical or len(physical) != len(target):
         raise ValueError("Physical and target representations must contain the same non-zero number of matrices.")
     m = physical[0].shape[0]
@@ -387,7 +537,7 @@ def _paired_representations(physical_matrices, target_matrices):
         raise ValueError("All target representation matrices must have the same square shape.")
     if any(not np.all(np.isfinite(matrix)) for matrix in physical + target):
         raise ValueError("Representation matrices contain non-finite values.")
-    return physical, target
+    return physical, target, antiunitary
 
 
 def _polar_semiunitary(matrix: np.ndarray, relative_tolerance: float):
@@ -403,11 +553,19 @@ def _polar_semiunitary(matrix: np.ndarray, relative_tolerance: float):
     return left @ vh, np.asarray(singular_values, dtype=float)
 
 
-def _fixed_k_residual(matrix, physical, target) -> float:
+def _fixed_k_residual(matrix, physical, target, antiunitary) -> float:
     return max(
         (
-            float(np.linalg.norm(dmat @ matrix - matrix @ dmat_target, ord="fro"))
-            for dmat, dmat_target in zip(physical, target)
+            float(
+                np.linalg.norm(
+                    dmat @ (matrix.conj() if is_antiunitary else matrix)
+                    - matrix @ dmat_target,
+                    ord="fro",
+                )
+            )
+            for dmat, dmat_target, is_antiunitary in zip(
+                physical, target, antiunitary
+            )
         ),
         default=0.0,
     )

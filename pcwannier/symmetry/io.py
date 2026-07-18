@@ -243,6 +243,7 @@ def compose_symmetry_model(
         base.group_definition,
         convention,
         boundary_tolerance,
+        base.magnetic_bias_direction,
     )
 
 

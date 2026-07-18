@@ -227,6 +227,8 @@ class BlochSymmetryAction:
         operation: SpaceGroupOperation,
         source_k_fractional,
         field_kind: FieldKind,
+        *,
+        time_reversal=None,
     ) -> np.ndarray:
         source_k = np.asarray(source_k_fractional, dtype=float)
         transformed_k = operation.act_reciprocal(source_k)
@@ -247,6 +249,10 @@ class BlochSymmetryAction:
                     f"{field_kind.value} fields require {operation.dimension} Cartesian components."
                 )
             transformed = np.einsum("ab,nvb->nva", component_matrix, sampled, optimize=True)
+        if operation.antiunitary:
+            if time_reversal is None:
+                raise ValueError("Antiunitary Bloch actions require a field time-reversal callback.")
+            transformed = np.asarray(time_reversal(transformed), dtype=np.complex128)
         phase = np.exp(
             -self.bloch_sign * 2j * np.pi * np.dot(transformed_k, operation.translation)
         )
@@ -331,6 +337,12 @@ class StateBlochSymmetryProvider:
             )
         self.state = state
         self.context = context
+        self.maxwell = getattr(state, "maxwell", None)
+        self._time_reversal = (
+            np.conj
+            if self.maxwell is None and field_kind == FieldKind.SCALAR
+            else None if self.maxwell is None else self.maxwell.apply_time_reversal
+        )
         self.field_kind = field_kind
         self.dimension = context.model.dimension
         dataset_convention = BlochConvention.for_dataset(state.config.dataset_type)
@@ -415,7 +427,13 @@ class StateBlochSymmetryProvider:
         source = self._orthonormal_block(source_index, full_source_bands)
         if np.any(source_shift):
             source = source * self._fiber_phase(source_shift)[None, :]
-        transformed = self.action.apply(source, request.operation, request.source_k_fractional, request.field_kind)
+        transformed = self.action.apply(
+            source,
+            request.operation,
+            request.source_k_fractional,
+            request.field_kind,
+            time_reversal=self._time_reversal,
+        )
         target = self._orthonormal_block(target_index, full_target_bands)
         if np.any(target_shift):
             target = target * self._fiber_phase(target_shift)[None, :]
@@ -434,6 +452,7 @@ class StateBlochSymmetryProvider:
             target_band_indices=full_target_bands,
             field_kind=request.field_kind.value,
             matrix=np.asarray(matrix, dtype=np.complex128).copy(),
+            antiunitary=request.operation.antiunitary,
         )
         self._sewing_cache[cache_key] = entry
         return self._select_cached_bands(entry, source_bands, target_bands)
@@ -624,9 +643,17 @@ class StateBlochSymmetryProvider:
             request.operation.translation,
             request.source_k_fractional,
             request.field_kind.value,
+            request.operation.antiunitary,
         )
 
-    def _cache_key(self, rotation, translation, source_k, field_kind: str) -> tuple[object, ...]:
+    def _cache_key(
+        self,
+        rotation,
+        translation,
+        source_k,
+        field_kind: str,
+        antiunitary: bool = False,
+    ) -> tuple[object, ...]:
         tolerance = self.context.model.tolerance
         source = tuple(np.rint(np.asarray(source_k) / tolerance).astype(np.int64))
         translation_key = tuple(np.rint(np.asarray(translation) / tolerance).astype(np.int64))
@@ -635,6 +662,7 @@ class StateBlochSymmetryProvider:
             translation_key,
             source,
             str(field_kind),
+            bool(antiunitary),
         )
 
     def _select_cached_bands(
@@ -682,6 +710,7 @@ class StateBlochSymmetryProvider:
             operation = SpaceGroupOperation(
                 entry.operation_rotation,
                 entry.operation_translation,
+                antiunitary=entry.antiunitary,
             )
             transformed = operation.act_reciprocal(entry.source_k_fractional)
             target_index, target_representative, _ = self._locate_k(transformed)
@@ -710,6 +739,7 @@ class StateBlochSymmetryProvider:
                 entry.operation_translation,
                 entry.source_k_fractional,
                 field_kind.value,
+                entry.antiunitary,
             )
             previous = self._sewing_cache.get(key)
             if previous is not None and not np.allclose(
@@ -737,6 +767,11 @@ class StateBlochSymmetryProvider:
             digest.update(maxwell.field_components.value.encode("utf-8"))
             digest.update(maxwell.metric_material.value.encode("utf-8"))
         digest.update(str(self.state.integration_mode).encode("utf-8"))
+        bias = self.context.model.magnetic_bias_direction
+        if bias is not None:
+            _update_array_digest(digest, "magnetic_bias_direction", bias)
+        for operation in self.context.model.group.operations:
+            digest.update(bytes((int(operation.antiunitary),)))
         transforms = self.state.get_transform()
         for k_index in self._k_indices:
             state_index = self._state_index(k_index)

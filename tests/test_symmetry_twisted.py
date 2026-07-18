@@ -193,18 +193,31 @@ def test_coboundary_factor_trivializes_but_projective_factor_does_not():
         projective_representation.trivialized_matrices()
 
 
-def test_antiunitary_flags_are_reserved_but_not_silently_applied():
-    concrete = ConcreteFiniteGroup.from_space_group(_glide_group())
-    factor = build_factor_system(concrete, [0.0, 0.0], 1.0e-10)
+def test_antiunitary_twisted_product_uses_semilinear_conjugation():
+    group = SpaceGroup(
+        (
+            SpaceGroupOperation.identity(2),
+            SpaceGroupOperation(
+                np.diag([1, -1]),
+                np.array([0.5, 0.0]),
+                "anti_glide_x",
+                True,
+            ),
+        )
+    )
+    concrete = ConcreteFiniteGroup.from_space_group(group)
+    factor = build_factor_system(concrete, [0.5, 0.0], 1.0e-10)
+    glide_matrix = np.array([[0.0, 1.0], [-1.0, 0.0]])
     representation = TwistedRepresentation(
-        (np.eye(1), np.eye(1)),
+        (np.eye(2), glide_matrix),
         concrete.table.multiplication,
         factor,
         (False, True),
     )
 
-    with pytest.raises(NotImplementedError, match="Antiunitary"):
-        _ = representation.product_residual
+    assert factor.phases[1, 1] == pytest.approx(-1.0)
+    assert np.allclose(glide_matrix @ glide_matrix.conj(), -np.eye(2))
+    representation.require_valid(tolerance=1.0e-12)
 
 
 def test_projective_high_symmetry_analysis_keeps_direct_intertwiner(monkeypatch):

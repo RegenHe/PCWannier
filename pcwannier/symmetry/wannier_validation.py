@@ -222,6 +222,8 @@ def validate_wannier_symmetry(
                     transformed = component_factor * stencil.apply(
                         zero_cell[:, source_index]
                     )
+                    if operation.antiunitary:
+                        transformed = state.maxwell.apply_time_reversal(transformed)
                     target_indices = tuple(
                         offset + target.wannier_index(row, action.target_index)
                         for row in range(irrep_dimension)

@@ -173,9 +173,14 @@ def validate_frozen_window_covariance(
             )
             source_projector = source_frozen @ source_frozen.conj().T
             target_projector = target_frozen @ target_frozen.conj().T
+            transformed_projector = (
+                source_projector.conj()
+                if operation.antiunitary
+                else source_projector
+            )
             residual = float(
                 np.linalg.norm(
-                    target_projector - dmat @ source_projector @ dmat.conj().T,
+                    target_projector - dmat @ transformed_projector @ dmat.conj().T,
                     ord="fro",
                 )
             )
@@ -344,6 +349,7 @@ def evaluate_projector_symmetry(
             )
 
     for operation_index, mappings in enumerate(context.k_mappings):
+        operation = context.model.group.operations[operation_index]
         for mapping in mappings:
             source_index = _state_index(mapping.source_k_index)
             target_index = _state_index(mapping.target_k_index)
@@ -356,14 +362,23 @@ def evaluate_projector_symmetry(
             )
             source_k = _fractional_at(context, mapping.source_k_index)
             target_matrix = combined_target_matrix(targets, operation_index, source_k)
+            transformed_source = source.conj() if operation.antiunitary else source
             frame_values.append(
-                float(np.linalg.norm(dmat @ source - target @ target_matrix, ord="fro"))
+                float(
+                    np.linalg.norm(
+                        dmat @ transformed_source - target @ target_matrix,
+                        ord="fro",
+                    )
+                )
             )
+            source_projector = source @ source.conj().T
+            if operation.antiunitary:
+                source_projector = source_projector.conj()
             projector_values.append(
                 float(
                     np.linalg.norm(
                         target @ target.conj().T
-                        - dmat @ source @ source.conj().T @ dmat.conj().T,
+                        - dmat @ source_projector @ dmat.conj().T,
                         ord="fro",
                     )
                 )
@@ -392,7 +407,9 @@ def _symmetrized_z(initializer, context, provider, bands, frame, star: SymmetryK
                 _bands_at(bands, path.source_k_index),
                 _bands_at(bands, path.target_k_index),
             )
-            accumulator += dmat.conj().T @ raw @ dmat
+            operation = context.model.group.operations[path.operation_index]
+            pulled = dmat.conj().T @ raw @ dmat
+            accumulator += pulled.conj() if operation.antiunitary else pulled
             path_count += 1
     if path_count != len(context.model.group.operations):
         raise RuntimeError(
@@ -414,7 +431,9 @@ def _symmetrized_z(initializer, context, provider, bands, frame, star: SymmetryK
             _bands_at(bands, path.source_k_index),
             _bands_at(bands, path.target_k_index),
         )
-        little_accumulator += dmat.conj().T @ zmat @ dmat
+        operation = context.model.group.operations[path.operation_index]
+        pulled = dmat.conj().T @ zmat @ dmat
+        little_accumulator += pulled.conj() if operation.antiunitary else pulled
     zmat = little_accumulator / len(representative_member.paths)
     return 0.5 * (zmat + zmat.conj().T)
 
@@ -482,14 +501,15 @@ def _updated_representative_frame(
         target,
     )
 
-    projected = project_intertwiner(
+    projected = _project_intertwiner_with_frozen(
         candidate,
         physical_representation,
         target_representation,
+        frozen,
         tolerance=tolerance,
         max_iterations=max_iterations,
         svd_relative_tolerance=svd_relative_tolerance,
-    ).matrix
+    )
     frozen_error = _frozen_containment(projected, frozen)
     if frozen_error > tolerance:
         raise RuntimeError(
@@ -544,20 +564,73 @@ def _restore_representative_constraints(
             physical,
             target,
         )
-        projected = project_intertwiner(
+        projected = _project_intertwiner_with_frozen(
             candidate,
             physical_representation,
             target_representation,
+            frozen,
             tolerance=tolerance,
             max_iterations=max_iterations,
             svd_relative_tolerance=svd_relative_tolerance,
-        ).matrix
+        )
         if _frozen_containment(projected, frozen) > tolerance:
             raise RuntimeError(
                 f"Initial target frame does not contain the frozen subspace at k={star.representative_index}."
             )
         representatives.append(projected)
     return _propagate_representatives(representatives, context, stars, provider, bands)
+
+
+def _project_intertwiner_with_frozen(
+    initial,
+    physical_representation,
+    target_representation,
+    frozen,
+    *,
+    tolerance,
+    max_iterations,
+    svd_relative_tolerance,
+):
+    """Alternate target-frame projection with exact frozen-subspace restoration."""
+    matrix = np.asarray(initial, dtype=np.complex128)
+    if frozen.shape[1] == 0:
+        return project_intertwiner(
+            matrix,
+            physical_representation,
+            target_representation,
+            tolerance=tolerance,
+            max_iterations=max_iterations,
+            svd_relative_tolerance=svd_relative_tolerance,
+        ).matrix
+
+    remaining = matrix.shape[1] - frozen.shape[1]
+    frozen_error = np.inf
+    for _ in range(max_iterations):
+        projected = project_intertwiner(
+            matrix,
+            physical_representation,
+            target_representation,
+            tolerance=tolerance,
+            max_iterations=max_iterations,
+            svd_relative_tolerance=svd_relative_tolerance,
+        ).matrix
+        frozen_error = _frozen_containment(projected, frozen)
+        if frozen_error <= tolerance:
+            return projected
+
+        complement = _orthogonal_complement_columns(projected, frozen, remaining)
+        containing_frame = np.column_stack((frozen, complement))
+        # Pick the gauge in the restored subspace closest to the symmetry frame.
+        left, _, right = np.linalg.svd(
+            containing_frame.conj().T @ projected,
+            full_matrices=False,
+        )
+        matrix = containing_frame @ (left @ right)
+
+    raise RuntimeError(
+        "Frozen and target-representation alternating projection did not converge: "
+        f"residual={frozen_error:.6g}, iterations={max_iterations}."
+    )
 
 
 def _propagate_representatives(representatives, context, stars, provider, bands):
@@ -576,7 +649,9 @@ def _propagate_representatives(representatives, context, stars, provider, bands)
                 target = combined_target_matrix(
                     context.model.targets, path.operation_index, representative_k
                 )
-                candidates.append(dmat @ representative @ target.conj().T)
+                operation = context.model.group.operations[path.operation_index]
+                source = representative.conj() if operation.antiunitary else representative
+                candidates.append(dmat @ source @ target.conj().T)
             canonical = representative if member.flat_index == star.representative_flat_index else candidates[0]
             for candidate in candidates:
                 path_residual = max(
@@ -638,9 +713,14 @@ def _outer_composition_residual(state, context, provider, bands) -> float:
                     target_band_indices=final_bands,
                 )
                 product_matrix = provider.sewing_matrix(product_request)
+                composed = (
+                    left_matrix @ right_matrix.conj()
+                    if left.antiunitary
+                    else left_matrix @ right_matrix
+                )
                 maximum = max(
                     maximum,
-                    float(np.linalg.norm(left_matrix @ right_matrix - product_matrix, ord="fro")),
+                    float(np.linalg.norm(composed - product_matrix, ord="fro")),
                 )
     return maximum
 

@@ -68,6 +68,7 @@ class SpaceGroupOperation:
     rotation: np.ndarray
     translation: np.ndarray
     name: str | None = None
+    antiunitary: bool = False
 
     def __post_init__(self) -> None:
         raw_rotation = np.asarray(self.rotation)
@@ -86,6 +87,7 @@ class SpaceGroupOperation:
         translation.setflags(write=False)
         object.__setattr__(self, "rotation", rotation)
         object.__setattr__(self, "translation", translation)
+        object.__setattr__(self, "antiunitary", bool(self.antiunitary))
 
     @property
     def dimension(self) -> int:
@@ -110,11 +112,19 @@ class SpaceGroupOperation:
             return NotImplemented
         rotation = self.rotation @ other.rotation
         translation = self.rotation @ other.translation + self.translation
-        return SpaceGroupOperation(rotation, translation)
+        return SpaceGroupOperation(
+            rotation,
+            translation,
+            antiunitary=self.antiunitary ^ other.antiunitary,
+        )
 
     def inverse(self) -> SpaceGroupOperation:
         rotation = np.rint(np.linalg.inv(self.rotation)).astype(np.int64)
-        return SpaceGroupOperation(rotation, -(rotation @ self.translation))
+        return SpaceGroupOperation(
+            rotation,
+            -(rotation @ self.translation),
+            antiunitary=self.antiunitary,
+        )
 
     def act_real(self, fractional_position) -> np.ndarray:
         position = np.asarray(fractional_position, dtype=float)
@@ -122,11 +132,15 @@ class SpaceGroupOperation:
             raise ValueError(f"Real-space point must have shape {(self.dimension,)}.")
         return self.rotation @ position + self.translation
 
-    def act_reciprocal(self, fractional_k) -> np.ndarray:
+    def act_reciprocal_spatial(self, fractional_k) -> np.ndarray:
         kpoint = np.asarray(fractional_k, dtype=float)
         if kpoint.shape != (self.dimension,):
             raise ValueError(f"Reciprocal-space point must have shape {(self.dimension,)}.")
         return self.reciprocal_rotation @ kpoint
+
+    def act_reciprocal(self, fractional_k) -> np.ndarray:
+        transformed = self.act_reciprocal_spatial(fractional_k)
+        return -transformed if self.antiunitary else transformed
 
     def act_real_reduced(self, fractional_position, tolerance: float = 1e-8) -> PeriodicImage:
         return reduce_fractional(self.act_real(fractional_position), tolerance)
@@ -137,12 +151,17 @@ class SpaceGroupOperation:
     def strictly_equal(self, other: SpaceGroupOperation, tolerance: float = 1e-8) -> bool:
         return bool(
             isinstance(other, SpaceGroupOperation)
+            and self.antiunitary == other.antiunitary
             and np.array_equal(self.rotation, other.rotation)
             and np.allclose(self.translation, other.translation, rtol=0.0, atol=tolerance)
         )
 
     def equivalent_mod_lattice(self, other: SpaceGroupOperation, tolerance: float = 1e-8) -> bool:
-        if not isinstance(other, SpaceGroupOperation) or not np.array_equal(self.rotation, other.rotation):
+        if (
+            not isinstance(other, SpaceGroupOperation)
+            or self.antiunitary != other.antiunitary
+            or not np.array_equal(self.rotation, other.rotation)
+        ):
             return False
         difference = self.translation - other.translation
         return bool(np.allclose(difference, np.rint(difference), rtol=0.0, atol=tolerance))
@@ -235,6 +254,71 @@ class SpaceGroup:
         for left in range(len(self.operations)):
             for right in range(len(self.operations)):
                 self.multiply_mod_lattice(left, right)
+
+
+def apply_magnetic_bias(
+    group: SpaceGroup,
+    real_lattice_vectors,
+    magnetic_bias_direction,
+    *,
+    tolerance: float | None = None,
+) -> SpaceGroup:
+    """Return the unitary/antiunitary subgroup preserved by an axial bias.
+
+    The input operations are spatial Seitz representatives. Operations taking
+    the Cartesian axial vector B to -B are represented as Theta g.
+    """
+
+    if group.dimension != 2:
+        raise NotImplementedError("Magnetic-bias symmetry classification currently supports 2D groups.")
+    if any(operation.antiunitary for operation in group.operations):
+        raise ValueError("Magnetic bias must be applied to spatial operations without antiunitary flags.")
+    threshold = group.tolerance if tolerance is None else float(tolerance)
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("Magnetic-bias tolerance must be positive and finite.")
+    lattice = np.asarray(real_lattice_vectors, dtype=float)
+    if lattice.shape != (2, 2) or not np.all(np.isfinite(lattice)):
+        raise ValueError("real_lattice_vectors must be a finite 2 x 2 matrix.")
+    bias = np.asarray(magnetic_bias_direction, dtype=float)
+    if bias.shape != (3,) or not np.all(np.isfinite(bias)):
+        raise ValueError("magnetic_bias_direction must be a finite Cartesian three-vector.")
+    norm = float(np.linalg.norm(bias))
+    if norm <= threshold:
+        raise ValueError("magnetic_bias_direction must have non-zero length.")
+    bias = bias / norm
+
+    inverse_lattice_t = np.linalg.inv(lattice.T)
+    retained = []
+    for operation in group.operations:
+        rotation_2d = lattice.T @ operation.rotation @ inverse_lattice_t
+        isometry_residual = float(
+            np.linalg.norm(rotation_2d.T @ rotation_2d - np.eye(2), ord="fro")
+        )
+        if isometry_residual > threshold:
+            raise ValueError(
+                f"Operation {operation.name or '<unnamed>'!r} is not a Cartesian isometry "
+                f"(residual={isometry_residual:.6g})."
+            )
+        rotation_3d = np.eye(3)
+        rotation_3d[:2, :2] = rotation_2d
+        transformed = float(np.linalg.det(rotation_3d)) * (rotation_3d @ bias)
+        if np.linalg.norm(transformed - bias) <= threshold:
+            antiunitary = False
+        elif np.linalg.norm(transformed + bias) <= threshold:
+            antiunitary = True
+        else:
+            continue
+        retained.append(
+            SpaceGroupOperation(
+                operation.rotation,
+                operation.translation,
+                operation.name,
+                antiunitary,
+            )
+        )
+    if not retained:
+        raise ValueError("Magnetic bias removes every supplied space-group operation.")
+    return SpaceGroup(retained, group.tolerance)
 
 
 @dataclass(frozen=True)

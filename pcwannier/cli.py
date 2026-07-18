@@ -12,6 +12,7 @@ from .logging_utils import configure_logging
 from .outputs import write_base_figures, write_interpolation_outputs, write_outputs
 from .runtime_info import format_elapsed, format_memory, memory_snapshot, now, start_memory_tracking
 from .sources.comsol import load_comsol_mesh, load_input
+from .symmetry import load_builtin_finite_groups, load_finite_group
 from .timing import timed_step
 
 LOGGER = logging.getLogger(__name__)
@@ -19,7 +20,13 @@ LOGGER = logging.getLogger(__name__)
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=f"PCWannier v{__version__}")
-    parser.add_argument("-i", "--input", required=True, help="Input incar file path")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("-i", "--input", help="Input incar file path")
+    mode.add_argument(
+        "--group",
+        metavar="NAME",
+        help="Print a finite-group character table and exit, for example: --group c4v",
+    )
     parser.add_argument("-t", "--threads", type=int, default=os.cpu_count() or 1, help="Number of worker threads")
     parser.add_argument(
         "--backend",
@@ -45,8 +52,12 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     started_at = now()
-    start_memory_tracking()
     args = parse_args(argv)
+    if args.group is not None:
+        print(_format_finite_group_table(_load_cli_finite_group(args.group)))
+        return 0
+
+    start_memory_tracking()
     out_dir = Path(args.out).expanduser().resolve() if args.out is not None else None
     log_path = Path(args.log)
     if out_dir is not None and not log_path.is_absolute():
@@ -160,6 +171,86 @@ def _redirect_cache_paths_to_out_dir(config, out_dir: Path) -> None:
             continue
         path = Path(str(value))
         setattr(config, attr, str(out_dir / path.name))
+
+
+def _load_cli_finite_group(value: str):
+    requested = Path(value).expanduser()
+    candidates = [requested]
+    if requested.suffix == "":
+        candidates.append(requested.with_suffix(".yaml"))
+    for candidate in candidates:
+        if candidate.is_file():
+            return load_finite_group(candidate.resolve())
+
+    key = requested.stem.casefold()
+    library = load_builtin_finite_groups()
+    matches = [
+        definition
+        for definition in library.definitions
+        if definition.name.casefold() == key
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    available = ", ".join(definition.name for definition in library.definitions)
+    raise ValueError(f"Unknown finite group {value!r}; available groups: {available}.")
+
+
+def _format_finite_group_table(definition) -> str:
+    table = definition.table
+    classes = table.conjugacy_classes
+    class_names = [f"K{index + 1}" for index in range(len(classes))]
+    rows = [["irrep", "dim", *class_names]]
+    for irrep in definition.irreps:
+        rows.append(
+            [
+                irrep.name,
+                str(irrep.dimension),
+                *[
+                    _format_character(irrep.characters[value.element_indices[0]])
+                    for value in classes
+                ],
+            ]
+        )
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
+    rendered_rows = [
+        "  ".join(value.rjust(widths[index]) for index, value in enumerate(row))
+        for row in rows
+    ]
+    class_lines = [
+        f"  {name}: {', '.join(table.element_names[index] for index in value.element_indices)}"
+        for name, value in zip(class_names, classes)
+    ]
+    return "\n".join(
+        [
+            f"Finite group: {definition.name}",
+            f"Order: {table.order}",
+            f"Canonical elements: {', '.join(table.element_names)}",
+            "Conjugacy classes:",
+            *class_lines,
+            "Character table:",
+            *rendered_rows,
+            "Available site_irrep names: "
+            + ", ".join(irrep.name for irrep in definition.irreps),
+        ]
+    )
+
+
+def _format_character(value: complex) -> str:
+    scalar = complex(value)
+    tolerance = 1.0e-10
+    real = 0.0 if abs(scalar.real) < tolerance else scalar.real
+    imag = 0.0 if abs(scalar.imag) < tolerance else scalar.imag
+    if imag == 0.0:
+        rounded = round(real)
+        return str(int(rounded)) if abs(real - rounded) < tolerance else f"{real:.8g}"
+    if real == 0.0:
+        if abs(imag - 1.0) < tolerance:
+            return "i"
+        if abs(imag + 1.0) < tolerance:
+            return "-i"
+        return f"{imag:.8g}i"
+    sign = "+" if imag > 0.0 else "-"
+    return f"{real:.8g}{sign}{abs(imag):.8g}i"
 
 
 if __name__ == "__main__":

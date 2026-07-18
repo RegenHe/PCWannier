@@ -54,13 +54,19 @@ _SPACE_GROUP_ALIASES = {
 
 def resolve_symmetry_file(path: str | Path, base_dir: str | Path) -> Path:
     requested = Path(path)
-    explicit = requested if requested.is_absolute() else Path(base_dir) / requested
-    if explicit.is_file():
-        return explicit.resolve()
-    resource_name = _SPACE_GROUP_ALIASES.get(requested.name.lower(), requested.name)
+    requested_candidates = [requested]
+    if requested.suffix == "":
+        requested_candidates.append(requested.with_suffix(".yaml"))
+    for candidate in requested_candidates:
+        explicit = candidate if candidate.is_absolute() else Path(base_dir) / candidate
+        if explicit.is_file():
+            return explicit.resolve()
+    resource_name = requested_candidates[-1].name.lower()
+    resource_name = _SPACE_GROUP_ALIASES.get(resource_name, resource_name)
     library = resources.files("pcwannier.symmetry").joinpath("space_groups", resource_name)
     if library.is_file():
         return Path(str(library))
+    explicit = requested if requested.is_absolute() else Path(base_dir) / requested
     raise FileNotFoundError(
         f"Space-group file {explicit} does not exist, and {requested.name!r} was not found "
         "in the built-in space_groups library."

@@ -132,6 +132,21 @@ def test_existing_custom_space_group_takes_priority_over_builtin_name(tmp_path):
     assert load_space_group(resolved).name == "CustomP4mm"
 
 
+def test_extensionless_space_group_names_resolve_builtin_and_custom_files(tmp_path):
+    assert resolve_symmetry_file("p4mm", tmp_path).name == "p4mm.yaml"
+
+    incar = tmp_path / "incar"
+    incar.write_text(_minimal_incar().replace("p4mm.yaml", "p4mm"), encoding="utf-8")
+    assert load_config(incar).symmetry_resolved_path.name == "p4mm.yaml"
+
+    raw = yaml.safe_load(P4MM.read_text(encoding="utf-8"))
+    raw["name"] = "ExtensionlessCustom"
+    custom = tmp_path / "custom_square.yaml"
+    custom.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    assert resolve_symmetry_file("custom_square", tmp_path) == custom.resolve()
+
+
 @pytest.mark.parametrize(
     "forbidden",
     ("irreps", "subgroups", "wannier_targets", "representation_analysis"),

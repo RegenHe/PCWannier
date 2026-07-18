@@ -148,6 +148,25 @@ def test_fatband_argument_removed():
         parse_args(["-i", "unused", "--fatband"])
 
 
+def test_group_mode_prints_character_table_without_incar_or_log(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["--group", "c4v"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Finite group: C4v" in output
+    assert "Canonical elements: E, C4, C2, C4_inv" in output
+    assert "Conjugacy classes:" in output
+    assert "Character table:" in output
+    assert "Available site_irrep names: A1, A2, B1, B2, E" in output
+    assert not (tmp_path / "log.txt").exists()
+
+
+def test_input_and_group_modes_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        parse_args(["-i", "incar", "--group", "c4v"])
+
+
 def _config(base_dir: Path):
     config = SimpleNamespace(
         name="synthetic",

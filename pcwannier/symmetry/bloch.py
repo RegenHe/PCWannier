@@ -10,6 +10,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from .cache import SewingMatrixCache, SewingMatrixCacheEntry, load_sewing_matrix_cache
+from .field_action import cartesian_field_matrix
 from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
 from .specs import BlochConvention, FieldKind
 
@@ -17,7 +18,7 @@ LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..compute.state import StateCollection
-    from .analysis import SewingMatrixRequest
+    from .sewing import SewingMatrixRequest
     from .representation import SymmetryContext
 
 
@@ -234,7 +235,7 @@ class BlochSymmetryAction:
         transformed_k = operation.act_reciprocal(source_k)
         stencil = self._stencil(operation)
         sampled = stencil.apply(values)
-        component_matrix = _cartesian_field_matrix(
+        component_matrix = cartesian_field_matrix(
             operation, self.real_lattice_vectors, field_kind, self.tolerance
         )
         if field_kind in {
@@ -269,29 +270,6 @@ class BlochSymmetryAction:
         stencil = self.interpolator.stencil(preimages)
         self._stencils[key] = stencil
         return stencil
-
-
-def _cartesian_field_matrix(
-    operation: SpaceGroupOperation,
-    real_lattice_vectors,
-    field_kind: FieldKind,
-    tolerance: float,
-) -> np.ndarray:
-    # Kept local to avoid a bloch.py <-> analysis.py import cycle.
-    lattice = np.asarray(real_lattice_vectors, dtype=float)
-    rotation = lattice.T @ operation.rotation @ np.linalg.inv(lattice.T)
-    residual = float(np.linalg.norm(rotation.T @ rotation - np.eye(operation.dimension), ord="fro"))
-    if residual > tolerance:
-        raise ValueError(f"Fractional rotation is not a lattice isometry (residual={residual:.6g}).")
-    if field_kind in {FieldKind.SCALAR, FieldKind.ELECTRIC_Z}:
-        return np.ones((1, 1), dtype=float)
-    if field_kind == FieldKind.MAGNETIC_AXIAL_Z:
-        return np.asarray([[float(np.linalg.det(rotation))]], dtype=float)
-    if field_kind == FieldKind.ELECTRIC_POLAR_VECTOR:
-        return rotation
-    if field_kind == FieldKind.MAGNETIC_AXIAL_VECTOR:
-        return float(np.linalg.det(rotation)) * rotation
-    raise ValueError(f"Unsupported field kind: {field_kind!r}.")
 
 
 def coefficient_metric_overlap(left, right, metric) -> np.ndarray:
@@ -370,6 +348,9 @@ class StateBlochSymmetryProvider:
         )
         self._validate_periodic_node_data(context.model.boundary_tolerance)
         self._sewing_cache: dict[tuple[object, ...], SewingMatrixCacheEntry] = {}
+        self._transform_inverse_cache: dict[tuple[int, ...], np.ndarray] = {}
+        self._band_lowdin_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], np.ndarray] = {}
+        self._band_basis_sewing_cache: dict[tuple[object, ...], np.ndarray] = {}
         self._cache_fingerprint: str | None = None
         cached_names = {
             str(value).upper() for value in getattr(state.config, "use_cached_data", ())
@@ -549,44 +530,45 @@ class StateBlochSymmetryProvider:
             source_k_fractional=source_k_fractional,
             target_band_indices=full_target,
         )
+        cache_key = (
+            *self._sewing_cache_key(request),
+            requested_source,
+            requested_target,
+        )
+        cached = self._band_basis_sewing_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
         internal = np.asarray(self.sewing_matrix(request), dtype=np.complex128)
-        transforms = self.state.get_transform()
-        source_transform = np.asarray(
-            transforms[self._state_index(source_index)], dtype=np.complex128
-        )
-        target_transform = np.asarray(
-            transforms[self._state_index(target_index)], dtype=np.complex128
-        )
-        if source_transform.shape != (len(full_source), len(full_source)) or target_transform.shape != (
-            len(full_target), len(full_target)
-        ):
-            raise ValueError("Outer-window orthogonalization transform has an invalid shape.")
-
-        try:
-            source_inverse = np.linalg.inv(source_transform)
-            target_inverse = np.linalg.inv(target_transform)
-        except np.linalg.LinAlgError as exc:
-            raise ValueError("Outer-window orthogonalization transform is singular.") from exc
+        source_inverse = self._transform_inverse(source_index, len(full_source))
+        target_inverse = self._transform_inverse(target_index, len(full_target))
         source_right_inverse = (
             source_inverse.conj() if operation.antiunitary else source_inverse
         )
         fem_overlap = target_inverse.conj().T @ internal @ source_right_inverse
-        source_metric = source_inverse.conj().T @ source_inverse
-        target_metric = target_inverse.conj().T @ target_inverse
 
         source_positions = [full_source.index(band) for band in requested_source]
         target_positions = [full_target.index(band) for band in requested_target]
-        source_lowdin = _inverse_sqrt_hermitian(
-            source_metric[np.ix_(source_positions, source_positions)],
+        source_lowdin = self._band_lowdin_factor(
+            source_index,
+            full_source,
+            requested_source,
+            source_inverse,
             description="source band block overlap",
         )
-        target_lowdin = _inverse_sqrt_hermitian(
-            target_metric[np.ix_(target_positions, target_positions)],
+        target_lowdin = self._band_lowdin_factor(
+            target_index,
+            full_target,
+            requested_target,
+            target_inverse,
             description="target band block overlap",
         )
         block = fem_overlap[np.ix_(target_positions, source_positions)]
         source_factor = source_lowdin.conj() if operation.antiunitary else source_lowdin
-        return target_lowdin.conj().T @ block @ source_factor
+        result = target_lowdin.conj().T @ block @ source_factor
+        result = np.asarray(result, dtype=np.complex128)
+        result.setflags(write=False)
+        self._band_basis_sewing_cache[cache_key] = result
+        return result.copy()
 
     def request_for_mapping(
         self,
@@ -597,7 +579,7 @@ class StateBlochSymmetryProvider:
         source_k_fractional=None,
         target_band_indices=None,
     ) -> SewingMatrixRequest:
-        from .analysis import SewingMatrixRequest
+        from .sewing import SewingMatrixRequest
 
         operation = operation or self.context.model.group.operations[mapping.operation_index]
         source_index = tuple(mapping.source_k_index)
@@ -718,6 +700,48 @@ class StateBlochSymmetryProvider:
         return np.exp(
             -self.bloch_sign * 2j * np.pi * (self.fractional_vertices @ shift)
         )
+
+    def _transform_inverse(self, index, band_count: int) -> np.ndarray:
+        key = tuple(int(value) for value in index)
+        cached = self._transform_inverse_cache.get(key)
+        if cached is not None:
+            return cached
+        transform = np.asarray(
+            self.state.get_transform()[self._state_index(key)], dtype=np.complex128
+        )
+        if transform.shape != (band_count, band_count):
+            raise ValueError("Outer-window orthogonalization transform has an invalid shape.")
+        try:
+            inverse = np.linalg.inv(transform)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError("Outer-window orthogonalization transform is singular.") from exc
+        inverse.setflags(write=False)
+        self._transform_inverse_cache[key] = inverse
+        return inverse
+
+    def _band_lowdin_factor(
+        self,
+        index,
+        full_bands: tuple[int, ...],
+        requested_bands: tuple[int, ...],
+        transform_inverse: np.ndarray,
+        *,
+        description: str,
+    ) -> np.ndarray:
+        index_key = tuple(int(value) for value in index)
+        key = (index_key, requested_bands)
+        cached = self._band_lowdin_cache.get(key)
+        if cached is not None:
+            return cached
+        positions = [full_bands.index(band) for band in requested_bands]
+        metric = transform_inverse.conj().T @ transform_inverse
+        factor = _inverse_sqrt_hermitian(
+            metric[np.ix_(positions, positions)],
+            description=description,
+        )
+        factor.setflags(write=False)
+        self._band_lowdin_cache[key] = factor
+        return factor
 
     def _sewing_cache_key(self, request: SewingMatrixRequest) -> tuple[object, ...]:
         return self._cache_key(

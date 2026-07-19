@@ -13,10 +13,11 @@ from pcwannier.symmetry import (
     SpaceGroupOperation,
     SymmetryCalculationSpec,
     WannierTargetSpec,
-    analyze_little_group,
     build_symmetry_context,
     build_symmetry_stars,
     cartesian_field_matrix,
+    little_group,
+    SewingMatrixRequest,
     reduce_fractional,
     resolve_little_group,
     compose_symmetry_model,
@@ -301,11 +302,28 @@ def test_little_group_sewing_character_and_field_kinds():
     )
     model = model_from_space_group("p4", SpaceGroup(operations))
     provider = _FakeSewingProvider()
-    analysis = analyze_little_group(model.group, [0.5, 0.0], [3, 4], provider)
+    kpoint = np.asarray([0.5, 0.0])
+    elements = little_group(model.group, kpoint)
+    matrices = []
+    for element in elements:
+        operation = model.group.operations[element.operation_index]
+        matrices.append(
+            provider.sewing_matrix(
+                SewingMatrixRequest(
+                    element.operation_index,
+                    operation,
+                    kpoint,
+                    kpoint,
+                    element.reciprocal_lattice_shift,
+                    (3, 4),
+                    FieldKind.SCALAR,
+                )
+            )
+        )
 
-    names = [model.group.operations[entry.element.operation_index].name for entry in analysis.entries]
+    names = [model.group.operations[element.operation_index].name for element in elements]
     assert names == ["E", "C2"]
-    assert np.allclose(analysis.characters, [2.0, 0.0])
+    assert np.allclose([np.trace(matrix) for matrix in matrices], [2.0, 0.0])
     c2_request = next(request for request in provider.requests if request.operation.name == "C2")
     assert c2_request.reciprocal_lattice_shift == (-1, 0)
 

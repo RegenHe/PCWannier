@@ -296,13 +296,14 @@ def test_projective_high_symmetry_analysis_keeps_direct_intertwiner(monkeypatch)
         lambda *args, **kwargs: 0.0,
     )
     result = run_symmetry_analysis(state, context, provider=TargetProvider())
-    point = result.points[0]
+    point = result.physical.points[0]
+    compatibility = result.target_compatibility(point.name)
 
     assert point.factor_system is not None
     assert not point.factor_system.cohomologically_trivial
     assert point.physical_decomposition is None
-    assert point.target_decomposition is None
-    assert point.compatibility is None
-    assert point.intertwiner_dimension is not None
-    assert point.intertwiner_dimension > 0
+    assert compatibility.target_decomposition is None
+    assert compatibility.compatibility is None
+    assert compatibility.intertwiner_dimension is not None
+    assert compatibility.intertwiner_dimension > 0
     assert point.diagnostics.max_twisted_composition_residual < 1.0e-12

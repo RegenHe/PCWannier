@@ -17,11 +17,9 @@ from pcwannier.symmetry import (
     DegeneracyTolerance,
     FieldKind,
     IrrepDecomposition,
-    SewingMatrixRequest,
     SpaceGroupOperation,
     StateBlochSymmetryProvider,
     analyze_bloch_symmetry,
-    analyze_little_group,
     apply_magnetic_bias_to_model,
     build_symmetry_context,
     coefficient_metric_overlap,
@@ -203,11 +201,9 @@ def test_state_provider_gives_a1_and_e_sewing_matrices():
     invariant = np.asarray([np.cos(2 * np.pi * x) + np.cos(2 * np.pi * y)])
     a1_state = _synthetic_state(invariant, energies=[1.0])
     a1_provider = StateBlochSymmetryProvider(a1_state, context)
-    analysis = analyze_little_group(model.group, [0.0, 0.0], [0], a1_provider)
-    c4_entry = next(
-        entry for entry in analysis.entries if model.group.operations[entry.element.operation_index].name == "C4"
-    )
-    assert np.allclose(c4_entry.matrix, [[1.0]], atol=1e-12)
+    c4_mapping = a1_provider.mapping(c4_index, (0, 0))
+    c4_matrix = a1_provider.sewing_matrix_for_mapping(c4_mapping, (0,))
+    assert np.allclose(c4_matrix, [[1.0]], atol=1e-12)
 
     gamma_only = replace(
         model,
@@ -218,9 +214,11 @@ def test_state_provider_gives_a1_and_e_sewing_matrices():
     )
     gamma_context = build_symmetry_context(gamma_only, [np.array([0.0]), np.array([0.0])])
     full = run_symmetry_analysis(state, gamma_context)
-    assert full.points[0].diagnostics.unitarity_error < 1e-12
-    assert full.points[0].diagnostics.max_composition_residual < 1e-12
-    assert full.points[0].physical_decomposition.multiplicities["E"] == 1
+    point = full.physical.point("Gamma")
+    assert point.diagnostics.unitarity_error < 1e-12
+    assert point.diagnostics.max_composition_residual < 1e-12
+    assert point.physical_decomposition.multiplicities["E"] == 1
+    assert full.target_compatibility("Gamma").point_name == "Gamma"
 
 
 def test_state_provider_roundtrips_full_outer_sewing_cache(tmp_path, monkeypatch):
@@ -368,7 +366,7 @@ def test_physical_bloch_analysis_needs_no_wannier_targets_and_identifies_irrep()
     state = _synthetic_state(fields, energies=[1.0, 1.0])
 
     result = run_bloch_symmetry_analysis(state, context)
-    point = result.points[0]
+    point = result.point("Gamma")
     block = point.degenerate_blocks[0]
 
     assert point.little_group_name == "C4v"
@@ -376,6 +374,13 @@ def test_physical_bloch_analysis_needs_no_wannier_targets_and_identifies_irrep()
     assert block.decomposition is not None
     assert block.decomposition.multiplicities["E"] == 1
     assert block.irrep_unavailable_reason is None
+    with pytest.raises(KeyError, match="Unknown Bloch symmetry analysis point"):
+        result.point("Missing")
+    combined = run_symmetry_analysis(state, context)
+    assert combined.physical.point("Gamma").physical_decomposition.multiplicities["E"] == 1
+    assert combined.target_compatibilities == ()
+    with pytest.raises(KeyError, match="No target compatibility"):
+        combined.target_compatibility("Gamma")
 
 
 def test_bloch_analysis_reports_leakage_without_constructing_an_irrep():
@@ -488,6 +493,42 @@ def test_bloch_analysis_reuses_one_full_outer_sewing_per_operation():
 
     assert calls == len(model.group.operations)
     assert len(provider.cached_sewing_matrices) == len(model.group.operations)
+    assert len(provider._transform_inverse_cache) == 1
+    assert len(provider._band_lowdin_cache) == 1
+    assert len(provider._band_basis_sewing_cache) == len(model.group.operations)
+
+    run_bloch_symmetry_analysis(state, context, provider=provider)
+    assert calls == len(model.group.operations)
+    assert len(provider._transform_inverse_cache) == 1
+    assert len(provider._band_lowdin_cache) == 1
+    assert len(provider._band_basis_sewing_cache) == len(model.group.operations)
+
+
+def test_band_basis_sewing_cache_returns_independent_arrays():
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0, 1), None),)
+    )
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    provider = StateBlochSymmetryProvider(
+        _synthetic_state(fields, energies=[1.0, 1.0]), context
+    )
+    c4_index = model.group.operation_index(model.group.operation_by_name("C4"))
+    mapping = provider.mapping(c4_index, (0, 0))
+
+    first = provider.sewing_matrix_in_band_basis(mapping, (0, 1))
+    expected = first.copy()
+    first[0, 0] = 99.0
+    second = provider.sewing_matrix_in_band_basis(mapping, (0, 1))
+
+    assert np.allclose(second, expected)
+    assert len(provider._band_basis_sewing_cache) == 1
 
 
 def test_bloch_preanalysis_writes_reusable_s_and_d_text_caches(tmp_path):
@@ -574,18 +615,3 @@ def test_degeneracy_metric_compatibility_and_intertwiner_helpers():
     assert intertwiner_residual(np.eye(2), np.eye(2), d_matrix, d_matrix + 0.1) > 0.0
     with pytest.raises(ValueError, match="N_W"):
         intertwiner_residual(np.ones((2, 1)), np.ones((2, 1)), np.eye(2), np.eye(2))
-
-
-def test_nonclosed_subspace_reports_nonunitary_projection():
-    matrix = np.array([[0.5 + 0.0j]])
-
-    class Provider:
-        def sewing_matrix(self, request: SewingMatrixRequest) -> np.ndarray:
-            return matrix
-
-    model = p4mm_model()
-    result = analyze_little_group(model.group, [0.0, 0.0], [0], Provider())
-    c4 = next(
-        entry for entry in result.entries if model.group.operations[entry.element.operation_index].name == "C4"
-    )
-    assert np.linalg.norm(c4.matrix.conj().T @ c4.matrix - np.eye(1)) == pytest.approx(0.75)

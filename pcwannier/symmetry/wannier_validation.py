@@ -7,7 +7,7 @@ from scipy.spatial import cKDTree
 
 from ..compute.integration import MeshIntegralView
 from ..compute.wannier import generate_wannier
-from .analysis import cartesian_field_matrix
+from .field_action import cartesian_field_matrix
 from .bloch import fractional_mesh_vertices
 
 

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from .group import SpaceGroup, SpaceGroupOperation
 from .specs import (
     DegeneracyTolerance,
-    FieldKind,
     RepresentationPointSpec,
 )
 from .twisted import TwistedRepresentation, build_twisted_representation
@@ -23,76 +22,10 @@ if TYPE_CHECKING:
     from .definition import FactorSystem, ResolvedLittleGroup
 
 
-def cartesian_field_matrix(
-    operation: SpaceGroupOperation,
-    real_lattice_vectors,
-    field_kind: FieldKind,
-    tolerance: float = 1e-8,
-) -> np.ndarray:
-    lattice = np.asarray(real_lattice_vectors, dtype=float)
-    if lattice.shape != (operation.dimension, operation.dimension):
-        raise ValueError(
-            f"real_lattice_vectors must have shape {(operation.dimension, operation.dimension)}."
-        )
-    cartesian_rotation = lattice.T @ operation.rotation @ np.linalg.inv(lattice.T)
-    orthogonal_residual = float(
-        np.linalg.norm(cartesian_rotation.T @ cartesian_rotation - np.eye(operation.dimension), ord="fro")
-    )
-    if orthogonal_residual > tolerance:
-        raise ValueError(
-            f"Fractional rotation is not an isometry of the supplied lattice (residual={orthogonal_residual:.6g})."
-        )
-    if field_kind in {FieldKind.SCALAR, FieldKind.ELECTRIC_Z}:
-        return np.ones((1, 1), dtype=float)
-    if field_kind == FieldKind.MAGNETIC_AXIAL_Z:
-        return np.asarray([[float(np.linalg.det(cartesian_rotation))]], dtype=float)
-    if field_kind == FieldKind.ELECTRIC_POLAR_VECTOR:
-        return cartesian_rotation
-    if field_kind == FieldKind.MAGNETIC_AXIAL_VECTOR:
-        return float(np.linalg.det(cartesian_rotation)) * cartesian_rotation
-    raise ValueError(f"Unsupported field kind: {field_kind!r}.")
-
-
 @dataclass(frozen=True)
 class LittleGroupElement:
     operation_index: int
     reciprocal_lattice_shift: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class SewingMatrixRequest:
-    operation_index: int
-    operation: SpaceGroupOperation
-    source_k_fractional: np.ndarray
-    target_k_fractional: np.ndarray
-    reciprocal_lattice_shift: tuple[int, ...]
-    band_indices: tuple[int, ...]
-    field_kind: FieldKind
-    target_band_indices: tuple[int, ...] | None = None
-
-
-@runtime_checkable
-class SewingMatrixProvider(Protocol):
-    def sewing_matrix(self, request: SewingMatrixRequest) -> np.ndarray:
-        """Return d_tilde_mn(g,k), with target band m as row and source band n as column."""
-
-
-@dataclass(frozen=True)
-class LittleGroupRepresentationEntry:
-    element: LittleGroupElement
-    matrix: np.ndarray
-    character: complex
-
-
-@dataclass(frozen=True)
-class LittleGroupAnalysis:
-    k_fractional: np.ndarray
-    band_indices: tuple[int, ...]
-    entries: tuple[LittleGroupRepresentationEntry, ...]
-
-    @property
-    def characters(self) -> tuple[complex, ...]:
-        return tuple(entry.character for entry in self.entries)
 
 
 @dataclass(frozen=True)
@@ -169,27 +102,52 @@ class BlochSymmetryPointAnalysis:
     diagnostics: SewingDiagnostics
     degenerate_blocks: tuple[DegenerateBlock, ...]
     physical_decomposition: IrrepDecomposition | None
-    little_group_name: str | None = None
+    resolved_little_group: ResolvedLittleGroup | None = None
     unitary_subgroup_name: str | None = None
     unitary_operation_names: tuple[str, ...] = ()
     antiunitary_operation_names: tuple[str, ...] = ()
-    conjugacy_classes: tuple[tuple[str, ...], ...] = ()
-    finite_group_mapping: tuple[tuple[str, str], ...] = ()
-    factor_system: FactorSystem | None = None
     physical_twisted_representation: TwistedRepresentation | None = None
     outer_unitarity_error: float = 0.0
     outer_candidate_excluded_bands: tuple[int, ...] = ()
 
     @property
     def characters(self) -> dict[str, complex]:
-        """Compatibility alias containing unitary characters only."""
+        """Unitary characters; antiunitary traces are intentionally excluded."""
 
         return self.unitary_characters
+
+    @property
+    def little_group_name(self) -> str | None:
+        return None if self.resolved_little_group is None else self.resolved_little_group.name
+
+    @property
+    def factor_system(self) -> FactorSystem | None:
+        return (
+            None
+            if self.resolved_little_group is None
+            else self.resolved_little_group.factor_system
+        )
+
+    @property
+    def conjugacy_classes(self) -> tuple[tuple[str, ...], ...]:
+        return _resolved_conjugacy_classes(self.resolved_little_group)
+
+    @property
+    def finite_group_mapping(self) -> tuple[tuple[str, str], ...]:
+        return _resolved_finite_mapping(self.resolved_little_group)
 
 
 @dataclass(frozen=True)
 class BlochSymmetryAnalysisResult:
     points: tuple[BlochSymmetryPointAnalysis, ...]
+
+    def point(self, name: str) -> BlochSymmetryPointAnalysis:
+        matches = tuple(point for point in self.points if point.name == name)
+        if not matches:
+            raise KeyError(f"Unknown Bloch symmetry analysis point: {name!r}.")
+        if len(matches) != 1:
+            raise RuntimeError(f"Bloch symmetry analysis point name {name!r} is ambiguous.")
+        return matches[0]
 
 
 @dataclass(frozen=True)
@@ -204,35 +162,21 @@ class TargetCompatibilityAnalysis:
 
 
 @dataclass(frozen=True)
-class HighSymmetryPointAnalysis:
-    name: str
-    requested_k_fractional: np.ndarray
-    sampled_k_fractional: np.ndarray
-    k_index: tuple[int, ...]
-    band_indices: tuple[int, ...]
-    little_group_operation_indices: tuple[int, ...]
-    sewing_matrices: dict[str, np.ndarray]
-    characters: dict[str, complex]
-    diagnostics: SewingDiagnostics
-    degenerate_blocks: tuple[DegenerateBlock, ...]
-    physical_decomposition: IrrepDecomposition | None
-    target_characters: dict[str, complex]
-    target_decomposition: IrrepDecomposition | None
-    compatibility: RepresentationCompatibility | None
-    little_group_name: str | None = None
-    conjugacy_classes: tuple[tuple[str, ...], ...] = ()
-    finite_group_mapping: tuple[tuple[str, str], ...] = ()
-    factor_system: FactorSystem | None = None
-    physical_twisted_representation: TwistedRepresentation | None = None
-    target_twisted_representation: TwistedRepresentation | None = None
-    intertwiner_dimension: int | None = None
-
-
-@dataclass(frozen=True)
 class SymmetryAnalysisResult:
-    points: tuple[HighSymmetryPointAnalysis, ...]
-    bloch: BlochSymmetryAnalysisResult | None = None
+    physical: BlochSymmetryAnalysisResult
     target_compatibilities: tuple[TargetCompatibilityAnalysis, ...] = ()
+
+    def target_compatibility(self, point_name: str) -> TargetCompatibilityAnalysis:
+        matches = tuple(
+            result
+            for result in self.target_compatibilities
+            if result.point_name == point_name
+        )
+        if not matches:
+            raise KeyError(f"No target compatibility was requested at point {point_name!r}.")
+        if len(matches) != 1:
+            raise RuntimeError(f"Target compatibility point name {point_name!r} is ambiguous.")
+        return matches[0]
 
 
 def little_group(group: SpaceGroup, k_fractional) -> tuple[LittleGroupElement, ...]:
@@ -248,38 +192,6 @@ def little_group(group: SpaceGroup, k_fractional) -> tuple[LittleGroupElement, .
                 LittleGroupElement(operation_index, tuple(int(value) for value in reciprocal_shift))
             )
     return tuple(elements)
-
-
-def analyze_little_group(
-    group: SpaceGroup,
-    k_fractional,
-    band_indices,
-    provider: SewingMatrixProvider,
-    *,
-    field_kind: FieldKind = FieldKind.SCALAR,
-) -> LittleGroupAnalysis:
-    kpoint = np.asarray(k_fractional, dtype=float)
-    bands = _validated_bands(band_indices)
-    entries = []
-    for element in little_group(group, kpoint):
-        operation = group.operations[element.operation_index]
-        sewing_at = getattr(provider, "sewing_matrix_at", None)
-        if sewing_at is not None:
-            raw_matrix = sewing_at(element.operation_index, kpoint, bands, operation=operation)
-        else:
-            request = SewingMatrixRequest(
-                operation_index=element.operation_index,
-                operation=operation,
-                source_k_fractional=kpoint.copy(),
-                target_k_fractional=kpoint.copy(),
-                reciprocal_lattice_shift=element.reciprocal_lattice_shift,
-                band_indices=bands,
-                field_kind=field_kind,
-            )
-            raw_matrix = provider.sewing_matrix(request)
-        matrix = _validated_sewing(raw_matrix, len(bands), operation)
-        entries.append(LittleGroupRepresentationEntry(element, matrix, complex(np.trace(matrix))))
-    return LittleGroupAnalysis(kpoint.copy(), bands, tuple(entries))
 
 
 def group_degenerate_bands(
@@ -495,21 +407,19 @@ def run_symmetry_analysis(
 ) -> SymmetryAnalysisResult:
     """Run physical analysis and optional, explicitly requested target comparisons."""
 
-    bloch = run_bloch_symmetry_analysis(state, context, provider=provider)
+    physical = run_bloch_symmetry_analysis(state, context, provider=provider)
     spec = context.model.representation_analysis
     if spec is None:
-        return SymmetryAnalysisResult((), bloch)
+        return SymmetryAnalysisResult(physical)
     point_specs = {point.name: point for point in spec.points}
-    combined = []
     comparisons = []
-    for physical in bloch.points:
-        result, comparison = _attach_target_compatibility(
-            context, point_specs[physical.name], physical
+    for physical_point in physical.points:
+        comparison = _analyze_target_compatibility(
+            context, point_specs[physical_point.name], physical_point
         )
-        combined.append(result)
         if comparison is not None:
             comparisons.append(comparison)
-    return SymmetryAnalysisResult(tuple(combined), bloch, tuple(comparisons))
+    return SymmetryAnalysisResult(physical, tuple(comparisons))
 
 
 def _analyze_bloch_point(
@@ -530,6 +440,7 @@ def _analyze_bloch_point(
     missing = sorted(set(bands) - set(available))
     if missing:
         raise ValueError(f"Analysis point {point.name!r} is missing actual bands {missing}.")
+    selected_positions = [available.index(band) for band in bands]
 
     elements = little_group(group, point.k_fractional)
     operation_indices = tuple(element.operation_index for element in elements)
@@ -552,8 +463,7 @@ def _analyze_bloch_point(
         request = provider.request_for_mapping(mapping, available, source_k_fractional=point.k_fractional)
         full_matrix = _validated_sewing(provider.sewing_matrix(request), len(available), operation)
         full_matrices[_operation_name(group, element.operation_index)] = full_matrix
-        positions = [available.index(band) for band in bands]
-        internal_matrix = full_matrix[np.ix_(positions, positions)].copy()
+        internal_matrix = full_matrix[np.ix_(selected_positions, selected_positions)].copy()
         band_basis = getattr(provider, "sewing_matrix_in_band_basis", None)
         matrix = (
             internal_matrix
@@ -780,60 +690,58 @@ def _analyze_bloch_point(
         diagnostics=diagnostics,
         degenerate_blocks=tuple(block_results),
         physical_decomposition=physical_decomposition,
-        little_group_name=None if resolved_little_group is None else resolved_little_group.name,
+        resolved_little_group=resolved_little_group,
         unitary_subgroup_name=unitary_subgroup_name,
         unitary_operation_names=tuple(_operation_name(group, index) for index in unitary_indices),
         antiunitary_operation_names=tuple(
             _operation_name(group, index) for index in antiunitary_indices
         ),
-        conjugacy_classes=_resolved_conjugacy_classes(resolved_little_group),
-        finite_group_mapping=_resolved_finite_mapping(resolved_little_group),
-        factor_system=None if resolved_little_group is None else resolved_little_group.factor_system,
         physical_twisted_representation=physical_twisted,
         outer_unitarity_error=outer_unitarity,
         outer_candidate_excluded_bands=outer_candidates,
     )
 
 
-def _attach_target_compatibility(
+def _analyze_target_compatibility(
     context: SymmetryContext,
     point: RepresentationPointSpec,
     physical: BlochSymmetryPointAnalysis,
-) -> tuple[HighSymmetryPointAnalysis, TargetCompatibilityAnalysis | None]:
+) -> TargetCompatibilityAnalysis | None:
     group = context.model.group
     operation_indices = physical.little_group_operation_indices
-    resolved_little_group = (
-        context.model.group_definition.resolve_little_group(
-            operation_indices,
-            point.k_fractional,
-            bloch_convention=context.model.bloch_convention,
-        )
-        if context.model.group_definition is not None
-        else None
-    )
+    resolved_little_group = physical.resolved_little_group
     targets = _selected_targets(context, point)
-    if targets:
-        invalid = [block for block in physical.degenerate_blocks if block.irrep_unavailable_reason and block.leakage > context.model.representation_analysis.leakage_tolerance]
-        if invalid:
-            block = invalid[0]
-            raise ValueError(
-                f"Degenerate block {block.band_indices} at representation point {point.name!r} "
-                f"is not invariant: sewing leakage={block.leakage:.6g}. Select a closed "
-                "physical subspace before target compatibility analysis."
-            )
+    if not targets:
+        return None
+    analysis_spec = context.model.representation_analysis
+    if analysis_spec is None:
+        raise RuntimeError("Target compatibility requires representation-analysis settings.")
+    invalid = [
+        block
+        for block in physical.degenerate_blocks
+        if block.irrep_unavailable_reason
+        and block.leakage > analysis_spec.leakage_tolerance
+    ]
+    if invalid:
+        block = invalid[0]
+        raise ValueError(
+            f"Degenerate block {block.band_indices} at representation point {point.name!r} "
+            f"is not invariant: sewing leakage={block.leakage:.6g}. Select a closed "
+            "physical subspace before target compatibility analysis."
+        )
     target_matrices_by_operation = {
         operation_index: _combined_target_matrix(targets, operation_index, point.k_fractional)
         for operation_index in operation_indices
-    } if targets else {}
+    }
     target_characters = {
         _operation_name(group, operation_index): complex(
             np.trace(target_matrices_by_operation[operation_index])
         )
         for operation_index in operation_indices
-    } if targets else {}
+    }
     target_twisted = (
         None
-        if not targets or resolved_little_group is None
+        if resolved_little_group is None
         else build_twisted_representation(
             resolved_little_group,
             operation_indices,
@@ -848,8 +756,7 @@ def _attach_target_compatibility(
         physical_twisted.assert_compatible(target_twisted)
 
     if (
-        targets
-        and resolved_little_group is not None
+        resolved_little_group is not None
         and resolved_little_group.factor_system.cohomologically_trivial
         and not any(resolved_little_group.factor_system.antiunitary_flags)
     ):
@@ -876,41 +783,15 @@ def _attach_target_compatibility(
             physical_twisted,
             target_twisted,
         ).dimension
-    high = HighSymmetryPointAnalysis(
-        name=physical.name,
-        requested_k_fractional=physical.requested_k_fractional,
-        sampled_k_fractional=physical.sampled_k_fractional,
-        k_index=physical.k_index,
-        band_indices=physical.band_indices,
-        little_group_operation_indices=operation_indices,
-        sewing_matrices=physical.sewing_matrices,
-        characters=physical.unitary_characters,
-        diagnostics=physical.diagnostics,
-        degenerate_blocks=physical.degenerate_blocks,
-        physical_decomposition=physical.physical_decomposition,
-        target_characters=target_characters,
-        target_decomposition=target_decomposition,
-        compatibility=compatibility,
-        little_group_name=physical.little_group_name,
-        conjugacy_classes=physical.conjugacy_classes,
-        finite_group_mapping=physical.finite_group_mapping,
-        factor_system=physical.factor_system,
-        physical_twisted_representation=physical_twisted,
-        target_twisted_representation=target_twisted,
-        intertwiner_dimension=intertwiner_dimension,
+    return TargetCompatibilityAnalysis(
+        point.name,
+        tuple(target.name for target in targets),
+        target_characters,
+        target_decomposition,
+        compatibility,
+        target_twisted,
+        intertwiner_dimension,
     )
-    comparison = None
-    if targets:
-        comparison = TargetCompatibilityAnalysis(
-            point.name,
-            tuple(target.name for target in targets),
-            target_characters,
-            target_decomposition,
-            compatibility,
-            target_twisted,
-            intertwiner_dimension,
-        )
-    return high, comparison
 
 
 def _composition_residual(
@@ -958,22 +839,6 @@ def _composition_residual(
                 float(np.linalg.norm(composed - product_matrix, ord="fro")),
             )
     return residual
-
-
-def _target_characters(
-    targets: tuple[WannierTargetRepresentation, ...],
-    operation_indices: tuple[int, ...],
-    kpoint: np.ndarray,
-) -> dict[str, complex]:
-    if not targets:
-        return {}
-    group = targets[0].group
-    return {
-        _operation_name(group, operation_index): sum(
-            complex(np.trace(target.matrix(operation_index, kpoint))) for target in targets
-        )
-        for operation_index in operation_indices
-    }
 
 
 def _combined_target_matrix(
@@ -1188,12 +1053,6 @@ def _validated_bands(band_indices) -> tuple[int, ...]:
     if not bands or any(index < 0 for index in bands) or len(set(bands)) != len(bands):
         raise ValueError("band_indices must contain unique non-negative actual Bloch-band indices.")
     return bands
-
-
-def _projected_subspace_leakage(matrix: np.ndarray, dimension: int) -> float:
-    deficit = float(dimension - np.linalg.norm(matrix, ord="fro") ** 2)
-    roundoff = 1.0e-12 * max(dimension, 1)
-    return 0.0 if deficit <= roundoff else float(np.sqrt(deficit))
 
 
 def _validated_sewing(matrix, dimension: int, operation: SpaceGroupOperation) -> np.ndarray:

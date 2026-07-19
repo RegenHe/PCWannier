@@ -1,4 +1,7 @@
 from .analysis import (
+    AntiunitaryOperationDiagnostic,
+    BlochSymmetryAnalysisResult,
+    BlochSymmetryPointAnalysis,
     DegenerateBlock,
     HighSymmetryPointAnalysis,
     IrrepDecomposition,
@@ -10,6 +13,8 @@ from .analysis import (
     SewingMatrixProvider,
     SewingMatrixRequest,
     SymmetryAnalysisResult,
+    TargetCompatibilityAnalysis,
+    analyze_bloch_symmetry,
     analyze_little_group,
     cartesian_field_matrix,
     compare_representations,
@@ -18,6 +23,7 @@ from .analysis import (
     intertwiner_residual,
     little_group,
     run_symmetry_analysis,
+    run_bloch_symmetry_analysis,
 )
 from .bloch import (
     BarycentricStencil,
@@ -147,6 +153,9 @@ from .wannier_validation import (
 
 __all__ = [
     "BarycentricStencil",
+    "AntiunitaryOperationDiagnostic",
+    "BlochSymmetryAnalysisResult",
+    "BlochSymmetryPointAnalysis",
     "BlochConvention",
     "BlochSymmetryAction",
     "apply_magnetic_bias",
@@ -211,6 +220,7 @@ __all__ = [
     "SymmetryStarPartition",
     "TargetGaugeProjection",
     "TargetGaugePropagation",
+    "TargetCompatibilityAnalysis",
     "TwistedRepresentation",
     "SymmetryModel",
     "WannierTargetSpec",
@@ -219,6 +229,7 @@ __all__ = [
     "WannierSymmetryValidation",
     "OuterWindowClosureReport",
     "analyze_little_group",
+    "analyze_bloch_symmetry",
     "build_crystallographic_orbit",
     "build_k_mappings",
     "build_little_group_twisted_pair",
@@ -260,6 +271,7 @@ __all__ = [
     "propagate_target_gauge",
     "reduce_fractional",
     "run_symmetry_analysis",
+    "run_bloch_symmetry_analysis",
     "save_sewing_matrix_cache",
     "solve_intertwiner_space",
     "symmetrize_gradient",

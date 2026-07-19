@@ -156,24 +156,34 @@ class IncarConfig:
                 "reader supports scalar Ez and Hz fields only."
             )
 
-    def validate_required(self) -> None:
+    def validate_required(self, *, mode: str = "calculation") -> None:
+        if mode not in {"calculation", "bloch_symmetry"}:
+            raise ValueError(f"Unknown config loading mode: {mode!r}.")
+        required = [
+            "lattice_const",
+            "real_lattice_vectors",
+            "k_points",
+            "band_window",
+            "dataset_file",
+            "metric_file",
+            "mesh_file",
+            "E_file",
+        ]
+        if mode == "calculation":
+            required.extend(("composition_of_b", "projections", "extension"))
+        else:
+            required.extend(("symmetry_file", "representation_analysis"))
         missing = [
             name
-            for name in (
-                "lattice_const",
-                "real_lattice_vectors",
-                "k_points",
-                "composition_of_b",
-                "band_window",
-                "projections",
-                "extension",
-                "dataset_file",
-                "metric_file",
-                "mesh_file",
-                "E_file",
-            )
+            for name in required
             if getattr(self, name) is None
-            or (name == "metric_file" and getattr(self, name) is False)
+            or (
+                name in {"metric_file", "symmetry_file"}
+                and (
+                    getattr(self, name) is False
+                    or str(getattr(self, name)).strip().lower() == "false"
+                )
+            )
         ]
         if missing:
             raise ValueError(f"Missing required incar fields: {', '.join(missing)}")
@@ -242,8 +252,11 @@ def evaluate_math_expression(expr: str) -> float:
 
 
 class IncarParser:
-    def __init__(self, filename: str | Path):
+    def __init__(self, filename: str | Path, *, mode: str = "calculation"):
         self.filename = Path(filename)
+        if mode not in {"calculation", "bloch_symmetry"}:
+            raise ValueError(f"Unknown config loading mode: {mode!r}.")
+        self.mode = mode
 
     def parse_file(self) -> IncarConfig:
         cfg = IncarConfig(base_dir=self.filename.resolve().parent)
@@ -356,7 +369,7 @@ class IncarParser:
         if unterminated:
             raise ValueError(f"Unterminated incar block(s): {', '.join(unterminated)}.")
 
-        cfg.validate_required()
+        cfg.validate_required(mode=self.mode)
         preprocess_config(cfg)
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
@@ -389,8 +402,9 @@ class IncarParser:
                     cfg.real_lattice_vectors,
                     cfg.magnetic_bias_direction,
                 )
+            analysis_only = self.mode == "bloch_symmetry"
             target_specs = None
-            if cfg.wannier_targets is not None:
+            if not analysis_only and cfg.wannier_targets is not None:
                 target_specs = tuple(
                     WannierTargetSpec(item["name"], item["center"], item["site_irrep"])
                     for item in cfg.wannier_targets
@@ -406,7 +420,7 @@ class IncarParser:
                         item["name"],
                         item["k"],
                         item["bands"],
-                        item["targets"],
+                        None if analysis_only else item["targets"],
                         degeneracy,
                     )
                     for item in cfg.representation_analysis
@@ -422,7 +436,7 @@ class IncarParser:
                     ),
                 )
             gauge = None
-            if cfg.symmetry_constrained:
+            if cfg.symmetry_constrained and not analysis_only:
                 gauge = SymmetryGaugeSpec(
                     enabled=True,
                     tolerance=cfg.symmetry_tolerance,
@@ -464,6 +478,12 @@ class IncarParser:
             raise ValueError(
                 "Symmetry calculation blocks require symmetry_file; symmetry_constrained=true also requires symmetry_file."
             )
+        if self.mode == "bloch_symmetry":
+            if cfg.symmetry_context is None or cfg.symmetry_context.model.representation_analysis is None:
+                raise ValueError(
+                    "Bloch symmetry analysis requires symmetry_file and a representation_analysis block."
+                )
+            return cfg
         if cfg.symmetry_constrained:
             if cfg.symmetry_context is None:
                 raise ValueError("symmetry_constrained=true requires symmetry_file = ./sym.yaml.")
@@ -1073,5 +1093,9 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
     return cfg
 
 
-def load_config(path: str | Path) -> IncarConfig:
-    return IncarParser(path).parse_file()
+def load_config(
+    path: str | Path,
+    *,
+    mode: str = "calculation",
+) -> IncarConfig:
+    return IncarParser(path, mode=mode).parse_file()

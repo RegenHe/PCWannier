@@ -129,6 +129,57 @@ def test_relative_out_is_resolved_once_for_cache_input_and_output(tmp_path, monk
         assert cache_path.parent == expected
 
 
+def test_cli_bloch_symmetry_analysis_stops_before_wannier_and_writes_caches(
+    tmp_path, monkeypatch
+):
+    config = _config(tmp_path)
+    config.S_file = False
+    config.D_file = False
+    config.wannier_targets = [{"name": "ignored"}]
+    config.symmetry_constrained = True
+    bundle = object()
+    result = object()
+    calls = {}
+
+    def load_config(path, *, mode):
+        calls["config"] = (path, mode)
+        return config
+
+    monkeypatch.setattr(cli_module, "load_config", load_config)
+    monkeypatch.setattr(cli_module, "load_input", lambda actual: bundle)
+    monkeypatch.setattr(
+        cli_module,
+        "run_bloch_symmetry_preanalysis",
+        lambda actual, **kwargs: calls.setdefault("run", (actual, kwargs)) and result,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "write_bloch_symmetry_outputs",
+        lambda actual, actual_config, out_dir: calls.setdefault(
+            "write", (actual, actual_config, out_dir)
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "run_calculation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("analysis-only must not run the Wannier calculation")
+        ),
+    )
+
+    out = (tmp_path / "analysis").resolve()
+    assert main(
+        ["-i", "example-incar", "--analyze-symmetry", "--out", str(out), "--cache"]
+    ) == 0
+
+    assert calls["config"] == ("example-incar", "bloch_symmetry")
+    assert calls["run"][0] is bundle
+    assert calls["write"] == (result, config, out)
+    assert config.use_cached_data == ["S", "D"]
+    assert Path(config.S_file) == out / "S.txt"
+    assert Path(config.D_file) == out / "D.txt"
+
+
 def test_interpolation_outputs_require_points_file(tmp_path):
     with pytest.raises(ValueError, match="--interp is required"):
         main(

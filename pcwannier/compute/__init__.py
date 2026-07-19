@@ -5,7 +5,7 @@ from .initializer import StateBases, StateInitializer
 from .integration import integrate_over_mesh, integrate_overlap_matrix, integrate_weighted_abs2_columns, integrate_weighted_columns
 from .kspace import get_kxyz, neighbor_reciprocal_lattice_vectors
 from .matrix import MSet
-from .runner import run_calculation
+from .runner import run_bloch_symmetry_preanalysis, run_calculation
 from .state import StateCollection
 from .tba import TBAModel
 from .topology import Topology2D, calculate_topology
@@ -32,4 +32,5 @@ __all__ = [
     "normalize_backend",
     "resolve_backend",
     "run_calculation",
+    "run_bloch_symmetry_preanalysis",
 ]

@@ -7,9 +7,14 @@ from pathlib import Path
 
 from ._version import __version__
 from .config import load_config
-from .compute import run_calculation
+from .compute import run_bloch_symmetry_preanalysis, run_calculation
 from .logging_utils import configure_logging
-from .outputs import write_base_figures, write_interpolation_outputs, write_outputs
+from .outputs import (
+    write_base_figures,
+    write_bloch_symmetry_outputs,
+    write_interpolation_outputs,
+    write_outputs,
+)
 from .runtime_info import format_elapsed, format_memory, memory_snapshot, now, start_memory_tracking
 from .sources.comsol import load_comsol_mesh, load_input
 from .symmetry import load_builtin_finite_groups, load_finite_group
@@ -42,8 +47,13 @@ def parse_args(argv=None):
         help="Logging level.",
     )
     parser.add_argument("--out", default=None, help="Output directory override")
+    parser.add_argument(
+        "--analyze-symmetry",
+        action="store_true",
+        help="Analyze outer-window Bloch symmetry, write S/D caches, and exit",
+    )
     parser.add_argument("-b", "--base", action="store_true", help="Plot projection base functions and exit")
-    parser.add_argument("-c", "--cache", action="store_true", help="Use cached M/A/V/U/D matrices")
+    parser.add_argument("-c", "--cache", action="store_true", help="Use cached calculation matrices")
     parser.add_argument("--interp", default=None, help="Interpolation mesh point path")
     parser.add_argument("--interp-wannier", default=None, help="Interpolated Wannier output path")
     parser.add_argument("--interp-metric", default=None, help="Interpolated metric-material output path")
@@ -54,8 +64,19 @@ def main(argv=None) -> int:
     started_at = now()
     args = parse_args(argv)
     if args.group is not None:
+        if args.analyze_symmetry:
+            raise ValueError("--analyze-symmetry requires -i/--input and cannot be used with --group.")
         print(_format_finite_group_table(_load_cli_finite_group(args.group)))
         return 0
+    if args.analyze_symmetry and (
+        args.base
+        or args.interp is not None
+        or args.interp_wannier is not None
+        or args.interp_metric is not None
+    ):
+        raise ValueError(
+            "--analyze-symmetry cannot be combined with --base or interpolation outputs."
+        )
 
     start_memory_tracking()
     out_dir = Path(args.out).expanduser().resolve() if args.out is not None else None
@@ -71,15 +92,26 @@ def main(argv=None) -> int:
     LOGGER.info("input=%s out_dir=%s log=%s threads=%s backend_override=%s", args.input, out_dir, log_path, args.threads, args.backend)
 
     with timed_step("load config", LOGGER, input=args.input):
-        config = load_config(args.input)
+        config = (
+            load_config(args.input, mode="bloch_symmetry")
+            if args.analyze_symmetry
+            else load_config(args.input)
+        )
     if args.backend is not None:
         config.compute_backend = args.backend
     if args.cache:
-        config.use_cached_data = ["V", "M", "S", "A", "D"]
-        if not config.symmetry_constrained:
-            config.use_cached_data.insert(0, "U")
-        if out_dir is not None:
-            _redirect_cache_paths_to_out_dir(config, out_dir)
+        if args.analyze_symmetry:
+            config.use_cached_data = ["S", "D"]
+            _configure_analysis_cache_paths(config, out_dir)
+        else:
+            config.use_cached_data = ["V", "M", "S", "A", "D"]
+            if not config.symmetry_constrained:
+                config.use_cached_data.insert(0, "U")
+        if out_dir is not None and not args.analyze_symmetry:
+            _redirect_cache_paths_to_out_dir(
+                config,
+                out_dir,
+            )
 
     LOGGER.info(
         "config name=%s dataset_type=%s field=%s primary=%s metric=%s curl=%s "
@@ -140,6 +172,26 @@ def main(argv=None) -> int:
 
     with timed_step("load input data", LOGGER, dataset_type=config.dataset_type):
         bundle = load_input(config)
+    if args.analyze_symmetry:
+        if config.wannier_targets or config.symmetry_constrained:
+            LOGGER.info(
+                "Bloch symmetry analysis-only mode ignores Wannier targets and constrained-gauge settings."
+            )
+        with timed_step(
+            "run outer-window Bloch symmetry preanalysis",
+            LOGGER,
+            threads=max(1, int(args.threads)),
+            backend=config.compute_backend,
+        ):
+            result = run_bloch_symmetry_preanalysis(
+                bundle,
+                threads=max(1, int(args.threads)),
+                backend=args.backend,
+            )
+        with timed_step("write Bloch symmetry caches", LOGGER, out_dir=out_dir or config.base_dir):
+            write_bloch_symmetry_outputs(result, config, out_dir)
+        _log_run_summary(started_at)
+        return 0
     with timed_step("run calculation", LOGGER, threads=max(1, int(args.threads)), backend=config.compute_backend):
         result = run_calculation(bundle, threads=max(1, int(args.threads)), backend=args.backend)
     with timed_step("write outputs", LOGGER, out_dir=out_dir or config.base_dir):
@@ -163,14 +215,29 @@ def _log_run_summary(started_at: float) -> None:
     LOGGER.info("Done")
 
 
-def _redirect_cache_paths_to_out_dir(config, out_dir: Path) -> None:
+def _redirect_cache_paths_to_out_dir(config, out_dir: Path, *, attrs=None) -> None:
     out_dir = Path(out_dir).expanduser().resolve()
-    for attr in ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file"):
+    names = attrs or ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file")
+    for attr in names:
         value = getattr(config, attr, None)
         if value is None or value is False or str(value).lower() == "false":
             continue
         path = Path(str(value))
         setattr(config, attr, str(out_dir / path.name))
+
+
+def _configure_analysis_cache_paths(config, out_dir: Path | None) -> None:
+    """Point analysis cache input and output at the same absolute directory."""
+
+    directory = Path(out_dir or config.base_dir).expanduser().resolve()
+    for attr, default_name in (("S_file", "S.txt"), ("D_file", "D.txt")):
+        value = getattr(config, attr, None)
+        filename = (
+            default_name
+            if value is None or value is False or str(value).lower() == "false"
+            else Path(str(value)).name
+        )
+        setattr(config, attr, str(directory / filename))
 
 
 def _load_cli_finite_group(value: str):

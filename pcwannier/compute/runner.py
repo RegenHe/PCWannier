@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from dataclasses import replace
 
-from ..data import InputBundle, RunResult
+from ..data import BlochSymmetryRunResult, InputBundle, RunResult
 from ..symmetry import (
     StateBlochSymmetryProvider,
     construct_symmetry_gauge,
@@ -12,6 +12,7 @@ from ..symmetry import (
     evaluate_symmetry_gauge,
     localize_symmetry_constrained,
     outer_band_grid,
+    run_bloch_symmetry_analysis,
     run_symmetry_analysis,
     validate_frozen_window_covariance,
     validate_outer_window_closure,
@@ -40,19 +41,54 @@ def run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | Non
             return _run_calculation(bundle, threads=threads, backend=backend)
 
 
-def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
+def run_bloch_symmetry_preanalysis(
+    bundle: InputBundle,
+    *,
+    threads: int = 1,
+    backend: str | None = None,
+) -> BlochSymmetryRunResult:
+    """Prepare physical Bloch states, analyze configured points, and stop before Wannier work."""
+
+    if bundle.symmetry is None or bundle.symmetry.model.representation_analysis is None:
+        raise ValueError(
+            "Bloch symmetry preanalysis requires symmetry_file and representation_analysis."
+        )
+    with blas_thread_limit(threads):
+        with numba_parallel_policy(max(1, int(threads)) <= 1), ParallelExecutor(threads):
+            resolved_backend = resolve_backend(backend or bundle.config.compute_backend)
+            state, report = _prepare_state(
+                bundle, threads=threads, resolved_backend=resolved_backend
+            )
+            provider = StateBlochSymmetryProvider(
+                state,
+                bundle.symmetry,
+                field_kind=bundle.maxwell.symmetry_field_kind,
+            )
+            with timed_step("analyze outer-window Bloch symmetry", LOGGER):
+                analysis = run_bloch_symmetry_analysis(
+                    state, bundle.symmetry, provider=provider
+                )
+            _log_symmetry_analysis(analysis)
+            if state.S is None:
+                raise RuntimeError("Raw S overlap cache was not initialized during preanalysis.")
+            return BlochSymmetryRunResult(
+                config=bundle.config,
+                orthogonality_report=report,
+                S=state.S,
+                symmetry=bundle.symmetry,
+                analysis=analysis,
+                sewing_matrices=provider.cached_sewing_matrices,
+                sewing_calculation_fingerprint=provider.sewing_cache_fingerprint,
+            )
+
+
+def _prepare_state(
+    bundle: InputBundle,
+    *,
+    threads: int,
+    resolved_backend: str,
+) -> tuple[StateCollection, np.ndarray]:
     config = bundle.config
-    resolved_backend = resolve_backend(backend or config.compute_backend)
-    LOGGER.info(
-        "Calculation setup: threads=%s backend=%s integration=%s blas=%s k_shape=%s mesh_vertices=%s mesh_triangles=%s",
-        threads,
-        resolved_backend,
-        config.integration_mode,
-        threadpool_summary(),
-        bundle.fields.shape,
-        bundle.mesh.vertices.shape[0],
-        bundle.mesh.elements.shape[0],
-    )
     state = StateCollection(bundle, backend=resolved_backend, threads=threads)
     with timed_step("check orthogonality", LOGGER):
         report, need_orth = state.check_orthogonality()
@@ -92,17 +128,24 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     else:
         state.ensure_identity_transform()
         LOGGER.info("Orthogonalization mode: identity (input states already orthonormal)")
-    with timed_step("extend mesh", LOGGER, extension=config.extension):
-        state.extention(config.extension)
-    LOGGER.info(
-        "Extended mesh: vertices=%s triangles=%s",
-        state.extention_mesh.vertices.shape[0],
-        state.extention_mesh.elements.shape[0],
-    )
+    state.turn_to_bloch()
+    return state, report
 
-    mset = MSet(state, threads=threads)
-    with timed_step("initialize M0", LOGGER):
-        mset.init_M0()
+
+def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
+    config = bundle.config
+    resolved_backend = resolve_backend(backend or config.compute_backend)
+    LOGGER.info(
+        "Calculation setup: threads=%s backend=%s integration=%s blas=%s k_shape=%s mesh_vertices=%s mesh_triangles=%s",
+        threads,
+        resolved_backend,
+        config.integration_mode,
+        threadpool_summary(),
+        bundle.fields.shape,
+        bundle.mesh.vertices.shape[0],
+        bundle.mesh.elements.shape[0],
+    )
+    state, report = _prepare_state(bundle, threads=threads, resolved_backend=resolved_backend)
     symmetry_analysis = None
     symmetry_provider = None
     if bundle.symmetry is not None and (
@@ -120,6 +163,17 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 state, bundle.symmetry, provider=symmetry_provider
             )
         _log_symmetry_analysis(symmetry_analysis)
+    with timed_step("extend mesh", LOGGER, extension=config.extension):
+        state.extention(config.extension)
+    LOGGER.info(
+        "Extended mesh: vertices=%s triangles=%s",
+        state.extention_mesh.vertices.shape[0],
+        state.extention_mesh.elements.shape[0],
+    )
+
+    mset = MSet(state, threads=threads)
+    with timed_step("initialize M0", LOGGER):
+        mset.init_M0()
     initializer = StateInitializer(state, mset, threads=threads)
     if config.symmetry_constrained:
         with timed_step("projection initialization", LOGGER):
@@ -179,7 +233,6 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 closure.max_leakage,
                 closure.max_composition_residual,
             )
-
         disentangle_max_iter = (
             config.max_iter
             if config.disentangle_max_iter is None
@@ -418,21 +471,31 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
 
 
 def _log_symmetry_analysis(result) -> None:
-    for point in result.points:
+    bloch_result = getattr(result, "bloch", None)
+    points = bloch_result.points if bloch_result is not None else result.points
+    for point in points:
         blocks = [tuple(band + 1 for band in block.band_indices) for block in point.degenerate_blocks]
         LOGGER.info(
-            "Symmetry point %s: little_group=%s classes=%s mapping=%s k=%s "
-            "bands(actual,1-based)=%s blocks=%s unitarity=%.6g leakage=%.6g "
+            "Bloch symmetry point %s: little_co_group=%s unitary_subgroup=%s "
+            "unitary_operations=%s antiunitary_operations=%s classes=%s mapping=%s k=%s "
+            "outer_bands(1-based)=%s analyzed_bands(1-based)=%s blocks=%s "
+            "unitarity=%.6g outer_unitarity=%.6g leakage=%.6g "
             "composition=%.6g twisted_composition=%.6g factor_phase=%.6g factor_cocycle=%.6g "
-            "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s characters=%s",
+            "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s "
+            "unitary_characters=%s",
             point.name,
             point.little_group_name or "unresolved",
+            getattr(point, "unitary_subgroup_name", None) or point.little_group_name or "unresolved",
+            getattr(point, "unitary_operation_names", ()),
+            getattr(point, "antiunitary_operation_names", ()),
             point.conjugacy_classes,
             point.finite_group_mapping,
             point.sampled_k_fractional.tolist(),
+            tuple(band + 1 for band in getattr(point, "outer_band_indices", point.band_indices)),
             tuple(band + 1 for band in point.band_indices),
             blocks,
             point.diagnostics.unitarity_error,
+            getattr(point, "outer_unitarity_error", point.diagnostics.unitarity_error),
             point.diagnostics.leakage,
             point.diagnostics.max_composition_residual,
             point.diagnostics.max_twisted_composition_residual,
@@ -445,32 +508,81 @@ def _log_symmetry_analysis(result) -> None:
                 else True
             ),
             point.factor_system.bloch_sign if point.factor_system is not None else 1,
-            {name: complex(value) for name, value in point.characters.items()},
+            {
+                name: complex(value)
+                for name, value in getattr(point, "unitary_characters", point.characters).items()
+            },
         )
-        if point.physical_decomposition is not None:
-            LOGGER.info(
-                "Symmetry point %s irreps: physical=%s target=%s compatible=%s residuals=(%.6g, %.6g)",
-                point.name,
-                point.physical_decomposition.multiplicities,
-                point.target_decomposition.multiplicities if point.target_decomposition else {},
-                point.compatibility.compatible if point.compatibility else None,
-                point.physical_decomposition.max_residual,
-                point.target_decomposition.max_residual if point.target_decomposition else 0.0,
+        for block in point.degenerate_blocks:
+            label = (
+                _format_irrep_decomposition(block.decomposition)
+                if block.decomposition is not None
+                else f"unavailable ({block.irrep_unavailable_reason or 'invalid representation'})"
             )
-        elif point.factor_system is not None and any(point.factor_system.antiunitary_flags):
+            LOGGER.info(
+                "Bloch symmetry block %s bands(1-based)=%s eigenvalues=%s degeneracy=%s "
+                "irrep=%s generators=%s unitary_characters=%s coupled_outer_bands(1-based)=%s "
+                "candidate_excluded_bands(1-based)=%s unitarity=%.6g leakage=%.6g "
+                "twisted_composition=%.6g",
+                point.name,
+                tuple(band + 1 for band in block.band_indices),
+                tuple(complex(value) for value in block.energies),
+                len(block.band_indices),
+                label,
+                block.generator_eigenvalues,
+                {name: complex(value) for name, value in block.unitary_characters.items()},
+                tuple(band + 1 for band in block.coupled_outer_bands),
+                tuple(band + 1 for band in block.candidate_excluded_bands),
+                block.unitarity_error,
+                block.leakage,
+                block.twisted_composition_residual,
+            )
+            for antiunitary in block.antiunitary_diagnostics:
+                LOGGER.info(
+                    "Bloch antiunitary block %s bands(1-based)=%s operation=%s square=%s "
+                    "square_eigenvalues=%s square_residual=%.6g",
+                    point.name,
+                    tuple(band + 1 for band in block.band_indices),
+                    antiunitary.operation_name,
+                    antiunitary.square_operation_name,
+                    antiunitary.square_eigenvalues,
+                    antiunitary.square_residual,
+                )
+        if point.factor_system is not None and any(point.factor_system.antiunitary_flags):
             LOGGER.info(
                 "Symmetry point %s contains antiunitary operations: ordinary irrep labels "
-                "unavailable, direct real-linear intertwiner dimension=%s",
+                "unavailable (magnetic corepresentation database is not implemented)",
                 point.name,
-                point.intertwiner_dimension,
             )
         elif point.factor_system is not None and not point.factor_system.cohomologically_trivial:
             LOGGER.info(
                 "Symmetry point %s uses a non-trivial projective factor: "
-                "ordinary irrep labels unavailable, direct intertwiner dimension=%s",
+                "ordinary irrep labels unavailable",
                 point.name,
-                point.intertwiner_dimension,
             )
+    for comparison in getattr(result, "target_compatibilities", ()):
+        LOGGER.info(
+            "Target compatibility %s: targets=%s target_irreps=%s compatible=%s "
+            "direct_intertwiner_dimension=%s",
+            comparison.point_name,
+            comparison.target_names,
+            (
+                {}
+                if comparison.target_decomposition is None
+                else comparison.target_decomposition.multiplicities
+            ),
+            None if comparison.compatibility is None else comparison.compatibility.compatible,
+            comparison.intertwiner_dimension,
+        )
+
+
+def _format_irrep_decomposition(decomposition) -> str:
+    terms = []
+    for name, multiplicity in decomposition.multiplicities.items():
+        if multiplicity <= 0:
+            continue
+        terms.append(name if multiplicity == 1 else f"{multiplicity}{name}")
+    return " + ".join(terms) or "none"
 
 
 def _log_output_spectrum_diagnostics(result, config) -> None:

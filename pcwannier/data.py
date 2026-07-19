@@ -14,6 +14,7 @@ from .maxwell import MaxwellProblem
 if TYPE_CHECKING:
     from .symmetry import (
         SymmetryAnalysisResult,
+        BlochSymmetryAnalysisResult,
         SymmetryContext,
         SymmetryDisentanglementResult,
         SymmetryGaugeResult,
@@ -317,3 +318,14 @@ class RunResult:
     hopping_reconstruction_diagnostics: HoppingReconstructionDiagnostics | None = None
     sewing_matrices: tuple[SewingMatrixCacheEntry, ...] | None = None
     sewing_calculation_fingerprint: str | None = None
+
+
+@dataclass
+class BlochSymmetryRunResult:
+    config: IncarConfig
+    orthogonality_report: np.ndarray
+    S: np.ndarray
+    symmetry: SymmetryContext
+    analysis: BlochSymmetryAnalysisResult
+    sewing_matrices: tuple[SewingMatrixCacheEntry, ...]
+    sewing_calculation_fingerprint: str

@@ -44,6 +44,45 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.symmetry_context.model.boundary_tolerance == pytest.approx(1.0e-6)
 
 
+def test_bloch_symmetry_config_mode_does_not_require_wannier_inputs(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0, 0 1",
+                "reciprocal_lattice_vectors = 0 0, 0 0",
+                "k_points = 0:1:1, 0:1:1",
+                "band_window = 0:3",
+                "dataset_file = Ez.txt",
+                "metric_file = eps.txt",
+                "mesh_file = mesh.mphtxt",
+                "E_file = E.txt",
+                "symmetry_file = p4mm",
+                "symmetry_constrained = true",
+                "wannier_targets",
+                "ignored_A1; 0, 0; A1",
+                "end",
+                "representation_analysis",
+                "Gamma; 0, 0; 0:3; ignored_A1",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(incar, mode="bloch_symmetry")
+
+    assert cfg.projections is None
+    assert cfg.composition_of_b is None
+    assert cfg.extension is None
+    assert cfg.symmetry_context is not None
+    assert cfg.symmetry_context.model.targets == ()
+    assert cfg.symmetry_context.model.symmetry_gauge is None
+    point = cfg.symmetry_context.model.representation_analysis.points[0]
+    assert point.target_names is None
+
+
 def test_energy_window_parser(tmp_path):
     incar = tmp_path / "incar"
     incar.write_text(

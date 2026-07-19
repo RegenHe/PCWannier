@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.tri import LinearTriInterpolator, Triangulation
 
 from .config import EnergyWindow, IncarConfig
-from .data import BandResult, Mesh, RunResult, TopologyResult
+from .data import BandResult, BlochSymmetryRunResult, Mesh, RunResult, TopologyResult
 from .matrix_io import save_cell_matrix
 from .symmetry.cache import save_sewing_matrix_cache
 from .timing import timed_step
@@ -328,6 +328,44 @@ def _save_tri_field(filename: str | Path, mesh: Mesh, values: np.ndarray, label:
     ax.set_ylim(min_y - margin * (max_y - min_y), max_y + margin * (max_y - min_y))
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
+
+
+def write_bloch_symmetry_outputs(
+    result: BlochSymmetryRunResult,
+    config: IncarConfig | None = None,
+    out_dir: str | Path | None = None,
+) -> None:
+    """Write the reusable raw-overlap and full outer-window sewing caches."""
+
+    config = config or result.config
+    s_path = _resolve_output(
+        "S.txt" if _is_false_path(config.S_file) else config.S_file,
+        config,
+        out_dir,
+    )
+    d_path = _resolve_output(
+        "D.txt" if _is_false_path(config.D_file) else config.D_file,
+        config,
+        out_dir,
+    )
+    if s_path is None or d_path is None:
+        raise RuntimeError("Bloch symmetry cache output paths could not be resolved.")
+    with timed_step("write raw S matrix", LOGGER, file=s_path):
+        save_cell_matrix(s_path, result.S, result.S.shape)
+    with timed_step(
+        "write D symmetry matrices",
+        LOGGER,
+        file=d_path,
+        count=len(result.sewing_matrices),
+    ):
+        save_sewing_matrix_cache(
+            d_path,
+            result.sewing_matrices,
+            dimension=result.symmetry.model.dimension,
+            bloch_sign=result.symmetry.model.bloch_convention.sign,
+            k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
+            calculation_fingerprint=result.sewing_calculation_fingerprint,
+        )
 
 
 def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir: str | Path | None = None) -> None:

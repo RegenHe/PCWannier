@@ -506,6 +506,88 @@ class StateBlochSymmetryProvider:
             )
         )
 
+    def sewing_matrix_in_band_basis(
+        self,
+        mapping: SymmetryKMapping,
+        source_band_indices,
+        target_band_indices=None,
+        *,
+        operation: SpaceGroupOperation | None = None,
+        source_k_fractional=None,
+    ) -> np.ndarray:
+        """Return sewing in a band-local Lowdin basis without another field integral.
+
+        The cached sewing matrix uses the full outer-window orthogonalization.  That
+        transform may mix non-degenerate eigenstates.  Representation analysis
+        instead recovers the normalized FEM-band overlap and orthogonalizes only
+        the requested source and target subspaces.
+        """
+
+        operation = operation or self.context.model.group.operations[mapping.operation_index]
+        source_index = tuple(mapping.source_k_index)
+        target_index = tuple(mapping.target_k_index)
+        full_source = self._actual_bands(source_index)
+        full_target = self._actual_bands(target_index)
+        requested_source = tuple(int(value) for value in source_band_indices)
+        requested_target = (
+            requested_source
+            if target_band_indices is None
+            else tuple(int(value) for value in target_band_indices)
+        )
+        missing_source = sorted(set(requested_source) - set(full_source))
+        missing_target = sorted(set(requested_target) - set(full_target))
+        if missing_source or missing_target:
+            raise ValueError(
+                "Band-local sewing requested absent outer-window bands: "
+                f"source_missing={missing_source}, target_missing={missing_target}."
+            )
+
+        request = self.request_for_mapping(
+            mapping,
+            full_source,
+            operation=operation,
+            source_k_fractional=source_k_fractional,
+            target_band_indices=full_target,
+        )
+        internal = np.asarray(self.sewing_matrix(request), dtype=np.complex128)
+        transforms = self.state.get_transform()
+        source_transform = np.asarray(
+            transforms[self._state_index(source_index)], dtype=np.complex128
+        )
+        target_transform = np.asarray(
+            transforms[self._state_index(target_index)], dtype=np.complex128
+        )
+        if source_transform.shape != (len(full_source), len(full_source)) or target_transform.shape != (
+            len(full_target), len(full_target)
+        ):
+            raise ValueError("Outer-window orthogonalization transform has an invalid shape.")
+
+        try:
+            source_inverse = np.linalg.inv(source_transform)
+            target_inverse = np.linalg.inv(target_transform)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError("Outer-window orthogonalization transform is singular.") from exc
+        source_right_inverse = (
+            source_inverse.conj() if operation.antiunitary else source_inverse
+        )
+        fem_overlap = target_inverse.conj().T @ internal @ source_right_inverse
+        source_metric = source_inverse.conj().T @ source_inverse
+        target_metric = target_inverse.conj().T @ target_inverse
+
+        source_positions = [full_source.index(band) for band in requested_source]
+        target_positions = [full_target.index(band) for band in requested_target]
+        source_lowdin = _inverse_sqrt_hermitian(
+            source_metric[np.ix_(source_positions, source_positions)],
+            description="source band block overlap",
+        )
+        target_lowdin = _inverse_sqrt_hermitian(
+            target_metric[np.ix_(target_positions, target_positions)],
+            description="target band block overlap",
+        )
+        block = fem_overlap[np.ix_(target_positions, source_positions)]
+        source_factor = source_lowdin.conj() if operation.antiunitary else source_lowdin
+        return target_lowdin.conj().T @ block @ source_factor
+
     def request_for_mapping(
         self,
         mapping: SymmetryKMapping,
@@ -779,6 +861,20 @@ class StateBlochSymmetryProvider:
             _update_array_digest(digest, f"field:{state_index}", self.state.get_block(*state_index))
             _update_array_digest(digest, f"transform:{state_index}", transforms[state_index])
         return digest.hexdigest()
+
+
+def _inverse_sqrt_hermitian(matrix, *, description: str) -> np.ndarray:
+    value = np.asarray(matrix, dtype=np.complex128)
+    value = 0.5 * (value + value.conj().T)
+    eigenvalues, eigenvectors = np.linalg.eigh(value)
+    scale = max(float(np.max(np.abs(eigenvalues), initial=0.0)), 1.0)
+    threshold = 1.0e-12 * scale
+    if np.min(eigenvalues, initial=np.inf) <= threshold:
+        raise ValueError(
+            f"{description} is not positive definite; minimum eigenvalue="
+            f"{float(np.min(eigenvalues)):.6g}."
+        )
+    return eigenvectors @ np.diag(1.0 / np.sqrt(eigenvalues)) @ eigenvectors.conj().T
 
 
 def _update_array_digest(digest, label: str, value) -> None:

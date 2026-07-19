@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
@@ -12,6 +13,8 @@ from .specs import (
     RepresentationPointSpec,
 )
 from .twisted import TwistedRepresentation, build_twisted_representation
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..compute.state import StateCollection
@@ -134,6 +137,70 @@ class DegenerateBlock:
     characters: dict[str, complex]
     leakage: float
     decomposition: IrrepDecomposition | None = None
+    unitary_characters: dict[str, complex] = field(default_factory=dict)
+    generator_eigenvalues: dict[str, tuple[complex, ...]] = field(default_factory=dict)
+    antiunitary_diagnostics: tuple["AntiunitaryOperationDiagnostic", ...] = ()
+    coupled_outer_bands: tuple[int, ...] = ()
+    candidate_excluded_bands: tuple[int, ...] = ()
+    irrep_unavailable_reason: str | None = None
+    unitarity_error: float = 0.0
+    twisted_composition_residual: float = 0.0
+
+
+@dataclass(frozen=True)
+class AntiunitaryOperationDiagnostic:
+    operation_name: str
+    square_operation_name: str
+    square_eigenvalues: tuple[complex, ...]
+    square_residual: float
+
+
+@dataclass(frozen=True)
+class BlochSymmetryPointAnalysis:
+    name: str
+    requested_k_fractional: np.ndarray
+    sampled_k_fractional: np.ndarray
+    k_index: tuple[int, ...]
+    outer_band_indices: tuple[int, ...]
+    band_indices: tuple[int, ...]
+    little_group_operation_indices: tuple[int, ...]
+    sewing_matrices: dict[str, np.ndarray]
+    unitary_characters: dict[str, complex]
+    diagnostics: SewingDiagnostics
+    degenerate_blocks: tuple[DegenerateBlock, ...]
+    physical_decomposition: IrrepDecomposition | None
+    little_group_name: str | None = None
+    unitary_subgroup_name: str | None = None
+    unitary_operation_names: tuple[str, ...] = ()
+    antiunitary_operation_names: tuple[str, ...] = ()
+    conjugacy_classes: tuple[tuple[str, ...], ...] = ()
+    finite_group_mapping: tuple[tuple[str, str], ...] = ()
+    factor_system: FactorSystem | None = None
+    physical_twisted_representation: TwistedRepresentation | None = None
+    outer_unitarity_error: float = 0.0
+    outer_candidate_excluded_bands: tuple[int, ...] = ()
+
+    @property
+    def characters(self) -> dict[str, complex]:
+        """Compatibility alias containing unitary characters only."""
+
+        return self.unitary_characters
+
+
+@dataclass(frozen=True)
+class BlochSymmetryAnalysisResult:
+    points: tuple[BlochSymmetryPointAnalysis, ...]
+
+
+@dataclass(frozen=True)
+class TargetCompatibilityAnalysis:
+    point_name: str
+    target_names: tuple[str, ...]
+    target_characters: dict[str, complex]
+    target_decomposition: IrrepDecomposition | None
+    compatibility: RepresentationCompatibility | None
+    target_twisted_representation: TwistedRepresentation | None
+    intertwiner_dimension: int | None
 
 
 @dataclass(frozen=True)
@@ -164,6 +231,8 @@ class HighSymmetryPointAnalysis:
 @dataclass(frozen=True)
 class SymmetryAnalysisResult:
     points: tuple[HighSymmetryPointAnalysis, ...]
+    bloch: BlochSymmetryAnalysisResult | None = None
+    target_compatibilities: tuple[TargetCompatibilityAnalysis, ...] = ()
 
 
 def little_group(group: SpaceGroup, k_fractional) -> tuple[LittleGroupElement, ...]:
@@ -224,13 +293,13 @@ def group_degenerate_bands(
         raise ValueError("Degeneracy energies must be finite and match band_indices.")
     ordered = sorted(zip(bands, values), key=lambda item: (float(np.real(item[1])), float(np.imag(item[1]))))
     blocks: list[list[int]] = [[ordered[0][0]]]
-    previous = ordered[0][1]
+    block_reference = ordered[0][1]
     for band, energy in ordered[1:]:
-        if tolerance.equivalent(previous, energy):
+        if tolerance.equivalent(block_reference, energy):
             blocks[-1].append(band)
         else:
             blocks.append([band])
-        previous = energy
+            block_reference = energy
     return tuple(tuple(block) for block in blocks)
 
 
@@ -341,29 +410,117 @@ def intertwiner_residual(
     )
 
 
+def analyze_bloch_symmetry(
+    state: StateCollection,
+    context: SymmetryContext,
+    k_point,
+    band_indices=None,
+    *,
+    provider: StateBlochSymmetryProvider | None = None,
+    name: str | None = None,
+    split_degenerate_blocks: bool = True,
+    degeneracy_tolerance: DegeneracyTolerance | None = None,
+    leakage_tolerance: float | None = None,
+) -> BlochSymmetryPointAnalysis:
+    """Analyze only the physical Bloch representation at one sampled k point."""
+
+    from .bloch import StateBlochSymmetryProvider
+
+    spec = context.model.representation_analysis
+    default_degeneracy = DegeneracyTolerance() if spec is None else spec.degeneracy_tolerance
+    degeneracy = degeneracy_tolerance or default_degeneracy
+    leakage = (
+        context.model.tolerance
+        if leakage_tolerance is None and spec is None
+        else spec.leakage_tolerance if leakage_tolerance is None else float(leakage_tolerance)
+    )
+    if not np.isfinite(leakage) or leakage <= 0.0:
+        raise ValueError("Bloch-symmetry leakage tolerance must be positive and finite.")
+    point = RepresentationPointSpec(
+        name or "k=" + np.array2string(np.asarray(k_point, dtype=float)),
+        np.asarray(k_point, dtype=float),
+        None if band_indices is None else _validated_bands(band_indices),
+        None,
+        degeneracy,
+    )
+    physical_provider = provider or StateBlochSymmetryProvider(
+        state, context, field_kind=(spec.field_kind if spec is not None else state.maxwell.symmetry_field_kind)
+    )
+    return _analyze_bloch_point(
+        state,
+        context,
+        physical_provider,
+        point,
+        split_degenerate_blocks=bool(split_degenerate_blocks),
+        leakage_tolerance=leakage,
+    )
+
+
+def run_bloch_symmetry_analysis(
+    state: StateCollection,
+    context: SymmetryContext,
+    *,
+    provider: StateBlochSymmetryProvider | None = None,
+) -> BlochSymmetryAnalysisResult:
+    """Analyze configured physical Bloch representations without target data."""
+
+    from .bloch import StateBlochSymmetryProvider
+
+    spec = context.model.representation_analysis
+    if spec is None:
+        return BlochSymmetryAnalysisResult(())
+    physical_provider = provider or StateBlochSymmetryProvider(
+        state, context, field_kind=spec.field_kind
+    )
+    return BlochSymmetryAnalysisResult(
+        tuple(
+            _analyze_bloch_point(
+                state,
+                context,
+                physical_provider,
+                point,
+                split_degenerate_blocks=True,
+                leakage_tolerance=spec.leakage_tolerance,
+            )
+            for point in spec.points
+        )
+    )
+
+
 def run_symmetry_analysis(
     state: StateCollection,
     context: SymmetryContext,
     *,
     provider: StateBlochSymmetryProvider | None = None,
 ) -> SymmetryAnalysisResult:
-    from .bloch import StateBlochSymmetryProvider
+    """Run physical analysis and optional, explicitly requested target comparisons."""
 
+    bloch = run_bloch_symmetry_analysis(state, context, provider=provider)
     spec = context.model.representation_analysis
     if spec is None:
-        return SymmetryAnalysisResult(())
-    provider = provider or StateBlochSymmetryProvider(state, context, field_kind=spec.field_kind)
-    return SymmetryAnalysisResult(
-        tuple(_analyze_point(state, context, provider, point) for point in spec.points)
-    )
+        return SymmetryAnalysisResult((), bloch)
+    point_specs = {point.name: point for point in spec.points}
+    combined = []
+    comparisons = []
+    for physical in bloch.points:
+        result, comparison = _attach_target_compatibility(
+            context, point_specs[physical.name], physical
+        )
+        combined.append(result)
+        if comparison is not None:
+            comparisons.append(comparison)
+    return SymmetryAnalysisResult(tuple(combined), bloch, tuple(comparisons))
 
 
-def _analyze_point(
+def _analyze_bloch_point(
     state: StateCollection,
     context: SymmetryContext,
     provider: StateBlochSymmetryProvider,
     point: RepresentationPointSpec,
-) -> HighSymmetryPointAnalysis:
+    *,
+    split_degenerate_blocks: bool,
+    leakage_tolerance: float,
+) -> BlochSymmetryPointAnalysis:
     group = context.model.group
     k_index = provider.find_k_index(point.k_fractional)
     sampled_k = np.asarray([context.k_points[axis][k_index[axis]] for axis in range(group.dimension)])
@@ -385,22 +542,37 @@ def _analyze_point(
         if context.model.group_definition is not None
         else None
     )
+    full_matrices: dict[str, np.ndarray] = {}
     matrices: dict[str, np.ndarray] = {}
-    characters: dict[str, complex] = {}
+    internal_matrices: dict[str, np.ndarray] = {}
     matrices_by_operation: dict[int, np.ndarray] = {}
     for element in elements:
         mapping = provider.mapping(element.operation_index, k_index)
-        request = provider.request_for_mapping(
-            mapping,
-            bands,
-            source_k_fractional=point.k_fractional,
-        )
-        matrix = _validated_sewing(
-            provider.sewing_matrix(request), len(bands), group.operations[element.operation_index]
+        operation = group.operations[element.operation_index]
+        request = provider.request_for_mapping(mapping, available, source_k_fractional=point.k_fractional)
+        full_matrix = _validated_sewing(provider.sewing_matrix(request), len(available), operation)
+        full_matrices[_operation_name(group, element.operation_index)] = full_matrix
+        positions = [available.index(band) for band in bands]
+        internal_matrix = full_matrix[np.ix_(positions, positions)].copy()
+        band_basis = getattr(provider, "sewing_matrix_in_band_basis", None)
+        matrix = (
+            internal_matrix
+            if band_basis is None
+            else _validated_sewing(
+                band_basis(
+                    mapping,
+                    bands,
+                    bands,
+                    operation=operation,
+                    source_k_fractional=point.k_fractional,
+                ),
+                len(bands),
+                operation,
+            )
         )
         name = _operation_name(group, element.operation_index)
         matrices[name] = matrix
-        characters[name] = complex(np.trace(matrix))
+        internal_matrices[name] = internal_matrix
         matrices_by_operation[element.operation_index] = matrix
 
     physical_twisted = (
@@ -412,15 +584,17 @@ def _analyze_point(
             tuple(matrices_by_operation[index] for index in operation_indices),
         )
     )
-    if physical_twisted is not None:
-        analysis_spec = context.model.representation_analysis
-        representation_tolerance = (
-            context.model.tolerance
-            if analysis_spec is None
-            else max(context.model.tolerance, analysis_spec.leakage_tolerance)
-        )
-        physical_twisted.require_valid(tolerance=representation_tolerance)
-
+    operation_by_name = {
+        _operation_name(group, index): group.operations[index] for index in operation_indices
+    }
+    unitary_characters = {
+        name: complex(np.trace(matrix))
+        for name, matrix in matrices.items()
+        if not operation_by_name[name].antiunitary
+    }
+    selected_leakage, _ = _subspace_leakage(
+        full_matrices, available, bands, leakage_tolerance
+    )
     diagnostics = SewingDiagnostics(
         unitarity_error=max(
             (
@@ -429,12 +603,9 @@ def _analyze_point(
             ),
             default=0.0,
         ),
-        leakage=max(
-            (_projected_subspace_leakage(matrix, len(bands)) for matrix in matrices.values()),
-            default=0.0,
-        ),
+        leakage=selected_leakage,
         max_composition_residual=_composition_residual(
-            provider, point.k_fractional, k_index, bands, operation_indices, matrices
+            provider, point.k_fractional, k_index, bands, operation_indices, internal_matrices
         ),
         max_twisted_composition_residual=(
             0.0 if physical_twisted is None else physical_twisted.product_residual
@@ -443,59 +614,121 @@ def _analyze_point(
 
     energy_line = np.asarray(state.energy_matrix[state_index])
     energies = tuple(complex(energy_line[band]) for band in bands)
-    blocks = group_degenerate_bands(bands, energies, point.degeneracy_tolerance)
+    blocks = (
+        group_degenerate_bands(bands, energies, point.degeneracy_tolerance)
+        if split_degenerate_blocks
+        else (bands,)
+    )
     band_position = {band: index for index, band in enumerate(bands)}
+    generator_indices = _minimal_unitary_generators(group, operation_indices)
+    unitary_indices = tuple(
+        index for index in operation_indices if not group.operations[index].antiunitary
+    )
+    antiunitary_indices = tuple(
+        index for index in operation_indices if group.operations[index].antiunitary
+    )
+    unitary_subgroup_name = _unitary_subgroup_name(
+        context, unitary_indices, point.k_fractional
+    )
     block_results = []
     for block in blocks:
         positions = [band_position[band] for band in block]
-        block_matrices = {
-            name: matrix[np.ix_(positions, positions)].copy() for name, matrix in matrices.items()
-        }
-        block_characters = {name: complex(np.trace(matrix)) for name, matrix in block_matrices.items()}
-        outside = [index for index in range(len(bands)) if index not in positions]
-        leakage_by_operation = {
-            name: float(
-                np.sqrt(
-                    np.linalg.norm(matrix[np.ix_(outside, positions)], ord="fro") ** 2
-                    + np.linalg.norm(matrix[np.ix_(positions, outside)], ord="fro") ** 2
+        block_matrices = {}
+        for element in elements:
+            operation = group.operations[element.operation_index]
+            name = _operation_name(group, element.operation_index)
+            mapping = provider.mapping(element.operation_index, k_index)
+            band_basis = getattr(provider, "sewing_matrix_in_band_basis", None)
+            block_matrices[name] = (
+                matrices[name][np.ix_(positions, positions)].copy()
+                if band_basis is None
+                else _validated_sewing(
+                    band_basis(
+                        mapping,
+                        block,
+                        block,
+                        operation=operation,
+                        source_k_fractional=point.k_fractional,
+                    ),
+                    len(block),
+                    operation,
                 )
             )
-            for name, matrix in matrices.items()
+        block_unitary_characters = {
+            name: complex(np.trace(matrix))
+            for name, matrix in block_matrices.items()
+            if not operation_by_name[name].antiunitary
         }
-        worst_operation, leakage = max(
-            leakage_by_operation.items(), key=lambda item: item[1], default=("<none>", 0.0)
+        leakage, coupled = _subspace_leakage(
+            full_matrices, available, block, leakage_tolerance
         )
-        analysis_spec = context.model.representation_analysis
-        leakage_tolerance = (
-            context.model.tolerance
-            if analysis_spec is None
-            else analysis_spec.leakage_tolerance
-        )
-        if leakage > leakage_tolerance:
-            raise ValueError(
-                f"Degenerate block {block} at representation point {point.name!r} is not invariant "
-                f"under operation {worst_operation!r}: sewing leakage={leakage:.6g} exceeds "
-                f"{leakage_tolerance:.6g}. Increase the degeneracy tolerance or select a closed "
-                "band subspace before assigning irreducible representations."
+        block_by_operation = {
+            index: block_matrices[_operation_name(group, index)] for index in operation_indices
+        }
+        block_twisted = (
+            None
+            if resolved_little_group is None
+            else build_twisted_representation(
+                resolved_little_group,
+                operation_indices,
+                tuple(block_by_operation[index] for index in operation_indices),
             )
+        )
+        twisted_residual = 0.0 if block_twisted is None else block_twisted.product_residual
+        unavailable_reason = _irrep_unavailable_reason(
+            resolved_little_group,
+            leakage,
+            leakage_tolerance,
+            twisted_residual,
+        )
         if (
-            resolved_little_group is not None
+            unavailable_reason is None
+            and resolved_little_group is not None
             and resolved_little_group.factor_system.cohomologically_trivial
             and not any(resolved_little_group.factor_system.antiunitary_flags)
         ):
             decomposition = decompose_little_group_characters(
-                resolved_little_group, block_characters
+                resolved_little_group, block_unitary_characters
             )
         else:
             decomposition = None
+        candidates = _candidate_excluded_bands(
+            energy_line, available, block, point.degeneracy_tolerance
+        )
+        generator_eigenvalues = {
+            _operation_name(group, index): _sorted_eigenvalues(
+                block_matrices[_operation_name(group, index)]
+            )
+            for index in generator_indices
+        }
+        antiunitary_diagnostics = _antiunitary_diagnostics(
+            group,
+            resolved_little_group,
+            block_twisted,
+            operation_indices,
+        )
         block_results.append(
             DegenerateBlock(
-                block,
-                tuple(complex(energy_line[band]) for band in block),
-                block_matrices,
-                block_characters,
-                leakage,
-                decomposition,
+                band_indices=block,
+                energies=tuple(complex(energy_line[band]) for band in block),
+                sewing_matrices=block_matrices,
+                characters=block_unitary_characters,
+                leakage=leakage,
+                decomposition=decomposition,
+                unitary_characters=block_unitary_characters,
+                generator_eigenvalues=generator_eigenvalues,
+                antiunitary_diagnostics=antiunitary_diagnostics,
+                coupled_outer_bands=coupled,
+                candidate_excluded_bands=candidates,
+                irrep_unavailable_reason=unavailable_reason,
+                unitarity_error=max(
+                    (
+                        float(np.linalg.norm(matrix.conj().T @ matrix - np.eye(len(block)), ord="fro"))
+                        for matrix in block_matrices.values()
+                    ),
+                    default=0.0,
+                ),
+                twisted_composition_residual=twisted_residual,
             )
         )
 
@@ -503,13 +736,91 @@ def _analyze_point(
         resolved_little_group is not None
         and resolved_little_group.factor_system.cohomologically_trivial
         and not any(resolved_little_group.factor_system.antiunitary_flags)
+        and diagnostics.leakage <= leakage_tolerance
+        and physical_twisted is not None
+        and physical_twisted.product_residual <= leakage_tolerance
     ):
         physical_decomposition = decompose_little_group_characters(
-            resolved_little_group, characters
+            resolved_little_group, unitary_characters
         )
     else:
         physical_decomposition = None
+    outer_unitarity = max(
+        (
+            float(np.linalg.norm(matrix.conj().T @ matrix - np.eye(len(available)), ord="fro"))
+            for matrix in full_matrices.values()
+        ),
+        default=0.0,
+    )
+    outer_candidates = _candidate_excluded_bands(
+        energy_line, available, bands, point.degeneracy_tolerance
+    )
+    if diagnostics.leakage > leakage_tolerance or outer_unitarity > leakage_tolerance:
+        LOGGER.warning(
+            "Bloch symmetry subspace at %s is not closed: bands(1-based)=%s leakage=%.6g "
+            "outer_unitarity=%.6g coupled_outer_bands(1-based)=%s "
+            "candidate_excluded_bands(1-based)=%s",
+            point.name,
+            tuple(band + 1 for band in bands),
+            diagnostics.leakage,
+            outer_unitarity,
+            tuple(band + 1 for block in block_results for band in block.coupled_outer_bands),
+            tuple(band + 1 for band in outer_candidates),
+        )
+    return BlochSymmetryPointAnalysis(
+        name=point.name,
+        requested_k_fractional=np.asarray(point.k_fractional).copy(),
+        sampled_k_fractional=sampled_k.copy(),
+        k_index=k_index,
+        outer_band_indices=available,
+        band_indices=bands,
+        little_group_operation_indices=operation_indices,
+        sewing_matrices=matrices,
+        unitary_characters=unitary_characters,
+        diagnostics=diagnostics,
+        degenerate_blocks=tuple(block_results),
+        physical_decomposition=physical_decomposition,
+        little_group_name=None if resolved_little_group is None else resolved_little_group.name,
+        unitary_subgroup_name=unitary_subgroup_name,
+        unitary_operation_names=tuple(_operation_name(group, index) for index in unitary_indices),
+        antiunitary_operation_names=tuple(
+            _operation_name(group, index) for index in antiunitary_indices
+        ),
+        conjugacy_classes=_resolved_conjugacy_classes(resolved_little_group),
+        finite_group_mapping=_resolved_finite_mapping(resolved_little_group),
+        factor_system=None if resolved_little_group is None else resolved_little_group.factor_system,
+        physical_twisted_representation=physical_twisted,
+        outer_unitarity_error=outer_unitarity,
+        outer_candidate_excluded_bands=outer_candidates,
+    )
+
+
+def _attach_target_compatibility(
+    context: SymmetryContext,
+    point: RepresentationPointSpec,
+    physical: BlochSymmetryPointAnalysis,
+) -> tuple[HighSymmetryPointAnalysis, TargetCompatibilityAnalysis | None]:
+    group = context.model.group
+    operation_indices = physical.little_group_operation_indices
+    resolved_little_group = (
+        context.model.group_definition.resolve_little_group(
+            operation_indices,
+            point.k_fractional,
+            bloch_convention=context.model.bloch_convention,
+        )
+        if context.model.group_definition is not None
+        else None
+    )
     targets = _selected_targets(context, point)
+    if targets:
+        invalid = [block for block in physical.degenerate_blocks if block.irrep_unavailable_reason and block.leakage > context.model.representation_analysis.leakage_tolerance]
+        if invalid:
+            block = invalid[0]
+            raise ValueError(
+                f"Degenerate block {block.band_indices} at representation point {point.name!r} "
+                f"is not invariant: sewing leakage={block.leakage:.6g}. Select a closed "
+                "physical subspace before target compatibility analysis."
+            )
     target_matrices_by_operation = {
         operation_index: _combined_target_matrix(targets, operation_index, point.k_fractional)
         for operation_index in operation_indices
@@ -529,6 +840,7 @@ def _analyze_point(
             tuple(target_matrices_by_operation[index] for index in operation_indices),
         )
     )
+    physical_twisted = physical.physical_twisted_representation
     if target_twisted is not None:
         target_twisted.require_valid(tolerance=context.model.tolerance)
         if physical_twisted is None:
@@ -549,11 +861,11 @@ def _analyze_point(
     compatibility = (
         compare_representations(
             sum(target.wannier_dimension for target in targets),
-            len(bands),
+            len(physical.band_indices),
             target_decomposition,
-            physical_decomposition,
+            physical.physical_decomposition,
         )
-        if target_decomposition is not None and physical_decomposition is not None
+        if target_decomposition is not None and physical.physical_decomposition is not None
         else None
     )
     intertwiner_dimension = None
@@ -564,51 +876,41 @@ def _analyze_point(
             physical_twisted,
             target_twisted,
         ).dimension
-    return HighSymmetryPointAnalysis(
-        point.name,
-        np.asarray(point.k_fractional).copy(),
-        sampled_k.copy(),
-        k_index,
-        bands,
-        operation_indices,
-        matrices,
-        characters,
-        diagnostics,
-        tuple(block_results),
-        physical_decomposition,
-        target_characters,
-        target_decomposition,
-        compatibility,
-        None if resolved_little_group is None else resolved_little_group.name,
-        (
-            ()
-            if resolved_little_group is None
-            else tuple(
-                tuple(
-                    resolved_little_group.table.element_names[index]
-                    for index in conjugacy_class.element_indices
-                )
-                for conjugacy_class in resolved_little_group.table.conjugacy_classes
-            )
-        ),
-        (
-            ()
-            if resolved_little_group is None
-            else tuple(
-                (
-                    resolved_little_group.table.element_names[actual],
-                    resolved_little_group.identification.canonical.table.element_names[canonical],
-                )
-                for actual, canonical in enumerate(
-                    resolved_little_group.identification.actual_to_canonical
-                )
-            )
-        ),
-        None if resolved_little_group is None else resolved_little_group.factor_system,
-        physical_twisted,
-        target_twisted,
-        intertwiner_dimension,
+    high = HighSymmetryPointAnalysis(
+        name=physical.name,
+        requested_k_fractional=physical.requested_k_fractional,
+        sampled_k_fractional=physical.sampled_k_fractional,
+        k_index=physical.k_index,
+        band_indices=physical.band_indices,
+        little_group_operation_indices=operation_indices,
+        sewing_matrices=physical.sewing_matrices,
+        characters=physical.unitary_characters,
+        diagnostics=physical.diagnostics,
+        degenerate_blocks=physical.degenerate_blocks,
+        physical_decomposition=physical.physical_decomposition,
+        target_characters=target_characters,
+        target_decomposition=target_decomposition,
+        compatibility=compatibility,
+        little_group_name=physical.little_group_name,
+        conjugacy_classes=physical.conjugacy_classes,
+        finite_group_mapping=physical.finite_group_mapping,
+        factor_system=physical.factor_system,
+        physical_twisted_representation=physical_twisted,
+        target_twisted_representation=target_twisted,
+        intertwiner_dimension=intertwiner_dimension,
     )
+    comparison = None
+    if targets:
+        comparison = TargetCompatibilityAnalysis(
+            point.name,
+            tuple(target.name for target in targets),
+            target_characters,
+            target_decomposition,
+            compatibility,
+            target_twisted,
+            intertwiner_dimension,
+        )
+    return high, comparison
 
 
 def _composition_residual(
@@ -691,6 +993,194 @@ def _selected_targets(
     if point.target_names is None:
         return ()
     return tuple(context.model.target(name) for name in point.target_names)
+
+
+def _subspace_leakage(
+    matrices: dict[str, np.ndarray],
+    outer_bands: tuple[int, ...],
+    selected_bands: tuple[int, ...],
+    tolerance: float,
+) -> tuple[float, tuple[int, ...]]:
+    selected = [outer_bands.index(band) for band in selected_bands]
+    outside = [index for index in range(len(outer_bands)) if index not in selected]
+    if not outside:
+        return 0.0, ()
+    maximum = 0.0
+    coupled: set[int] = set()
+    for matrix in matrices.values():
+        value = np.asarray(matrix, dtype=np.complex128)
+        leakage = float(
+            np.sqrt(
+                np.linalg.norm(value[np.ix_(outside, selected)], ord="fro") ** 2
+                + np.linalg.norm(value[np.ix_(selected, outside)], ord="fro") ** 2
+            )
+        )
+        maximum = max(maximum, leakage)
+        for index in outside:
+            strength = float(
+                np.sqrt(
+                    np.linalg.norm(value[index, selected]) ** 2
+                    + np.linalg.norm(value[selected, index]) ** 2
+                )
+            )
+            if strength > tolerance:
+                coupled.add(outer_bands[index])
+    return maximum, tuple(sorted(coupled))
+
+
+def _candidate_excluded_bands(
+    energy_line: np.ndarray,
+    available_bands: tuple[int, ...],
+    selected_bands: tuple[int, ...],
+    tolerance: DegeneracyTolerance,
+) -> tuple[int, ...]:
+    available = set(available_bands)
+    selected_energies = [energy_line[index] for index in selected_bands]
+    return tuple(
+        index
+        for index, energy in enumerate(energy_line)
+        if index not in available
+        and any(tolerance.equivalent(energy, selected) for selected in selected_energies)
+    )
+
+
+def _minimal_unitary_generators(
+    group: SpaceGroup,
+    operation_indices: tuple[int, ...],
+) -> tuple[int, ...]:
+    unitary = tuple(
+        index for index in operation_indices if not group.operations[index].antiunitary
+    )
+    allowed = set(unitary)
+    generators: list[int] = []
+
+    def generated_closure() -> set[int]:
+        closure = {group.identity_index, *generators}
+        changed = True
+        while changed:
+            changed = False
+            for left in tuple(closure):
+                for right in tuple(closure):
+                    product = group.multiply_mod_lattice(left, right).result_index
+                    if product in allowed and product not in closure:
+                        closure.add(product)
+                        changed = True
+        return closure
+
+    closure = generated_closure()
+    for index in unitary:
+        if index == group.identity_index or index in closure:
+            continue
+        generators.append(index)
+        closure = generated_closure()
+    return tuple(generators)
+
+
+def _unitary_subgroup_name(
+    context: SymmetryContext,
+    operation_indices: tuple[int, ...],
+    kpoint,
+) -> str | None:
+    if context.model.group_definition is None or not operation_indices:
+        return None
+    resolved = context.model.group_definition.resolve_little_group(
+        operation_indices,
+        kpoint,
+        bloch_convention=context.model.bloch_convention,
+    )
+    return resolved.name
+
+
+def _sorted_eigenvalues(matrix: np.ndarray) -> tuple[complex, ...]:
+    values = np.linalg.eigvals(np.asarray(matrix, dtype=np.complex128))
+    ordered = sorted(
+        (complex(value) for value in values),
+        key=lambda value: (float(np.angle(value)), float(value.real), float(value.imag)),
+    )
+    return tuple(ordered)
+
+
+def _antiunitary_diagnostics(
+    group: SpaceGroup,
+    resolved_little_group: ResolvedLittleGroup | None,
+    representation: TwistedRepresentation | None,
+    operation_indices: tuple[int, ...],
+) -> tuple[AntiunitaryOperationDiagnostic, ...]:
+    if resolved_little_group is None or representation is None:
+        return ()
+    local_operations = resolved_little_group.concrete.operation_indices
+    output = []
+    for operation_index in operation_indices:
+        operation = group.operations[operation_index]
+        if not operation.antiunitary:
+            continue
+        local = local_operations.index(operation_index)
+        result_local = int(representation.product_table[local, local])
+        square = representation.matrices[local] @ representation.matrices[local].conj()
+        expected = (
+            representation.factor_system.phases[local, local]
+            * representation.matrices[result_local]
+        )
+        result_global = local_operations[result_local]
+        output.append(
+            AntiunitaryOperationDiagnostic(
+                _operation_name(group, operation_index),
+                _operation_name(group, result_global),
+                _sorted_eigenvalues(square),
+                float(np.linalg.norm(square - expected, ord="fro")),
+            )
+        )
+    return tuple(output)
+
+
+def _irrep_unavailable_reason(
+    resolved_little_group: ResolvedLittleGroup | None,
+    leakage: float,
+    tolerance: float,
+    twisted_residual: float,
+) -> str | None:
+    if resolved_little_group is None:
+        return "little co-group could not be identified"
+    factor = resolved_little_group.factor_system
+    if any(factor.antiunitary_flags):
+        return "magnetic corepresentation labels are unavailable"
+    if not factor.cohomologically_trivial:
+        return "projective irrep labels are unavailable for a non-trivial factor system"
+    if leakage > tolerance:
+        return f"band subspace leakage {leakage:.6g} exceeds {tolerance:.6g}"
+    if twisted_residual > tolerance:
+        return f"twisted composition residual {twisted_residual:.6g} exceeds {tolerance:.6g}"
+    return None
+
+
+def _resolved_conjugacy_classes(
+    resolved_little_group: ResolvedLittleGroup | None,
+) -> tuple[tuple[str, ...], ...]:
+    if resolved_little_group is None:
+        return ()
+    return tuple(
+        tuple(
+            resolved_little_group.table.element_names[index]
+            for index in conjugacy_class.element_indices
+        )
+        for conjugacy_class in resolved_little_group.table.conjugacy_classes
+    )
+
+
+def _resolved_finite_mapping(
+    resolved_little_group: ResolvedLittleGroup | None,
+) -> tuple[tuple[str, str], ...]:
+    if resolved_little_group is None:
+        return ()
+    return tuple(
+        (
+            resolved_little_group.table.element_names[actual],
+            resolved_little_group.identification.canonical.table.element_names[canonical],
+        )
+        for actual, canonical in enumerate(
+            resolved_little_group.identification.actual_to_canonical
+        )
+    )
 
 
 def _validated_bands(band_indices) -> tuple[int, ...]:

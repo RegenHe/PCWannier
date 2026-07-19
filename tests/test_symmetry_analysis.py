@@ -8,9 +8,10 @@ import numpy as np
 import pytest
 
 from pcwannier.compute.integration import integrate_overlap_matrix, mesh_integral_view
-from pcwannier.data import Mesh
+from pcwannier.data import BlochSymmetryRunResult, Mesh
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.matrix_io import load_cell_matrix
+from pcwannier.outputs import write_bloch_symmetry_outputs
 from pcwannier.symmetry import (
     BlochSymmetryAction,
     DegeneracyTolerance,
@@ -19,7 +20,9 @@ from pcwannier.symmetry import (
     SewingMatrixRequest,
     SpaceGroupOperation,
     StateBlochSymmetryProvider,
+    analyze_bloch_symmetry,
     analyze_little_group,
+    apply_magnetic_bias_to_model,
     build_symmetry_context,
     coefficient_metric_overlap,
     compare_representations,
@@ -28,6 +31,7 @@ from pcwannier.symmetry import (
     intertwiner_residual,
     little_group,
     run_symmetry_analysis,
+    run_bloch_symmetry_analysis,
     load_sewing_matrix_cache,
     save_sewing_matrix_cache,
 )
@@ -348,6 +352,180 @@ def test_representation_analysis_rejects_noninvariant_energy_block():
         run_symmetry_analysis(state, context)
 
 
+def test_physical_bloch_analysis_needs_no_wannier_targets_and_identifies_irrep():
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0, 1), None),)
+    )
+    assert model.targets == ()
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+
+    result = run_bloch_symmetry_analysis(state, context)
+    point = result.points[0]
+    block = point.degenerate_blocks[0]
+
+    assert point.little_group_name == "C4v"
+    assert point.antiunitary_operation_names == ()
+    assert block.decomposition is not None
+    assert block.decomposition.multiplicities["E"] == 1
+    assert block.irrep_unavailable_reason is None
+
+
+def test_bloch_analysis_reports_leakage_without_constructing_an_irrep():
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0,), None),)
+    )
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+
+    point = analyze_bloch_symmetry(
+        state,
+        context,
+        [0.0, 0.0],
+        [0],
+        name="Gamma",
+    )
+    block = point.degenerate_blocks[0]
+
+    assert block.leakage > 0.5
+    assert block.coupled_outer_bands == (1,)
+    assert block.decomposition is None
+    assert "leakage" in block.irrep_unavailable_reason
+
+
+def test_bloch_analysis_can_disable_degenerate_block_splitting():
+    model = p4mm_model()
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 2.0])
+
+    point = analyze_bloch_symmetry(
+        state,
+        context,
+        [0.0, 0.0],
+        [0, 1],
+        split_degenerate_blocks=False,
+    )
+
+    assert tuple(block.band_indices for block in point.degenerate_blocks) == ((0, 1),)
+
+
+def test_magnetic_bloch_analysis_only_calls_unitary_traces_characters():
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0, 1), None),)
+    )
+    model = apply_magnetic_bias_to_model(model, np.eye(2), [0.0, 0.0, 1.0])
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+
+    point = run_bloch_symmetry_analysis(state, context).points[0]
+    block = point.degenerate_blocks[0]
+
+    assert point.unitary_subgroup_name == "C4"
+    assert set(point.antiunitary_operation_names) == {
+        "sigma_x",
+        "sigma_y",
+        "sigma_d",
+        "sigma_d2",
+    }
+    assert not set(point.antiunitary_operation_names) & set(block.unitary_characters)
+    assert block.decomposition is None
+    assert "corepresentation" in block.irrep_unavailable_reason
+    assert len(block.antiunitary_diagnostics) == 4
+
+
+def test_bloch_analysis_reuses_one_full_outer_sewing_per_operation():
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0, 1), None),)
+    )
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+    original_overlap = state.metric_overlap
+    calls = 0
+
+    def counted_overlap(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_overlap(*args, **kwargs)
+
+    state.metric_overlap = counted_overlap
+    provider = StateBlochSymmetryProvider(state, context)
+    run_bloch_symmetry_analysis(state, context, provider=provider)
+
+    assert calls == len(model.group.operations)
+    assert len(provider.cached_sewing_matrices) == len(model.group.operations)
+
+
+def test_bloch_preanalysis_writes_reusable_s_and_d_text_caches(tmp_path):
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0, 1), None),)
+    )
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+    provider = StateBlochSymmetryProvider(state, context)
+    analysis = run_bloch_symmetry_analysis(state, context, provider=provider)
+    smat = np.empty((1, 1, 1), dtype=object)
+    smat[0, 0, 0] = np.eye(2, dtype=np.complex128)
+    config = SimpleNamespace(S_file="S.txt", D_file="D.txt", base_dir=tmp_path)
+    result = BlochSymmetryRunResult(
+        config=config,
+        orthogonality_report=np.zeros((1, 1, 1, 6)),
+        S=smat,
+        symmetry=context,
+        analysis=analysis,
+        sewing_matrices=provider.cached_sewing_matrices,
+        sewing_calculation_fingerprint=provider.sewing_cache_fingerprint,
+    )
+
+    write_bloch_symmetry_outputs(result, config, tmp_path)
+
+    loaded_s = load_cell_matrix(tmp_path / "S.txt", (1, 1, 1))
+    loaded_d = load_sewing_matrix_cache(tmp_path / "D.txt")
+    assert np.allclose(loaded_s[0, 0, 0], np.eye(2))
+    assert len(loaded_d.entries) == len(model.group.operations)
+
+
 def test_target_2c_a1_has_expected_gamma_x_m_content():
     model = square_2c_model()
     target = model.target("square_2c_A1")
@@ -373,6 +551,8 @@ def test_target_2c_a1_has_expected_gamma_x_m_content():
 def test_degeneracy_metric_compatibility_and_intertwiner_helpers():
     tolerance = DegeneracyTolerance(absolute=1e-5, relative=1e-8)
     assert group_degenerate_bands([0, 1, 2], [1.0, 1.0 + 1e-6, 2.0], tolerance) == ((0, 1), (2,))
+    no_chain = DegeneracyTolerance(absolute=1.0, relative=0.0)
+    assert group_degenerate_bands([0, 1, 2], [0.0, 0.9, 1.8], no_chain) == ((0, 1), (2,))
 
     left = np.array([[1.0], [1.0j]])
     right = np.array([[2.0], [1.0]])

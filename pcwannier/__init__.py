@@ -1,8 +1,13 @@
 from ._version import __version__
 from .config import EnergyWindow, IncarConfig, load_config
-from .compute import run_calculation
+from .compute import run_bloch_symmetry_preanalysis, run_calculation
 from .maxwell import FieldComponents, FieldKind, MaterialKind, MaxwellProblem, PrimaryField
-from .outputs import write_base_figures, write_interpolation_outputs, write_outputs
+from .outputs import (
+    write_base_figures,
+    write_bloch_symmetry_outputs,
+    write_interpolation_outputs,
+    write_outputs,
+)
 from .sources.comsol import load_input
 from .symmetry import (
     FiniteGroupDefinition,
@@ -41,7 +46,9 @@ __all__ = [
     "load_symmetry",
     "load_symmetry_group",
     "run_calculation",
+    "run_bloch_symmetry_preanalysis",
     "write_base_figures",
+    "write_bloch_symmetry_outputs",
     "write_interpolation_outputs",
     "write_outputs",
 ]

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from threading import Lock
+
 import numpy as np
 
 from ..data import InputBundle, Mesh
 from ..matrix_io import load_cell_matrix
 from .integration import (
+    build_phase_weighted_triangle_mass,
     integrate_overlap_matrix,
+    integrate_overlap_element_matrices,
     integrate_weighted_abs2_columns,
     mesh_integral_view,
     validated_real,
@@ -61,6 +65,8 @@ class StateCollection:
         self.extended_metric_material: np.ndarray | None = None
         self._identity_transform: np.ndarray | None = None
         self._phase_cache: dict[tuple[int, int, int], np.ndarray] = {}
+        self._phase_mass_cache: dict[tuple[bool, bytes], np.ndarray] = {}
+        self._phase_mass_lock = Lock()
 
     def _normalize_field_blocks(self) -> None:
         for idx in np.ndindex(self.fields.shape):
@@ -295,18 +301,31 @@ class StateCollection:
         key = (int(i), int(j), int(k))
         if key in self._phase_cache:
             return self._phase_cache[key]
-        sign = -1 if self.config.dataset_type.lower() == "comsol" else 1
         kvec = get_kxyz(self.config, [i, j, k])[: self.config.kdim]
-        phase = np.exp(1j * sign * np.dot(self.mesh.vertices, kvec))
+        phase = np.exp(1j * self.bloch_sign * np.dot(self.mesh.vertices, kvec))
         self._phase_cache[key] = phase
         return phase
+
+    @property
+    def bloch_sign(self) -> int:
+        symmetry_context = getattr(self.config, "symmetry_context", None)
+        if symmetry_context is not None:
+            return int(symmetry_context.model.bloch_convention.sign)
+        return -1 if self.config.dataset_type.lower() == "comsol" else 1
+
+    def get_full_bloch_block(self, i: int, j: int, k: int) -> np.ndarray:
+        """Return nodal values of the complete, piecewise-linear Bloch FEM field."""
+
+        block = self.get_block(i, j, k)
+        if not self.is_bloch:
+            return block
+        return block * self.get_phase(i, j, k)[None, :]
 
     def get_extention_phase(self, i: int, j: int, k: int) -> np.ndarray:
         if self.extention_mesh is None:
             raise ValueError("The field has not been extended.")
-        sign = -1 if self.config.dataset_type.lower() == "comsol" else 1
         kvec = get_kxyz(self.config, [i, j, k])[: self.config.kdim]
-        return np.exp(1j * sign * np.dot(self.extention_mesh.vertices, kvec))
+        return np.exp(1j * self.bloch_sign * np.dot(self.extention_mesh.vertices, kvec))
 
     def extention(self, n: list[int]) -> None:
         self.extention_mesh = self.mesh.__deepcopy__()
@@ -349,6 +368,7 @@ class StateCollection:
         view=None,
         conjugate_left: bool = True,
         chunk_size: int | None = None,
+        phase_wavevector: np.ndarray | None = None,
     ) -> np.ndarray:
         if extended:
             weights = self.get_extended_metric_material()
@@ -356,6 +376,42 @@ class StateCollection:
         else:
             weights = self.metric_material
             integral_view = self.integral_view if view is None else view
+        if phase_wavevector is not None:
+            if self.integration_mode != "quadratic":
+                raise ValueError("phase_wavevector is only valid for quadratic integration.")
+            cache_key = None
+            element_matrices = None
+            if view is None:
+                cache_key = (
+                    bool(extended),
+                    np.ascontiguousarray(phase_wavevector, dtype=np.float64).tobytes(),
+                )
+                element_matrices = self._phase_mass_cache.get(cache_key)
+            if element_matrices is None and cache_key is not None:
+                with self._phase_mass_lock:
+                    element_matrices = self._phase_mass_cache.get(cache_key)
+                    if element_matrices is None:
+                        element_matrices = build_phase_weighted_triangle_mass(
+                            integral_view,
+                            weights,
+                            phase_wavevector,
+                        )
+                        self._phase_mass_cache[cache_key] = element_matrices
+            elif element_matrices is None:
+                element_matrices = build_phase_weighted_triangle_mass(
+                    integral_view,
+                    weights,
+                    phase_wavevector,
+                )
+            return integrate_overlap_element_matrices(
+                integral_view,
+                left,
+                right,
+                element_matrices,
+                conjugate_left=conjugate_left,
+                chunk_size=chunk_size,
+                backend=self.compute_backend,
+            )
         return integrate_overlap_matrix(
             integral_view,
             left,

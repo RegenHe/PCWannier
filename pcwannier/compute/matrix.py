@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..matrix_io import load_cell_matrix
-from .kspace import neighbor_reciprocal_lattice_vectors
+from .kspace import get_kxyz, neighbor_reciprocal_lattice_vectors
 from .parallel import parallel_map
 from .state import StateCollection
 
@@ -47,12 +47,26 @@ class MSet:
 
         def calc_for_index(idx):
             i, j, k = idx
-            left = self.state.get_block(i, j, k)
+            quadratic = self.state.integration_mode == "quadratic"
+            left = (
+                self.state.get_full_bloch_block(i, j, k)
+                if quadratic
+                else self.state.get_block(i, j, k)
+            )
+            source_k = get_kxyz(self.config, [i, j, k])[: self.config.kdim]
             result = []
             for b in range(b_half):
                 ik, k_raw = neighbor_reciprocal_lattice_vectors(self.config, [i, j, k], b)
-                right = self.state.get_block(*ik)
-                if k_raw is not None:
+                right = (
+                    self.state.get_full_bloch_block(*ik)
+                    if quadratic
+                    else self.state.get_block(*ik)
+                )
+                if quadratic:
+                    target_index = ik if k_raw is None else k_raw
+                    target_k = get_kxyz(self.config, list(target_index))[: self.config.kdim]
+                    phase_wavevector = -self.state.bloch_sign * (target_k - source_k)
+                elif k_raw is not None:
                     phase1 = self.state.get_phase(*ik)
                     phase2 = self.state.get_phase(*k_raw)
                     right = right * (phase1 * np.conj(phase2))[None, :]
@@ -61,6 +75,7 @@ class MSet:
                         left,
                         right,
                         chunk_size=64,
+                        phase_wavevector=phase_wavevector if quadratic else None,
                     )
                 )
             return idx, result

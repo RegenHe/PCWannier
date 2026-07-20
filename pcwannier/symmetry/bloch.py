@@ -38,6 +38,7 @@ def fractional_mesh_vertices(mesh, real_lattice_vectors, lattice_const: float) -
 class BarycentricStencil:
     vertex_indices: np.ndarray
     weights: np.ndarray
+    lattice_shifts: np.ndarray | None = None
 
     def apply(self, values: np.ndarray) -> np.ndarray:
         array = np.asarray(values)
@@ -56,6 +57,26 @@ class BarycentricStencil:
                 optimize=True,
             )
         raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
+
+    def apply_quasiperiodic(
+        self,
+        values: np.ndarray,
+        k_fractional,
+        bloch_sign: int,
+    ) -> np.ndarray:
+        if self.lattice_shifts is None:
+            raise ValueError("Quasi-periodic interpolation requires lattice shifts.")
+        kpoint = np.asarray(k_fractional, dtype=float).reshape(-1)
+        shifts = np.asarray(self.lattice_shifts, dtype=np.int64)
+        if shifts.ndim != 2 or shifts.shape[0] != self.vertex_indices.shape[0]:
+            raise ValueError("Barycentric lattice shifts have an invalid shape.")
+        if shifts.shape[1] != kpoint.size:
+            raise ValueError("Bloch k point and interpolation lattice shifts have different dimensions.")
+        sampled = self.apply(values)
+        phase = np.exp(2j * np.pi * int(bloch_sign) * (shifts @ kpoint))
+        if sampled.ndim == 2:
+            return sampled * phase[None, :]
+        return sampled * phase[None, :, None]
 
 
 class PeriodicTriangleInterpolator:
@@ -134,6 +155,7 @@ class PeriodicTriangleInterpolator:
         tiled = (base[None, :, :, :] + shifts[:, None, None, :]).reshape(-1, 3, 2)
         self._triangles = tiled
         self._triangle_sources = np.tile(self.elements, (len(shifts), 1))
+        self._triangle_shifts = np.repeat(shifts.astype(np.int64), len(self.elements), axis=0)
         lower = np.min(tiled, axis=1)
         upper = np.max(tiled, axis=1)
         self._lower = lower
@@ -155,9 +177,12 @@ class PeriodicTriangleInterpolator:
         query = np.asarray(points, dtype=float)
         if query.ndim != 2 or query.shape[1] != 2:
             raise ValueError("Interpolation points must have shape (count, 2).")
-        query = np.asarray([reduce_fractional(point, self.tolerance).reduced for point in query])
+        images = tuple(reduce_fractional(point, self.tolerance) for point in query)
+        query = np.asarray([image.reduced for image in images])
+        reduction_shifts = np.asarray([image.lattice_shift for image in images], dtype=np.int64)
         indices = np.empty((len(query), 3), dtype=np.intp)
         weights = np.empty((len(query), 3), dtype=float)
+        lattice_shifts = np.empty((len(query), 2), dtype=np.int64)
 
         distances, nearest = self._node_tree.query(query, k=1, p=np.inf)
         for point_index, point in enumerate(query):
@@ -165,6 +190,15 @@ class PeriodicTriangleInterpolator:
                 node = int(self._node_representative[int(nearest[point_index])])
                 indices[point_index] = (node, node, node)
                 weights[point_index] = (1.0, 0.0, 0.0)
+                local_shift = np.rint(point - self.vertices[node]).astype(np.int64)
+                if not np.allclose(
+                    point - self.vertices[node],
+                    local_shift,
+                    rtol=0.0,
+                    atol=self.tolerance,
+                ):
+                    raise ValueError("Periodic node interpolation did not yield an integer lattice shift.")
+                lattice_shifts[point_index] = reduction_shifts[point_index] + local_shift
                 continue
             cell = np.floor(np.clip(point, 0.0, 1.0 - np.finfo(float).eps) * self._grid_count).astype(int)
             candidates = self._buckets.get((int(cell[0]), int(cell[1])), ())
@@ -177,7 +211,10 @@ class PeriodicTriangleInterpolator:
             triangle_index, barycentric = found
             indices[point_index] = self._triangle_sources[triangle_index]
             weights[point_index] = barycentric
-        return BarycentricStencil(indices, weights)
+            lattice_shifts[point_index] = (
+                reduction_shifts[point_index] + self._triangle_shifts[triangle_index]
+            )
+        return BarycentricStencil(indices, weights, lattice_shifts)
 
     def _find_triangle(self, point: np.ndarray, candidates) -> tuple[int, np.ndarray] | None:
         best = None
@@ -235,6 +272,46 @@ class BlochSymmetryAction:
         transformed_k = operation.act_reciprocal(source_k)
         stencil = self._stencil(operation)
         sampled = stencil.apply(values)
+        transformed = self._apply_components(sampled, operation, field_kind)
+        if operation.antiunitary:
+            if time_reversal is None:
+                raise ValueError("Antiunitary Bloch actions require a field time-reversal callback.")
+            transformed = np.asarray(time_reversal(transformed), dtype=np.complex128)
+        phase = np.exp(
+            -self.bloch_sign * 2j * np.pi * np.dot(transformed_k, operation.translation)
+        )
+        return phase * transformed
+
+    def apply_full_bloch(
+        self,
+        values: np.ndarray,
+        operation: SpaceGroupOperation,
+        source_k_fractional,
+        field_kind: FieldKind,
+        *,
+        time_reversal=None,
+    ) -> np.ndarray:
+        """Apply a space-group operation to complete piecewise-linear Bloch fields."""
+
+        stencil = self._stencil(operation)
+        sampled = stencil.apply_quasiperiodic(
+            values,
+            source_k_fractional,
+            self.bloch_sign,
+        )
+        transformed = self._apply_components(sampled, operation, field_kind)
+        if operation.antiunitary:
+            if time_reversal is None:
+                raise ValueError("Antiunitary Bloch actions require a field time-reversal callback.")
+            transformed = np.asarray(time_reversal(transformed), dtype=np.complex128)
+        return transformed
+
+    def _apply_components(
+        self,
+        sampled: np.ndarray,
+        operation: SpaceGroupOperation,
+        field_kind: FieldKind,
+    ) -> np.ndarray:
         component_matrix = cartesian_field_matrix(
             operation, self.real_lattice_vectors, field_kind, self.tolerance
         )
@@ -250,14 +327,7 @@ class BlochSymmetryAction:
                     f"{field_kind.value} fields require {operation.dimension} Cartesian components."
                 )
             transformed = np.einsum("ab,nvb->nva", component_matrix, sampled, optimize=True)
-        if operation.antiunitary:
-            if time_reversal is None:
-                raise ValueError("Antiunitary Bloch actions require a field time-reversal callback.")
-            transformed = np.asarray(time_reversal(transformed), dtype=np.complex128)
-        phase = np.exp(
-            -self.bloch_sign * 2j * np.pi * np.dot(transformed_k, operation.translation)
-        )
-        return phase * transformed
+        return transformed
 
     def _stencil(self, operation: SpaceGroupOperation) -> BarycentricStencil:
         reduced_tau = reduce_fractional(operation.translation, self.tolerance).reduced
@@ -405,19 +475,30 @@ class StateBlochSymmetryProvider:
 
         full_source_bands = self._actual_bands(source_index)
         full_target_bands = self._actual_bands(target_index)
-        source = self._orthonormal_block(source_index, full_source_bands)
-        if np.any(source_shift):
-            source = source * self._fiber_phase(source_shift)[None, :]
-        transformed = self.action.apply(
-            source,
-            request.operation,
-            request.source_k_fractional,
-            request.field_kind,
-            time_reversal=self._time_reversal,
-        )
-        target = self._orthonormal_block(target_index, full_target_bands)
-        if np.any(target_shift):
-            target = target * self._fiber_phase(target_shift)[None, :]
+        if self.state.integration_mode == "quadratic":
+            source = self._full_orthonormal_block(source_index, full_source_bands)
+            transformed = self.action.apply_full_bloch(
+                source,
+                request.operation,
+                source_representative,
+                request.field_kind,
+                time_reversal=self._time_reversal,
+            )
+            target = self._full_orthonormal_block(target_index, full_target_bands)
+        else:
+            source = self._orthonormal_block(source_index, full_source_bands)
+            if np.any(source_shift):
+                source = source * self._fiber_phase(source_shift)[None, :]
+            transformed = self.action.apply(
+                source,
+                request.operation,
+                request.source_k_fractional,
+                request.field_kind,
+                time_reversal=self._time_reversal,
+            )
+            target = self._orthonormal_block(target_index, full_target_bands)
+            if np.any(target_shift):
+                target = target * self._fiber_phase(target_shift)[None, :]
         matrix = self.state.metric_overlap(
             target,
             transformed,
@@ -651,6 +732,10 @@ class StateBlochSymmetryProvider:
         orthonormal = (block.T @ correction).T
         return orthonormal[local]
 
+    def _full_orthonormal_block(self, index, band_indices) -> np.ndarray:
+        periodic = self._orthonormal_block(index, band_indices)
+        return periodic * self.state.get_phase(*self._state_index(index))[None, :]
+
     def _actual_bands(self, index) -> tuple[int, ...]:
         state_index = self._state_index(index)
         return tuple(int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1))
@@ -857,6 +942,8 @@ class StateBlochSymmetryProvider:
     def _calculation_fingerprint(self) -> str:
         digest = hashlib.sha256()
         digest.update(b"PCWannier sewing input v2\0")
+        if self.state.integration_mode == "quadratic":
+            digest.update(b"quadratic full-Bloch sewing v1\0")
         for label, value in (
             ("real_lattice_vectors", self.state.config.real_lattice_vectors),
             ("lattice_const", [self.state.config.lattice_const]),

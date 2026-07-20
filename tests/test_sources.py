@@ -9,6 +9,11 @@ from pcwannier.compute import (
     integrate_weighted_columns,
     is_numba_available,
 )
+from pcwannier.compute.integration import (
+    build_phase_weighted_triangle_mass,
+    integrate_overlap_element_matrices,
+    numba_parallel_policy,
+)
 from pcwannier.data import FieldData, Mesh, RawData
 from pcwannier.outputs import _interpolate_real_mesh
 from pcwannier.sources.comsol import (
@@ -255,6 +260,193 @@ def test_quadratic_weighted_abs2_is_real_and_exact_for_linear_fields():
     actual = integrate_weighted_abs2_columns(mesh, np.ones(3), values, mode="quadratic", backend="python")
 
     assert np.allclose(actual, expected, rtol=1e-13, atol=1e-13)
+
+
+def test_quadratic_overlap_with_linear_metric_uses_cubic_barycentric_moments():
+    mesh = Mesh(np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]), np.array([[0, 1, 2]]))
+    metric = np.array([1.0, 2.0, 4.0])
+    left = np.array([[1.0 + 0.5j, -2.0j, 3.0], [0.25, 1.5 - 0.2j, -1.0]])
+    right = np.array([[2.0, -1.0j, 0.5 + 0.1j], [1.0j, 2.5, -0.75]])
+    triangle_weight = 0.5 / 3.0
+    summed = np.sum(metric)
+    mass = triangle_weight * (
+        metric[:, None] + metric[None, :] + summed
+    ) / 20.0
+    mass[np.diag_indices(3)] *= 2.0
+
+    expected = np.conj(left) @ mass @ right.T
+    expected_bilinear = left @ mass @ right.T
+    actual = integrate_overlap_matrix(
+        mesh,
+        left,
+        right,
+        metric,
+        mode="quadratic",
+        backend="python",
+    )
+    actual_bilinear = integrate_overlap_matrix(
+        mesh,
+        left,
+        right,
+        metric,
+        conjugate_left=False,
+        mode="quadratic",
+        backend="python",
+    )
+    gram = integrate_overlap_matrix(
+        mesh,
+        left,
+        left,
+        metric,
+        mode="quadratic",
+        backend="python",
+    )
+    norms = integrate_weighted_abs2_columns(
+        mesh,
+        metric,
+        left.T,
+        mode="quadratic",
+        backend="python",
+    )
+
+    assert np.allclose(actual, expected, rtol=1e-13, atol=1e-13)
+    assert np.allclose(actual_bilinear, expected_bilinear, rtol=1e-13, atol=1e-13)
+    assert np.allclose(gram, gram.conj().T, rtol=0.0, atol=1e-13)
+    assert np.min(np.linalg.eigvalsh(gram)) > 0.0
+    assert np.allclose(norms, np.diag(gram), rtol=1e-13, atol=1e-13)
+
+
+def test_quadratic_linear_metric_python_numba_serial_parallel_agree():
+    if not is_numba_available():
+        pytest.skip("Numba is not available")
+
+    mesh = Mesh(
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]),
+        np.array([[0, 1, 2], [1, 3, 2]]),
+    )
+    rng = np.random.default_rng(739)
+    metric = np.array([1.0, 2.0, 4.0, 3.0])
+    fields = rng.normal(size=(6, 4)) + 1j * rng.normal(size=(6, 4))
+    columns = rng.normal(size=(4, 40)) + 1j * rng.normal(size=(4, 40))
+    expected_gram = integrate_overlap_matrix(
+        mesh,
+        fields,
+        fields,
+        metric,
+        mode="quadratic",
+        backend="python",
+    )
+    expected_norms = integrate_weighted_abs2_columns(
+        mesh,
+        metric,
+        columns,
+        mode="quadratic",
+        backend="python",
+    )
+
+    with numba_parallel_policy(False):
+        serial_gram = integrate_overlap_matrix(
+            mesh,
+            fields,
+            fields,
+            metric,
+            mode="quadratic",
+            backend="numba",
+        )
+        serial_norms = integrate_weighted_abs2_columns(
+            mesh,
+            metric,
+            columns,
+            mode="quadratic",
+            backend="numba",
+        )
+    with numba_parallel_policy(True):
+        parallel_gram = integrate_overlap_matrix(
+            mesh,
+            fields,
+            fields,
+            metric,
+            mode="quadratic",
+            backend="numba",
+        )
+        parallel_norms = integrate_weighted_abs2_columns(
+            mesh,
+            metric,
+            columns,
+            mode="quadratic",
+            backend="numba",
+        )
+
+    assert np.allclose(serial_gram, expected_gram, rtol=1e-13, atol=1e-13)
+    assert np.allclose(parallel_gram, expected_gram, rtol=1e-13, atol=1e-13)
+    assert np.allclose(serial_norms, expected_norms, rtol=1e-13, atol=1e-13)
+    assert np.allclose(parallel_norms, expected_norms, rtol=1e-13, atol=1e-13)
+
+
+def test_phase_weighted_triangle_mass_zero_phase_matches_exact_mass():
+    mesh = Mesh(
+        np.array([[0.0, 0.0], [1.3, 0.1], [0.2, 0.9]]),
+        np.array([[0, 1, 2]]),
+    )
+    metric = np.array([1.0, 2.0, 4.0])
+    expected = integrate_overlap_matrix(
+        mesh,
+        np.eye(3),
+        np.eye(3),
+        metric,
+        mode="quadratic",
+        backend="python",
+    )
+
+    local = build_phase_weighted_triangle_mass(mesh, metric, np.zeros(2))
+
+    assert np.allclose(local[0], expected, rtol=0.0, atol=1e-14)
+
+
+def test_phase_weighted_triangle_mass_obeys_conjugate_wavevector_relation():
+    mesh = Mesh(
+        np.array([[0.1, -0.2], [1.1, 0.0], [0.3, 1.2]]),
+        np.array([[0, 1, 2]]),
+    )
+    metric = np.array([1.0, 1.7, 3.2])
+    wavevector = np.array([2.3, -1.1])
+
+    positive = build_phase_weighted_triangle_mass(mesh, metric, wavevector)
+    negative = build_phase_weighted_triangle_mass(mesh, metric, -wavevector)
+
+    assert np.allclose(
+        positive.conj().transpose(0, 2, 1),
+        negative,
+        rtol=2e-12,
+        atol=2e-13,
+    )
+
+
+def test_phase_element_matrix_contraction_python_numba_agree():
+    mesh = Mesh(
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+        np.array([[0, 1, 2]]),
+    )
+    metric = np.array([1.0, 2.0, 3.0])
+    local = build_phase_weighted_triangle_mass(mesh, metric, np.array([1.7, -0.4]))
+    left = np.array([[1.0 + 0.2j, 0.3, -0.1j], [0.2, 0.8j, 1.1]])
+    right = np.array([[0.4j, 1.2, 0.5], [1.0, -0.3j, 0.7]])
+    expected = integrate_overlap_element_matrices(
+        mesh, left, right, local, backend="python"
+    )
+
+    if is_numba_available():
+        serial = integrate_overlap_element_matrices(
+            mesh, left, right, local, backend="numba"
+        )
+        tiled_left = np.tile(left, (4, 1))
+        tiled_right = np.tile(right, (4, 1))
+        with numba_parallel_policy(True):
+            parallel = integrate_overlap_element_matrices(
+                mesh, tiled_left, tiled_right, local, backend="numba"
+            )
+        assert np.allclose(serial, expected, rtol=1e-12, atol=1e-12)
+        assert np.allclose(parallel[:2, :2], expected, rtol=1e-12, atol=1e-12)
 
 
 def test_mesh_extension_matches_legacy_incremental_algorithm():

@@ -198,6 +198,66 @@ def test_m0_orthogonal_transform_uses_conjugate_transpose():
     assert not np.allclose(actual, correction @ raw @ correction)
 
 
+def test_quadratic_m0_uses_full_bloch_fields_and_unwrapped_neighbor_phase():
+    config = SimpleNamespace(
+        composition_of_b=[[1, 0], [-1, 0]],
+        band_calc_num=1,
+        M_in=False,
+        use_cached_data=[],
+        kdim=2,
+        k_points=[np.array([-0.25, 0.25]), np.array([0.0])],
+        reciprocal_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
+    )
+    band_indices = np.empty((2, 1, 1), dtype=object)
+    transforms = np.empty((2, 1, 1), dtype=object)
+    for index in np.ndindex(band_indices.shape):
+        band_indices[index] = [0]
+        transforms[index] = np.eye(1, dtype=np.complex128)
+    phase_wavevectors = []
+    full_block_calls = []
+
+    def object_grid(factory):
+        result = np.empty((2, 1, 1), dtype=object)
+        for index in np.ndindex(result.shape):
+            result[index] = factory(*index)
+        return result
+
+    def full_block(i, j, k):
+        full_block_calls.append((i, j, k))
+        return np.full((1, 3), i + 1.0, dtype=np.complex128)
+
+    def overlap(left, right, *, phase_wavevector=None, **_kwargs):
+        phase_wavevectors.append(np.asarray(phase_wavevector).copy())
+        return np.array([[left[0, 0] + 1j * right[0, 0]]])
+
+    state = SimpleNamespace(
+        config=config,
+        k_shape=(2, 1, 1),
+        E_idx=band_indices,
+        integration_mode="quadratic",
+        bloch_sign=-1,
+        k_indices=lambda: iter(np.ndindex((2, 1, 1))),
+        turn_to_bloch=lambda: None,
+        gen_matrix_on_kmesh=lambda factory: object_grid(factory),
+        get_full_bloch_block=full_block,
+        get_block=lambda *_: (_ for _ in ()).throw(
+            AssertionError("quadratic M0 must not use periodic nodal blocks")
+        ),
+        metric_overlap=overlap,
+        get_transform=lambda: transforms,
+    )
+    mset = MSet(state, threads=1)
+
+    mset.init_M0()
+
+    assert len(full_block_calls) == 4
+    assert len(phase_wavevectors) == 2
+    assert np.allclose(phase_wavevectors, [[np.pi, 0.0], [np.pi, 0.0]])
+    reverse = mset.get_M0(0, 0, 0, 1)
+    assert np.allclose(reverse, mset.mM0[1, 0, 0][0].conj().T)
+
+
 def test_gradient_rejects_zero_m_diagonal():
     with np.testing.assert_raises(FloatingPointError):
         Gradient._checked_diagonal(np.array([[0.0, 1.0], [1.0, 1.0]]), (0, 0, 0), 0)
@@ -446,7 +506,7 @@ def _object_grid(value):
     return grid
 
 
-def _two_band_overlap_state(metric_material=None, components="Ez"):
+def _two_band_overlap_state(metric_material=None, components="Ez", integration_mode="nodal"):
     mesh = Mesh(
         np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
         np.array([[0, 1, 2]]),
@@ -458,7 +518,7 @@ def _two_band_overlap_state(metric_material=None, components="Ez"):
     energies = _object_grid(np.array([1.0, 2.0]))
     config = SimpleNamespace(
         kdim=2,
-        integration_mode="nodal",
+        integration_mode=integration_mode,
         dataset_type="comsol",
         use_cached_data=[],
         real_lattice_vectors=np.eye(2),
@@ -506,3 +566,47 @@ def test_state_metric_interface_controls_overlap_norms_and_extension():
         state.extended_metric_material,
         metric[state.space_to_original_mapping],
     )
+
+
+def test_quadratic_state_overlap_is_hermitian_and_orthogonalizes():
+    state = _two_band_overlap_state(
+        np.array([1.0, 2.0, 4.0]),
+        integration_mode="quadratic",
+    )
+
+    _, initially_needs_orth = state.check_orthogonality()
+    raw_overlap = np.asarray(state.S[0, 0, 0])
+    state.orthogonalize()
+    strict_report, still_needs_orth = state.check_orthogonality()
+
+    assert initially_needs_orth
+    assert np.allclose(raw_overlap, raw_overlap.conj().T, rtol=0.0, atol=1e-13)
+    assert np.min(np.linalg.eigvalsh(raw_overlap)) > 0.0
+    assert not still_needs_orth
+    assert np.max(strict_report[..., 3]) < 1e-10
+
+
+def test_quadratic_phase_mass_is_cached_per_wavevector(monkeypatch):
+    state = _two_band_overlap_state(
+        np.array([1.0, 2.0, 4.0]),
+        integration_mode="quadratic",
+    )
+    block = state.get_block(0, 0, 0)
+    wavevector = np.array([1.25, -0.75])
+    import pcwannier.compute.state as state_module
+
+    original = state_module.build_phase_weighted_triangle_mass
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(state_module, "build_phase_weighted_triangle_mass", counted)
+
+    first = state.metric_overlap(block, block, phase_wavevector=wavevector)
+    second = state.metric_overlap(block, block, phase_wavevector=wavevector.copy())
+
+    assert calls == 1
+    assert np.allclose(first, second)

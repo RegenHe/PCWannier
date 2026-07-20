@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 
 from pcwannier.compute.integration import integrate_overlap_matrix, mesh_integral_view
-from pcwannier.data import BlochSymmetryRunResult, Mesh
+from pcwannier.compute.state import StateCollection
+from pcwannier.data import BlochSymmetryRunResult, InputBundle, Mesh
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.matrix_io import load_cell_matrix
 from pcwannier.outputs import write_bloch_symmetry_outputs
@@ -115,6 +116,116 @@ def test_bloch_action_uses_comsol_translation_phase_and_periodic_part():
     field = np.ones((1, mesh.vertices.shape[0]), dtype=np.complex128)
     transformed = action.apply(field, operation, np.array([0.25, 0.0]), FieldKind.SCALAR)
     assert np.allclose(transformed, 1j * field, atol=1e-12)
+
+
+def test_full_bloch_action_uses_quasiperiodic_lattice_shift():
+    mesh = _square_mesh()
+    operation = SpaceGroupOperation(np.eye(2, dtype=int), np.array([1.0, 0.0]))
+    action = BlochSymmetryAction(
+        mesh.vertices,
+        mesh.elements,
+        np.eye(2),
+        bloch_sign=-1,
+    )
+    field = np.ones((1, mesh.vertices.shape[0]), dtype=np.complex128)
+
+    transformed = action.apply_full_bloch(
+        field,
+        operation,
+        np.array([0.25, 0.0]),
+        FieldKind.SCALAR,
+    )
+
+    expected = np.where(mesh.vertices[:, 0] < 1.0 - 1.0e-12, 1j, 1.0)
+    assert np.allclose(transformed, expected[None, :], atol=1e-12)
+
+
+def test_full_bloch_antiunitary_action_conjugates_quasiperiodic_phase():
+    mesh = _square_mesh()
+    operation = SpaceGroupOperation(
+        np.eye(2, dtype=int),
+        np.array([1.0, 0.0]),
+        antiunitary=True,
+    )
+    action = BlochSymmetryAction(
+        mesh.vertices,
+        mesh.elements,
+        np.eye(2),
+        bloch_sign=-1,
+    )
+    field = np.ones((1, mesh.vertices.shape[0]), dtype=np.complex128)
+
+    transformed = action.apply_full_bloch(
+        field,
+        operation,
+        np.array([0.25, 0.0]),
+        FieldKind.ELECTRIC_Z,
+        time_reversal=np.conj,
+    )
+
+    expected = np.where(mesh.vertices[:, 0] < 1.0 - 1.0e-12, -1j, 1.0)
+    assert np.allclose(transformed, expected[None, :], atol=1e-12)
+
+
+def test_quadratic_identity_sewing_at_bz_boundary_is_unitary():
+    model = square_2c_model(analysis=False)
+    k_axes = [np.array([-0.5, 0.0]), np.array([-0.5, 0.0])]
+    context = build_symmetry_context(model, k_axes)
+    mesh = _square_mesh()
+    fractional = mesh.vertices
+    periodic = np.asarray(
+        [
+            np.ones(len(fractional)),
+            np.cos(2.0 * np.pi * fractional[:, 0])
+            + 0.4 * np.cos(2.0 * np.pi * fractional[:, 1]),
+        ],
+        dtype=np.complex128,
+    )
+    fields = np.empty((2, 2, 1), dtype=object)
+    bands = np.empty((2, 2, 1), dtype=object)
+    energies = np.empty((2, 2, 1), dtype=object)
+    for i, kx in enumerate(k_axes[0]):
+        for j, ky in enumerate(k_axes[1]):
+            phase = np.exp(2j * np.pi * (fractional @ np.array([kx, ky])))
+            fields[i, j, 0] = periodic * phase[None, :]
+            bands[i, j, 0] = [0, 1]
+            energies[i, j, 0] = np.array([1.0, 1.0])
+    config = SimpleNamespace(
+        kdim=2,
+        integration_mode="quadratic",
+        dataset_type="synthetic",
+        use_cached_data=[],
+        real_lattice_vectors=np.eye(2),
+        reciprocal_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
+        extension=[1, 1],
+        k_points=k_axes,
+        symmetry_context=context,
+    )
+    metric = 1.0 + fractional[:, 0] * (1.0 - fractional[:, 0])
+    state = StateCollection(
+        InputBundle(
+            config=config,
+            maxwell=MaxwellProblem.for_components("Ez"),
+            mesh=mesh,
+            fields=fields,
+            metric_material=metric,
+            energies=energies,
+            band_indices=bands,
+            inner_band_indices=bands.copy(),
+            energy_matrix=np.ones((2, 2, 1, 2)),
+        ),
+        threads=1,
+    )
+    state.orthogonalize()
+    state.turn_to_bloch()
+    provider = StateBlochSymmetryProvider(state, context)
+    identity_index = model.group.operation_index(model.group.operation_by_name("E"))
+    mapping = provider.mapping(identity_index, (0, 1))
+
+    sewing = provider.sewing_matrix_for_mapping(mapping, (0, 1))
+
+    assert np.allclose(sewing, np.eye(2), rtol=0.0, atol=2e-12)
 
 
 def test_scalar_ez_and_hz_have_distinct_mirror_actions():

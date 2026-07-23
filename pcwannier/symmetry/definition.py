@@ -87,6 +87,85 @@ class ResolvedIrrep:
         return self.canonical_irrep.characters[canonical]
 
 
+def _extend_one_dimensional_magnetic_irrep(
+    full_identification: FiniteGroupIdentification,
+    unitary_irrep: ResolvedIrrep,
+    tolerance: float,
+) -> ResolvedIrrep:
+    """Extend a unitary-subgroup irrep to an index-two magnetic corepresentation."""
+
+    if unitary_irrep.dimension != 1:
+        raise NotImplementedError(
+            "Automatic magnetic site-corepresentation extension currently supports "
+            "one-dimensional unitary-subgroup irreps only."
+        )
+    concrete = full_identification.concrete
+    flags = concrete.antiunitary_flags
+    antiunitary = [index for index, flag in enumerate(flags) if flag]
+    if not antiunitary or len(antiunitary) * 2 != concrete.order:
+        raise ValueError("Magnetic site group must have an index-two unitary subgroup.")
+
+    unitary_matrices = {
+        operation_index: unitary_irrep.matrix_for_global_index(operation_index)
+        for operation_index in unitary_irrep.identification.concrete.operation_indices
+    }
+    representative = antiunitary[0]
+    square = int(concrete.table.multiplication[representative, representative])
+    square_matrix = unitary_matrices[concrete.global_index(square)]
+    if not np.allclose(square_matrix, np.eye(1), rtol=0.0, atol=tolerance):
+        raise NotImplementedError(
+            f"Magnetic corepresentation {unitary_irrep.name!r} has a nontrivial "
+            "antiunitary square and requires a higher-dimensional extension."
+        )
+
+    representative_inverse = int(concrete.table.inverse[representative])
+    actual_matrices: list[np.ndarray] = []
+    for actual_index, operation_index in enumerate(concrete.operation_indices):
+        if not flags[actual_index]:
+            matrix = unitary_matrices[operation_index]
+        else:
+            unitary_index = int(
+                concrete.table.multiplication[actual_index, representative_inverse]
+            )
+            if flags[unitary_index]:
+                raise RuntimeError("Magnetic coset decomposition produced an antiunitary element.")
+            matrix = unitary_matrices[concrete.global_index(unitary_index)]
+        stored = np.asarray(matrix, dtype=np.complex128).copy()
+        stored.setflags(write=False)
+        actual_matrices.append(stored)
+
+    for left in range(concrete.order):
+        for right in range(concrete.order):
+            product_index = int(concrete.table.multiplication[left, right])
+            right_matrix = actual_matrices[right].conj() if flags[left] else actual_matrices[right]
+            product = actual_matrices[left] @ right_matrix
+            if not np.allclose(
+                product,
+                actual_matrices[product_index],
+                rtol=0.0,
+                atol=tolerance,
+            ):
+                raise ValueError(
+                    f"Unitary-subgroup irrep {unitary_irrep.name!r} cannot be extended "
+                    "to the requested magnetic site group."
+                )
+
+    canonical_matrices: list[np.ndarray | None] = [None] * concrete.order
+    for actual_index, canonical_index in enumerate(full_identification.actual_to_canonical):
+        canonical_matrices[canonical_index] = actual_matrices[actual_index]
+    if any(matrix is None for matrix in canonical_matrices):
+        raise RuntimeError("Magnetic corepresentation mapping is incomplete.")
+    matrices = tuple(matrix for matrix in canonical_matrices if matrix is not None)
+    generated = GroupIrrep(
+        unitary_irrep.name,
+        1,
+        full_identification.canonical.table,
+        matrices,
+        tuple(complex(np.trace(matrix)) for matrix in matrices),
+    )
+    return ResolvedIrrep(generated, full_identification)
+
+
 class FiniteGroupLibrary:
     def __init__(self, definitions):
         items = tuple(definitions)
@@ -346,7 +425,27 @@ class SpaceGroupDefinition:
         return result
 
     def site_irrep(self, operation_indices, name: str) -> ResolvedIrrep:
-        return self.identify_operations(operation_indices).resolved_irrep(name)
+        indices = tuple(int(value) for value in operation_indices)
+        identification = self.identify_operations(indices)
+        try:
+            return identification.resolved_irrep(name)
+        except KeyError as full_group_error:
+            unitary_indices = tuple(
+                operation_index
+                for operation_index in indices
+                if not self.group.operations[operation_index].antiunitary
+            )
+            if len(unitary_indices) == len(indices):
+                raise
+            try:
+                unitary_irrep = self.identify_operations(unitary_indices).resolved_irrep(name)
+            except KeyError:
+                raise full_group_error
+            return _extend_one_dimensional_magnetic_irrep(
+                identification,
+                unitary_irrep,
+                self.tolerance,
+            )
 
     def resolve_little_group(
         self,

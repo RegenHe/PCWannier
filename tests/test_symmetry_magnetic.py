@@ -35,8 +35,9 @@ def _magnetic_p4mm_model():
         model,
         SymmetryCalculationSpec(
             target_specs=(
-                WannierTargetSpec("center_p_E", [0.0, 0.0], "E"),
-                WannierTargetSpec("center_s_A1", [0.0, 0.0], "A1"),
+                WannierTargetSpec("center_p_plus", [0.0, 0.0], "E_plus"),
+                WannierTargetSpec("center_p_minus", [0.0, 0.0], "E_minus"),
+                WannierTargetSpec("center_s", [0.0, 0.0], "A"),
             )
         ),
     )
@@ -57,6 +58,22 @@ def test_p4mm_z_bias_classifies_rotations_and_mirrors():
         "sigma_d2": True,
     }
     assert np.allclose(model.magnetic_bias_direction, [0.0, 0.0, 1.0])
+
+
+def test_magnetic_site_targets_are_one_dimensional_c4_corepresentations():
+    model = _magnetic_p4mm_model()
+    c4_index = model.group.operation_index(model.group.operation_by_name("C4"))
+    mirror_index = model.group.operation_index(model.group.operation_by_name("sigma_x"))
+
+    assert [target.wannier_dimension for target in model.targets] == [1, 1, 1]
+    assert np.allclose(
+        [target.matrix(c4_index, [0.0, 0.0])[0, 0] for target in model.targets],
+        [1j, -1j, 1.0],
+    )
+    assert all(
+        np.allclose(target.matrix(mirror_index, [0.0, 0.0]), [[1.0]])
+        for target in model.targets
+    )
 
 
 def test_antiunitary_operation_maps_k_to_minus_rotated_k():

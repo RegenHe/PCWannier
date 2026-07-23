@@ -1,5 +1,6 @@
 from ._version import __version__
 from .config import EnergyWindow, IncarConfig, load_config
+from .conventions import BlochConvention
 from .compute import run_bloch_symmetry_preanalysis, run_calculation
 from .maxwell import FieldComponents, FieldKind, MaterialKind, MaxwellProblem, PrimaryField
 from .outputs import (
@@ -8,7 +9,7 @@ from .outputs import (
     write_interpolation_outputs,
     write_outputs,
 )
-from .sources.comsol import load_input
+from .sources import load_input
 from .symmetry import (
     FiniteGroupDefinition,
     FiniteGroupIdentification,
@@ -25,6 +26,7 @@ from .symmetry import (
 
 __all__ = [
     "EnergyWindow",
+    "BlochConvention",
     "IncarConfig",
     "FiniteGroupDefinition",
     "FiniteGroupIdentification",

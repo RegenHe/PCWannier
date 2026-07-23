@@ -1,19 +1,10 @@
 from __future__ import annotations
 
-from threading import Lock
-
 import numpy as np
 
 from ..data import InputBundle, Mesh
 from ..matrix_io import load_cell_matrix
-from .integration import (
-    build_phase_weighted_triangle_mass,
-    integrate_overlap_matrix,
-    integrate_overlap_element_matrices,
-    integrate_weighted_abs2_columns,
-    mesh_integral_view,
-    validated_real,
-)
+from .integration import MetricInnerProduct
 from .kspace import get_kxyz
 from .parallel import parallel_map
 
@@ -27,8 +18,6 @@ class StateCollection:
             raise ValueError(
                 "InputBundle Maxwell metadata does not match the calculation config."
             )
-        self.compute_backend = backend
-        self.integration_mode = self.config.integration_mode
         self.threads = max(1, int(threads))
         self.mesh = bundle.mesh
         self.fields = bundle.fields
@@ -45,6 +34,19 @@ class StateCollection:
                 f"Metric material must contain one finite value per mesh vertex; "
                 f"expected {expected_metric_shape}, got {self.metric_material.shape}."
             )
+        self.inner_product = MetricInnerProduct(
+            self.mesh,
+            self.metric_material,
+            mode=self.config.integration_mode,
+            backend=backend,
+        )
+        self.bloch_convention = bundle.bloch_convention
+        if bundle.symmetry is not None and (
+            bundle.symmetry.model.bloch_convention != self.bloch_convention
+        ):
+            raise ValueError(
+                "Input Bloch convention does not match the configured symmetry convention."
+            )
         self.E = bundle.energies
         self.E_idx = bundle.band_indices
         self.inner_E_idx = bundle.inner_band_indices
@@ -59,14 +61,11 @@ class StateCollection:
         self.is_bloch = False
         self.is_orthogonalized = False
         self.extention_mesh: Mesh | None = None
-        self.integral_view = mesh_integral_view(self.mesh)
-        self.extention_integral_view = None
+        self.extended_inner_product: MetricInnerProduct | None = None
         self.space_to_original_mapping: np.ndarray | None = None
         self.extended_metric_material: np.ndarray | None = None
         self._identity_transform: np.ndarray | None = None
         self._phase_cache: dict[tuple[int, int, int], np.ndarray] = {}
-        self._phase_mass_cache: dict[tuple[bool, bytes], np.ndarray] = {}
-        self._phase_mass_lock = Lock()
 
     def _normalize_field_blocks(self) -> None:
         for idx in np.ndindex(self.fields.shape):
@@ -256,7 +255,7 @@ class StateCollection:
 
     def _overlap_matrix(self, i: int, j: int, k: int) -> np.ndarray:
         wblock = self.get_block(i, j, k)
-        smat = self.metric_overlap(
+        smat = self.inner_product.overlap(
             wblock,
             wblock,
             chunk_size=64,
@@ -273,8 +272,8 @@ class StateCollection:
     def turn_to_bloch(self) -> None:
         """Convert stored full Bloch fields to periodic parts.
 
-        The historical method name is retained for compatibility. For COMSOL,
-        psi_k = exp(-i k.r) u_k, so multiplying by exp(+i k.r) stores u_k.
+        The historical method name is retained for compatibility. The source
+        convention defines psi_k = exp(sign i k.r) u_k.
         """
         if self.is_bloch:
             return
@@ -308,10 +307,7 @@ class StateCollection:
 
     @property
     def bloch_sign(self) -> int:
-        symmetry_context = getattr(self.config, "symmetry_context", None)
-        if symmetry_context is not None:
-            return int(symmetry_context.model.bloch_convention.sign)
-        return -1 if self.config.dataset_type.lower() == "comsol" else 1
+        return int(self.bloch_convention.sign)
 
     def get_full_bloch_block(self, i: int, j: int, k: int) -> np.ndarray:
         """Return nodal values of the complete, piecewise-linear Bloch FEM field."""
@@ -334,8 +330,13 @@ class StateCollection:
             self.config.real_lattice_vectors,
             float(self.config.lattice_const),
         )
-        self.extention_integral_view = mesh_integral_view(self.extention_mesh)
-        self.get_extended_metric_material()
+        metric = self.get_extended_metric_material()
+        self.extended_inner_product = MetricInnerProduct(
+            self.extention_mesh,
+            metric,
+            mode=self.inner_product.mode,
+            backend=self.inner_product.backend,
+        )
 
     def get_extention_field(self, i: int, j: int, k: int, n: int) -> np.ndarray:
         if self.extention_mesh is None or self.space_to_original_mapping is None:
@@ -358,109 +359,3 @@ class StateCollection:
                 self.space_to_original_mapping
             ]
         return self.extended_metric_material
-
-    def metric_overlap(
-        self,
-        left: np.ndarray,
-        right: np.ndarray,
-        *,
-        extended: bool = False,
-        view=None,
-        conjugate_left: bool = True,
-        chunk_size: int | None = None,
-        phase_wavevector: np.ndarray | None = None,
-    ) -> np.ndarray:
-        if extended:
-            weights = self.get_extended_metric_material()
-            integral_view = self.extention_integral_view if view is None else view
-        else:
-            weights = self.metric_material
-            integral_view = self.integral_view if view is None else view
-        if phase_wavevector is not None:
-            if self.integration_mode != "quadratic":
-                raise ValueError("phase_wavevector is only valid for quadratic integration.")
-            cache_key = None
-            element_matrices = None
-            if view is None:
-                cache_key = (
-                    bool(extended),
-                    np.ascontiguousarray(phase_wavevector, dtype=np.float64).tobytes(),
-                )
-                element_matrices = self._phase_mass_cache.get(cache_key)
-            if element_matrices is None and cache_key is not None:
-                with self._phase_mass_lock:
-                    element_matrices = self._phase_mass_cache.get(cache_key)
-                    if element_matrices is None:
-                        element_matrices = build_phase_weighted_triangle_mass(
-                            integral_view,
-                            weights,
-                            phase_wavevector,
-                        )
-                        self._phase_mass_cache[cache_key] = element_matrices
-            elif element_matrices is None:
-                element_matrices = build_phase_weighted_triangle_mass(
-                    integral_view,
-                    weights,
-                    phase_wavevector,
-                )
-            return integrate_overlap_element_matrices(
-                integral_view,
-                left,
-                right,
-                element_matrices,
-                conjugate_left=conjugate_left,
-                chunk_size=chunk_size,
-                backend=self.compute_backend,
-            )
-        return integrate_overlap_matrix(
-            integral_view,
-            left,
-            right,
-            weights,
-            conjugate_left=conjugate_left,
-            chunk_size=chunk_size,
-            backend=self.compute_backend,
-            mode=self.integration_mode,
-        )
-
-    def metric_norms(
-        self,
-        values: np.ndarray,
-        *,
-        extended: bool = False,
-        view=None,
-        chunk_size: int | None = None,
-        name: str = "metric norms",
-    ) -> np.ndarray:
-        if extended:
-            weights = self.get_extended_metric_material()
-            integral_view = self.extention_integral_view if view is None else view
-        else:
-            weights = self.metric_material
-            integral_view = self.integral_view if view is None else view
-        result = integrate_weighted_abs2_columns(
-            integral_view,
-            weights,
-            values,
-            chunk_size=chunk_size,
-            backend=self.compute_backend,
-            mode=self.integration_mode,
-        )
-        return validated_real(np.atleast_1d(result), name)
-
-    def metric_field_norm(
-        self,
-        field: np.ndarray,
-        *,
-        extended: bool = False,
-        view=None,
-        name: str = "metric field norm",
-    ) -> float:
-        values = self.metric_norms(
-            np.asarray(field).reshape(-1, 1),
-            extended=extended,
-            view=view,
-            chunk_size=1,
-            name=name,
-        )
-        return float(values[0])

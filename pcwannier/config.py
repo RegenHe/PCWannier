@@ -140,21 +140,12 @@ class IncarConfig:
         return path if path.is_absolute() else self.base_dir / path
 
     def validate_runtime_scope(self) -> None:
-        from .maxwell import FieldComponents
-
-        if self.dataset_type.lower() != "comsol":
-            raise NotImplementedError("Only COMSOL input is implemented in PCWannier v1.")
         if not self.hermitian:
             raise NotImplementedError("Non-Hermitian left/right fields are not implemented in PCWannier v1.")
         if self.finite is not False:
             raise NotImplementedError("Finite-system calculations are not implemented in PCWannier v1.")
         if self.eff_k is not False:
             raise NotImplementedError("Effective Hamiltonian expansion is not implemented in PCWannier v1.")
-        if FieldComponents.parse(self.field_components) == FieldComponents.FULL_VECTOR:
-            raise NotImplementedError(
-                "field_components=full_vector is not implemented; the current COMSOL "
-                "reader supports scalar Ez and Hz fields only."
-            )
 
     def validate_required(self, *, mode: str = "calculation") -> None:
         if mode not in {"calculation", "bloch_symmetry"}:
@@ -371,10 +362,13 @@ class IncarParser:
 
         cfg.validate_required(mode=self.mode)
         preprocess_config(cfg)
+        from .sources import resolve_source
+
+        source = resolve_source(cfg.dataset_type)
+        source.validate_field_components(cfg.field_components)
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
             from .symmetry import (
-                BlochConvention,
                 DegeneracyTolerance,
                 FieldKind,
                 RepresentationAnalysisSpec,
@@ -452,7 +446,7 @@ class IncarParser:
                     target_specs=target_specs,
                     representation_analysis=analysis,
                     symmetry_gauge=gauge,
-                    bloch_convention=BlochConvention.for_dataset(cfg.dataset_type),
+                    bloch_convention=source.bloch_convention,
                     boundary_tolerance=cfg.symmetry_boundary_tolerance,
                 ),
             )

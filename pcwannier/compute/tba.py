@@ -42,7 +42,7 @@ class TBAModel:
         r_cart *= float(config.lattice_const)
 
         band_count = int(config.band_calc_num)
-        sign = -1 if config.dataset_type.lower() == "comsol" else 1
+        sign = state.bloch_sign
         k_cart, projected = self._projected_k_hamiltonians()
         phase = np.exp(1j * (-sign) * (k_cart @ r_cart))
         return np.sum(projected * phase[:, None, None], axis=0) / state.get_k_num()
@@ -305,7 +305,7 @@ class TBAModel:
         dim = avec.shape[1]
         delta_r = (neigh[:, :dim] @ avec) * float(config.lattice_const) if neigh.size else np.zeros((0, dim))
         nyq_mask = np.array([self.is_nyquist(r, self.state.k_shape) for r in neigh], dtype=bool) if neigh.size else np.array([], dtype=bool)
-        sign = -1 if config.dataset_type.lower() == "comsol" else 1
+        sign = self.state.bloch_sign
         h0_hermitian = 0.5 * (h0 + h0.conj().T)
 
         def h_of_k(k_cart: np.ndarray) -> np.ndarray:

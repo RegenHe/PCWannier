@@ -47,7 +47,7 @@ class MSet:
 
         def calc_for_index(idx):
             i, j, k = idx
-            quadratic = self.state.integration_mode == "quadratic"
+            quadratic = self.state.inner_product.uses_full_bloch_fields
             left = (
                 self.state.get_full_bloch_block(i, j, k)
                 if quadratic
@@ -71,7 +71,7 @@ class MSet:
                     phase2 = self.state.get_phase(*k_raw)
                     right = right * (phase1 * np.conj(phase2))[None, :]
                 result.append(
-                    self.state.metric_overlap(
+                    self.state.inner_product.overlap(
                         left,
                         right,
                         chunk_size=64,

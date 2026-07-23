@@ -7,7 +7,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from pcwannier.compute.integration import integrate_overlap_matrix, mesh_integral_view
+from pcwannier import BlochConvention
+from pcwannier.compute.integration import MetricInnerProduct
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import BlochSymmetryRunResult, InputBundle, Mesh
 from pcwannier.maxwell import MaxwellProblem
@@ -54,7 +55,7 @@ def _square_mesh(points_per_axis: int = 5) -> Mesh:
 
 def _orthonormalize(mesh: Mesh, fields: np.ndarray) -> np.ndarray:
     epsilon = np.ones(mesh.vertices.shape[0])
-    gram = integrate_overlap_matrix(mesh, fields, fields, epsilon)
+    gram = MetricInnerProduct(mesh, epsilon).overlap(fields, fields)
     values, vectors = np.linalg.eigh(gram)
     correction = vectors @ np.diag(1.0 / np.sqrt(values)) @ vectors.conj().T
     return (fields.T @ correction).T
@@ -81,25 +82,15 @@ def _synthetic_state(fields: np.ndarray, energies=None):
         is_bloch=True,
         config=config,
         maxwell=MaxwellProblem.for_components("Ez"),
+        bloch_convention=BlochConvention(),
         mesh=mesh,
         fields=blocks,
         E_idx=band_ids,
         energy_matrix=energy_matrix,
         metric_material=np.ones(mesh.vertices.shape[0]),
-        integral_view=mesh_integral_view(mesh),
-        compute_backend="python",
-        integration_mode="nodal",
+        inner_product=MetricInnerProduct(mesh, np.ones(mesh.vertices.shape[0])),
         get_block=lambda i, j, k: blocks[i, j, k],
         get_transform=lambda: transforms,
-    )
-    state.metric_overlap = lambda left, right, **kwargs: integrate_overlap_matrix(
-        state.integral_view,
-        left,
-        right,
-        state.metric_material,
-        chunk_size=kwargs.get("chunk_size"),
-        backend=state.compute_backend,
-        mode=state.integration_mode,
     )
     return state
 
@@ -207,6 +198,7 @@ def test_quadratic_identity_sewing_at_bz_boundary_is_unitary():
         InputBundle(
             config=config,
             maxwell=MaxwellProblem.for_components("Ez"),
+            bloch_convention=BlochConvention(),
             mesh=mesh,
             fields=fields,
             metric_material=metric,
@@ -372,7 +364,7 @@ def test_state_provider_roundtrips_full_outer_sewing_cache(tmp_path, monkeypatch
     def fail_integration(*args, **kwargs):
         raise AssertionError("A cache hit must not integrate Bloch fields again.")
 
-    cached_state.metric_overlap = fail_integration
+    cached_state.inner_product.overlap = fail_integration
     actual = cached_provider.sewing_matrix_between_mapping(mapping, (1,), (0, 1))
     assert np.allclose(actual, expected, atol=1e-12)
 
@@ -590,7 +582,7 @@ def test_bloch_analysis_reuses_one_full_outer_sewing_per_operation():
         ]
     )
     state = _synthetic_state(fields, energies=[1.0, 1.0])
-    original_overlap = state.metric_overlap
+    original_overlap = state.inner_product.overlap
     calls = 0
 
     def counted_overlap(*args, **kwargs):
@@ -598,7 +590,7 @@ def test_bloch_analysis_reuses_one_full_outer_sewing_per_operation():
         calls += 1
         return original_overlap(*args, **kwargs)
 
-    state.metric_overlap = counted_overlap
+    state.inner_product.overlap = counted_overlap
     provider = StateBlochSymmetryProvider(state, context)
     run_bloch_symmetry_analysis(state, context, provider=provider)
 

@@ -8,11 +8,15 @@ import re
 import numpy as np
 from scipy.spatial import cKDTree
 
+from ..conventions import BlochConvention
 from ..config import EnergyWindow, IncarConfig
 from ..data import InputBundle, Mesh, RawData
+from ..maxwell import FieldComponents
 from ..timing import timed_step
+from .base import SourceAdapter
 
 LOGGER = logging.getLogger(__name__)
+COMSOL_BLOCH_CONVENTION = BlochConvention(-1, "comsol")
 
 
 def load_comsol_mesh(filename: str | Path) -> Mesh:
@@ -232,7 +236,7 @@ def match_data_to_mesh(
     return mesh_to_data_idx, mesh_dists
 
 
-def load_input(config: IncarConfig) -> InputBundle:
+def load_comsol_input(config: IncarConfig) -> InputBundle:
     mesh_path, dataset_path, metric_path, energy_path = _required_input_paths(config)
     if config.maxwell_problem is None:
         raise ValueError("Maxwell field configuration has not been initialized.")
@@ -303,6 +307,7 @@ def load_input(config: IncarConfig) -> InputBundle:
     return InputBundle(
         config=config,
         maxwell=config.maxwell_problem,
+        bloch_convention=COMSOL_BLOCH_CONVENTION,
         mesh=mesh,
         fields=fields,
         metric_material=metric_material,
@@ -476,7 +481,7 @@ def _periodic_boundary_residuals(config: IncarConfig, mesh: Mesh, fields: np.nda
     if avec.shape != (2, 2):
         return []
     fractional = mesh.vertices @ np.linalg.inv(avec)
-    sign = -1 if config.dataset_type.lower() == "comsol" else 1
+    sign = COMSOL_BLOCH_CONVENTION.sign
     reciprocal = np.asarray(config.reciprocal_lattice_vectors, dtype=float)
     output: list[np.ndarray] = []
 
@@ -652,3 +657,12 @@ def _validate_dataset_order(order: list[str], sizes: dict[str, int | None]) -> N
     for dim, size in sizes.items():
         if dim.startswith("k") and size not in (None, 1) and dim not in order:
             raise ValueError(f"dataset_order is missing required dimension {dim!r}.")
+
+
+COMSOL_SOURCE = SourceAdapter(
+    name="comsol",
+    bloch_convention=COMSOL_BLOCH_CONVENTION,
+    supported_field_components=frozenset({FieldComponents.EZ, FieldComponents.HZ}),
+    input_loader=load_comsol_input,
+    mesh_loader=load_comsol_mesh,
+)

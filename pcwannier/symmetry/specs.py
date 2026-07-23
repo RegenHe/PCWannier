@@ -3,32 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
+from ..conventions import BlochConvention
 from ..maxwell import FieldKind
-
-
-@dataclass(frozen=True)
-class BlochConvention:
-    """Sign convention in psi_k = exp(sign * i k.r) u_k."""
-
-    sign: int = 1
-    name: str = "standard"
-
-    def __post_init__(self) -> None:
-        if self.sign not in {-1, 1}:
-            raise ValueError("Bloch convention sign must be -1 or 1.")
-        if not str(self.name).strip():
-            raise ValueError("Bloch convention name must not be empty.")
-
-    @classmethod
-    def for_dataset(cls, dataset_type: str) -> "BlochConvention":
-        name = str(dataset_type).strip().lower()
-        if name == "comsol":
-            return cls(-1, "comsol")
-        if name in {"standard", "synthetic"}:
-            return cls(1, name)
-        raise ValueError(
-            f"Dataset type {dataset_type!r} does not declare a Bloch phase convention."
-        )
 
 
 @dataclass(frozen=True)

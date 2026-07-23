@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ..compute.integration import MeshIntegralView
 from ..compute.wannier import generate_wannier
 from .field_action import cartesian_field_matrix
 from .bloch import fractional_mesh_vertices
@@ -177,6 +176,8 @@ def validate_wannier_symmetry(
         np.finfo(float).eps * max(float(np.max(np.abs(mesh.vertices))), 1.0) * 128.0,
     )
     interpolator = _TriangleInterpolator(mesh.vertices, mesh.elements, physical_tolerance)
+    if state.extended_inner_product is None:
+        raise RuntimeError("Extended metric inner product has not been initialized.")
     operation_data = {}
     for operation_index, operation in enumerate(group.operations):
         preimage_fractional = (fractional - operation.translation) @ np.linalg.inv(operation.rotation).T
@@ -185,11 +186,7 @@ def validate_wannier_symmetry(
         valid_elements = np.all(stencil.valid_vertices[mesh.elements], axis=1)
         if not np.any(valid_elements):
             raise RuntimeError(f"No common interior triangles remain for operation {operation.name}.")
-        view = MeshIntegralView(
-            np.asarray(mesh.elements[valid_elements], dtype=np.intp),
-            np.asarray(mesh.tri_weights[valid_elements], dtype=float),
-            mesh.vertices.shape[0],
-        )
+        inner_product = state.extended_inner_product.restrict_elements(valid_elements)
         field_matrix = cartesian_field_matrix(
             operation,
             lattice,
@@ -202,17 +199,17 @@ def validate_wannier_symmetry(
             )
         operation_data[operation_index] = (
             stencil,
-            view,
+            inner_product,
             complex(field_matrix[0, 0]),
         )
 
-    full_view = state.extention_integral_view
+    full_inner_product = state.extended_inner_product
     entries = []
     offset = 0
     for target in target_items:
         irrep_dimension = target.site_irrep.dimension
         for operation_index, operation in enumerate(group.operations):
-            stencil, valid_view, component_factor = operation_data[operation_index]
+            stencil, valid_inner_product, component_factor = operation_data[operation_index]
             for orbit_index in range(target.multiplicity):
                 action = target.orbit.action(operation_index, orbit_index)
                 shift = tuple(int(value) for value in action.lattice_shift)
@@ -233,13 +230,13 @@ def validate_wannier_symmetry(
                         for row in range(irrep_dimension)
                     )
                     residual_field = transformed - expected
-                    residual_norm = _field_norm(valid_view, residual_field, state)
-                    transformed_norm = _field_norm(valid_view, transformed, state)
-                    expected_norm = _field_norm(valid_view, expected, state)
+                    residual_norm = _field_norm(valid_inner_product, residual_field)
+                    transformed_norm = _field_norm(valid_inner_product, transformed)
+                    expected_norm = _field_norm(valid_inner_product, expected)
                     full_source_norm = _field_norm(
-                        full_view, zero_cell[:, source_index], state
+                        full_inner_product, zero_cell[:, source_index]
                     )
-                    full_expected_norm = _field_norm(full_view, expected, state)
+                    full_expected_norm = _field_norm(full_inner_product, expected)
                     denominator = max(np.sqrt(transformed_norm), np.sqrt(expected_norm), 1.0e-15)
                     residual = float(np.sqrt(residual_norm) / denominator)
                     retained = float(
@@ -278,10 +275,5 @@ def validate_wannier_symmetry(
     return result
 
 
-def _field_norm(view, field, state) -> float:
-    return state.metric_field_norm(
-        field,
-        extended=True,
-        view=view,
-        name="Wannier symmetry norm",
-    )
+def _field_norm(inner_product, field) -> float:
+    return inner_product.norm(field, name="Wannier symmetry norm")

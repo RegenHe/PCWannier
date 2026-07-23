@@ -16,7 +16,7 @@ from .outputs import (
     write_outputs,
 )
 from .runtime_info import format_elapsed, format_memory, memory_snapshot, now, start_memory_tracking
-from .sources.comsol import load_comsol_mesh, load_input
+from .sources import load_input, load_mesh
 from .symmetry import load_builtin_finite_groups, load_finite_group
 from .timing import timed_step
 
@@ -161,10 +161,8 @@ def main(argv=None) -> int:
 
     if args.base:
         mesh_path = config.input_path(config.mesh_file)
-        if mesh_path is None:
-            raise ValueError("mesh_file is required when --base is used.")
         with timed_step("load mesh for base figures", LOGGER, file=mesh_path):
-            mesh = load_comsol_mesh(mesh_path)
+            mesh = load_mesh(config)
         with timed_step("write projection base figures", LOGGER, out_dir=out_dir or config.base_dir):
             write_base_figures(config, mesh, out_dir)
         _log_run_summary(started_at)

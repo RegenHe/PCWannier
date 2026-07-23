@@ -18,7 +18,7 @@ from .group import (
     build_k_mappings,
     apply_magnetic_bias,
 )
-from .specs import BlochConvention
+from ..conventions import BlochConvention
 
 
 @dataclass(frozen=True)

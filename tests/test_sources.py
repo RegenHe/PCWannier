@@ -2,20 +2,15 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 
-from pcwannier.compute import (
-    integrate_overlap_matrix,
-    integrate_over_mesh,
-    integrate_weighted_abs2_columns,
-    integrate_weighted_columns,
-    is_numba_available,
-)
-from pcwannier.compute.integration import (
-    build_phase_weighted_triangle_mass,
-    integrate_overlap_element_matrices,
-    numba_parallel_policy,
-)
-from pcwannier.data import FieldData, Mesh, RawData
+from pcwannier import BlochConvention
+import pcwannier.sources as sources_module
+from pcwannier.compute import MetricInnerProduct, is_numba_available
+from pcwannier.compute.integration import numba_parallel_policy
+from pcwannier.data import Mesh, RawData
+from pcwannier.maxwell import FieldComponents
 from pcwannier.outputs import _interpolate_real_mesh
+from pcwannier.sources import load_input, resolve_source
+from pcwannier.sources.base import SourceAdapter
 from pcwannier.sources.comsol import (
     _metric_on_mesh,
     _validate_header_k_grid,
@@ -23,6 +18,41 @@ from pcwannier.sources.comsol import (
     load_comsol_data,
     match_data_to_mesh,
 )
+
+
+def test_source_registry_owns_bloch_convention():
+    source = resolve_source("COMSOL")
+
+    assert source.name == "comsol"
+    assert source.bloch_convention == BlochConvention(-1, "comsol")
+    with pytest.raises(ValueError, match="Unknown data source"):
+        resolve_source("not-registered")
+
+
+@pytest.mark.parametrize(
+    ("returned_convention", "message"),
+    [
+        (None, "without a valid BlochConvention"),
+        (BlochConvention(1, "wrong"), "returned Bloch convention"),
+    ],
+)
+def test_source_dispatch_rejects_missing_or_mismatched_convention(
+    monkeypatch,
+    returned_convention,
+    message,
+):
+    source = SourceAdapter(
+        name="synthetic",
+        bloch_convention=BlochConvention(-1, "synthetic"),
+        supported_field_components=frozenset({FieldComponents.EZ}),
+        input_loader=lambda _config: SimpleNamespace(bloch_convention=returned_convention),
+        mesh_loader=lambda _path: None,
+    )
+    monkeypatch.setitem(sources_module._SOURCES, "synthetic", source)
+    config = SimpleNamespace(dataset_type="synthetic", field_components="Ez")
+
+    with pytest.raises(ValueError, match=message):
+        load_input(config)
 
 
 def test_comsol_real_only_reader_uses_utf8_comments(tmp_path):
@@ -103,12 +133,20 @@ def test_match_data_to_mesh_and_integral_formula():
     mesh = Mesh(vertices, elements)
     values = np.array([1.0 + 6.0j, 1.0, 2.0, 3.0 + 3.0j])
 
-    result = integrate_over_mesh(FieldData("test", mesh, values), backend="python")
+    result = MetricInnerProduct(mesh, np.ones(len(mesh.vertices)), backend="python").overlap(
+        np.ones(len(mesh.vertices)),
+        values,
+        conjugate_left=False,
+    )[0, 0]
 
     assert np.isclose(result.real, 5 / 3)
     assert np.isclose(result.imag, 1.5)
     if is_numba_available():
-        numba_result = integrate_over_mesh(FieldData("test", mesh, values), backend="numba")
+        numba_result = MetricInnerProduct(mesh, np.ones(len(mesh.vertices)), backend="numba").overlap(
+            np.ones(len(mesh.vertices)),
+            values,
+            conjugate_left=False,
+        )[0, 0]
         assert np.isclose(numba_result, result)
 
 
@@ -172,7 +210,7 @@ def test_match_data_to_mesh_rejects_far_points():
     assert np.all(idxs < 0)
 
 
-def test_weighted_columns_matches_explicit_integral_matrix():
+def test_nodal_overlap_matches_explicit_vertex_sum():
     vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     elements = np.array([[0, 1, 2], [1, 3, 2]])
     mesh = Mesh(vertices, elements)
@@ -187,15 +225,30 @@ def test_weighted_columns_matches_explicit_integral_matrix():
         dtype=np.complex128,
     )
 
-    expected = integrate_over_mesh(FieldData("explicit", mesh, left[:, None] * right), backend="python")
-    actual = integrate_weighted_columns(mesh, left, right, backend="python")
+    expected = np.empty(right.shape[1], dtype=np.complex128)
+    for column in range(right.shape[1]):
+        product = left * right[:, column]
+        expected[column] = sum(
+            mesh.tri_weights[tri] * np.sum(product[element])
+            for tri, element in enumerate(mesh.elements)
+        )
+    actual = MetricInnerProduct(mesh, np.ones(len(mesh.vertices)), backend="python").overlap(
+        left,
+        right,
+        conjugate_left=False,
+    )[0]
 
     assert np.allclose(actual, expected)
     if is_numba_available():
-        assert np.allclose(integrate_weighted_columns(mesh, left, right, backend="numba"), expected)
+        numba_actual = MetricInnerProduct(mesh, np.ones(len(mesh.vertices)), backend="numba").overlap(
+            left,
+            right,
+            conjugate_left=False,
+        )[0]
+        assert np.allclose(numba_actual, expected)
 
 
-def test_weighted_abs2_columns_matches_weighted_columns():
+def test_metric_norms_match_overlap_diagonal():
     vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     elements = np.array([[0, 1, 2], [1, 3, 2]])
     mesh = Mesh(vertices, elements)
@@ -210,15 +263,32 @@ def test_weighted_abs2_columns_matches_weighted_columns():
         dtype=np.complex128,
     )
 
-    expected = integrate_weighted_columns(mesh, weights, np.abs(values) ** 2, backend="python")
-    actual = integrate_weighted_abs2_columns(mesh, weights, values, backend="python")
+    inner = MetricInnerProduct(mesh, weights, backend="python")
+    expected = np.diag(inner.overlap(values.T, values.T))
+    actual = inner.norms(values)
 
     assert np.allclose(actual, expected)
     if is_numba_available():
-        assert np.allclose(integrate_weighted_abs2_columns(mesh, weights, values, backend="numba"), expected)
+        assert np.allclose(MetricInnerProduct(mesh, weights, backend="numba").norms(values), expected)
 
 
-def test_overlap_matrix_matches_weighted_columns_rows():
+@pytest.mark.parametrize("mode", ["nodal", "quadratic"])
+def test_restricted_inner_product_matches_selected_mesh_elements(mode):
+    vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    elements = np.array([[0, 1, 2], [1, 3, 2]])
+    mesh = Mesh(vertices, elements)
+    metric = np.array([1.0, 2.0, 4.0, 3.0])
+    field = np.array([1.0 + 0.2j, -0.3j, 0.7, 1.2 - 0.4j])
+    restricted = MetricInnerProduct(mesh, metric, mode=mode).restrict_elements(
+        np.array([True, False])
+    )
+    selected_mesh = Mesh(vertices, elements[:1])
+    expected = MetricInnerProduct(selected_mesh, metric, mode=mode).norm(field)
+
+    assert np.isclose(restricted.norm(field), expected, rtol=1.0e-13, atol=1.0e-13)
+
+
+def test_overlap_matrix_python_numba_agree():
     vertices = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     elements = np.array([[0, 1, 2], [1, 3, 2]])
     mesh = Mesh(vertices, elements)
@@ -226,14 +296,19 @@ def test_overlap_matrix_matches_weighted_columns_rows():
     right = np.array([[1.0, 0.5j, 3.0, -1.0 + 1.0j], [2.0 - 1.0j, -2.0, 0.25, 0.75j]])
     weights = np.array([1.0, 2.0, 0.5, 1.5])
 
-    expected = np.vstack(
-        [integrate_weighted_columns(mesh, np.conj(row) * weights, right.T, backend="python") for row in left]
-    )
-    actual = integrate_overlap_matrix(mesh, left, right, weights, backend="python")
+    actual = MetricInnerProduct(mesh, weights, backend="python").overlap(left, right)
+    expected = np.zeros_like(actual)
+    for row, left_row in enumerate(left):
+        for column, right_row in enumerate(right):
+            product = np.conj(left_row) * weights * right_row
+            expected[row, column] = sum(
+                mesh.tri_weights[tri] * np.sum(product[element])
+                for tri, element in enumerate(mesh.elements)
+            )
 
     assert np.allclose(actual, expected)
     if is_numba_available():
-        assert np.allclose(integrate_overlap_matrix(mesh, left, right, weights, backend="numba"), expected)
+        assert np.allclose(MetricInnerProduct(mesh, weights, backend="numba").overlap(left, right), expected)
 
 
 def test_quadratic_overlap_matches_triangle_mass_matrix():
@@ -243,11 +318,17 @@ def test_quadratic_overlap_matches_triangle_mass_matrix():
     mass = (0.5 / 12.0) * np.array([[2.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 2.0]])
     expected = np.conj(left) @ mass @ right.T
 
-    actual = integrate_overlap_matrix(mesh, left, right, mode="quadratic", backend="python")
+    actual = MetricInnerProduct(mesh, np.ones(len(mesh.vertices)), mode="quadratic", backend="python").overlap(
+        left, right
+    )
 
     assert np.allclose(actual, expected, rtol=1e-13, atol=1e-13)
     if is_numba_available():
-        numba_actual = integrate_overlap_matrix(mesh, left, right, mode="quadratic", backend="numba")
+        numba_actual = MetricInnerProduct(
+            mesh, np.ones(len(mesh.vertices)), mode="quadratic", backend="numba"
+        ).overlap(
+            left, right
+        )
         assert np.allclose(numba_actual, expected, rtol=1e-13, atol=1e-13)
 
 
@@ -257,7 +338,7 @@ def test_quadratic_weighted_abs2_is_real_and_exact_for_linear_fields():
     mass = (0.5 / 12.0) * np.array([[2.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 2.0]])
     expected = np.array([np.conj(values[:, 0]) @ mass @ values[:, 0]])
 
-    actual = integrate_weighted_abs2_columns(mesh, np.ones(3), values, mode="quadratic", backend="python")
+    actual = MetricInnerProduct(mesh, np.ones(3), mode="quadratic", backend="python").norms(values)
 
     assert np.allclose(actual, expected, rtol=1e-13, atol=1e-13)
 
@@ -276,38 +357,11 @@ def test_quadratic_overlap_with_linear_metric_uses_cubic_barycentric_moments():
 
     expected = np.conj(left) @ mass @ right.T
     expected_bilinear = left @ mass @ right.T
-    actual = integrate_overlap_matrix(
-        mesh,
-        left,
-        right,
-        metric,
-        mode="quadratic",
-        backend="python",
-    )
-    actual_bilinear = integrate_overlap_matrix(
-        mesh,
-        left,
-        right,
-        metric,
-        conjugate_left=False,
-        mode="quadratic",
-        backend="python",
-    )
-    gram = integrate_overlap_matrix(
-        mesh,
-        left,
-        left,
-        metric,
-        mode="quadratic",
-        backend="python",
-    )
-    norms = integrate_weighted_abs2_columns(
-        mesh,
-        metric,
-        left.T,
-        mode="quadratic",
-        backend="python",
-    )
+    inner = MetricInnerProduct(mesh, metric, mode="quadratic", backend="python")
+    actual = inner.overlap(left, right)
+    actual_bilinear = inner.overlap(left, right, conjugate_left=False)
+    gram = inner.overlap(left, left)
+    norms = inner.norms(left.T)
 
     assert np.allclose(actual, expected, rtol=1e-13, atol=1e-13)
     assert np.allclose(actual_bilinear, expected_bilinear, rtol=1e-13, atol=1e-13)
@@ -328,54 +382,18 @@ def test_quadratic_linear_metric_python_numba_serial_parallel_agree():
     metric = np.array([1.0, 2.0, 4.0, 3.0])
     fields = rng.normal(size=(6, 4)) + 1j * rng.normal(size=(6, 4))
     columns = rng.normal(size=(4, 40)) + 1j * rng.normal(size=(4, 40))
-    expected_gram = integrate_overlap_matrix(
-        mesh,
-        fields,
-        fields,
-        metric,
-        mode="quadratic",
-        backend="python",
-    )
-    expected_norms = integrate_weighted_abs2_columns(
-        mesh,
-        metric,
-        columns,
-        mode="quadratic",
-        backend="python",
-    )
+    python_inner = MetricInnerProduct(mesh, metric, mode="quadratic", backend="python")
+    expected_gram = python_inner.overlap(fields, fields)
+    expected_norms = python_inner.norms(columns)
 
     with numba_parallel_policy(False):
-        serial_gram = integrate_overlap_matrix(
-            mesh,
-            fields,
-            fields,
-            metric,
-            mode="quadratic",
-            backend="numba",
-        )
-        serial_norms = integrate_weighted_abs2_columns(
-            mesh,
-            metric,
-            columns,
-            mode="quadratic",
-            backend="numba",
-        )
+        serial_inner = MetricInnerProduct(mesh, metric, mode="quadratic", backend="numba")
+        serial_gram = serial_inner.overlap(fields, fields)
+        serial_norms = serial_inner.norms(columns)
     with numba_parallel_policy(True):
-        parallel_gram = integrate_overlap_matrix(
-            mesh,
-            fields,
-            fields,
-            metric,
-            mode="quadratic",
-            backend="numba",
-        )
-        parallel_norms = integrate_weighted_abs2_columns(
-            mesh,
-            metric,
-            columns,
-            mode="quadratic",
-            backend="numba",
-        )
+        parallel_inner = MetricInnerProduct(mesh, metric, mode="quadratic", backend="numba")
+        parallel_gram = parallel_inner.overlap(fields, fields)
+        parallel_norms = parallel_inner.norms(columns)
 
     assert np.allclose(serial_gram, expected_gram, rtol=1e-13, atol=1e-13)
     assert np.allclose(parallel_gram, expected_gram, rtol=1e-13, atol=1e-13)
@@ -389,18 +407,11 @@ def test_phase_weighted_triangle_mass_zero_phase_matches_exact_mass():
         np.array([[0, 1, 2]]),
     )
     metric = np.array([1.0, 2.0, 4.0])
-    expected = integrate_overlap_matrix(
-        mesh,
-        np.eye(3),
-        np.eye(3),
-        metric,
-        mode="quadratic",
-        backend="python",
-    )
+    inner = MetricInnerProduct(mesh, metric, mode="quadratic", backend="python")
+    expected = inner.overlap(np.eye(3), np.eye(3))
+    actual = inner.overlap(np.eye(3), np.eye(3), phase_wavevector=np.zeros(2))
 
-    local = build_phase_weighted_triangle_mass(mesh, metric, np.zeros(2))
-
-    assert np.allclose(local[0], expected, rtol=0.0, atol=1e-14)
+    assert np.allclose(actual, expected, rtol=0.0, atol=1e-14)
 
 
 def test_phase_weighted_triangle_mass_obeys_conjugate_wavevector_relation():
@@ -411,11 +422,12 @@ def test_phase_weighted_triangle_mass_obeys_conjugate_wavevector_relation():
     metric = np.array([1.0, 1.7, 3.2])
     wavevector = np.array([2.3, -1.1])
 
-    positive = build_phase_weighted_triangle_mass(mesh, metric, wavevector)
-    negative = build_phase_weighted_triangle_mass(mesh, metric, -wavevector)
+    inner = MetricInnerProduct(mesh, metric, mode="quadratic", backend="python")
+    positive = inner.overlap(np.eye(3), np.eye(3), phase_wavevector=wavevector)
+    negative = inner.overlap(np.eye(3), np.eye(3), phase_wavevector=-wavevector)
 
     assert np.allclose(
-        positive.conj().transpose(0, 2, 1),
+        positive.conj().T,
         negative,
         rtol=2e-12,
         atol=2e-13,
@@ -428,23 +440,20 @@ def test_phase_element_matrix_contraction_python_numba_agree():
         np.array([[0, 1, 2]]),
     )
     metric = np.array([1.0, 2.0, 3.0])
-    local = build_phase_weighted_triangle_mass(mesh, metric, np.array([1.7, -0.4]))
+    wavevector = np.array([1.7, -0.4])
     left = np.array([[1.0 + 0.2j, 0.3, -0.1j], [0.2, 0.8j, 1.1]])
     right = np.array([[0.4j, 1.2, 0.5], [1.0, -0.3j, 0.7]])
-    expected = integrate_overlap_element_matrices(
-        mesh, left, right, local, backend="python"
+    expected = MetricInnerProduct(mesh, metric, mode="quadratic", backend="python").overlap(
+        left, right, phase_wavevector=wavevector
     )
 
     if is_numba_available():
-        serial = integrate_overlap_element_matrices(
-            mesh, left, right, local, backend="numba"
-        )
+        numba_inner = MetricInnerProduct(mesh, metric, mode="quadratic", backend="numba")
+        serial = numba_inner.overlap(left, right, phase_wavevector=wavevector)
         tiled_left = np.tile(left, (4, 1))
         tiled_right = np.tile(right, (4, 1))
         with numba_parallel_policy(True):
-            parallel = integrate_overlap_element_matrices(
-                mesh, tiled_left, tiled_right, local, backend="numba"
-            )
+            parallel = numba_inner.overlap(tiled_left, tiled_right, phase_wavevector=wavevector)
         assert np.allclose(serial, expected, rtol=1e-12, atol=1e-12)
         assert np.allclose(parallel[:2, :2], expected, rtol=1e-12, atol=1e-12)
 

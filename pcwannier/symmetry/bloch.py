@@ -12,7 +12,7 @@ from scipy.spatial import cKDTree
 from .cache import SewingMatrixCache, SewingMatrixCacheEntry, load_sewing_matrix_cache
 from .field_action import cartesian_field_matrix
 from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
-from .specs import BlochConvention, FieldKind
+from .specs import FieldKind
 
 LOGGER = logging.getLogger(__name__)
 
@@ -357,7 +357,7 @@ def coefficient_metric_overlap(left, right, metric) -> np.ndarray:
 
 
 class StateBlochSymmetryProvider:
-    """Metric-weighted sewing matrices for periodic scalar COMSOL states."""
+    """Metric-weighted sewing matrices for periodic scalar Bloch states."""
 
     def __init__(
         self,
@@ -381,7 +381,7 @@ class StateBlochSymmetryProvider:
             FieldKind.MAGNETIC_AXIAL_Z,
         }:
             raise NotImplementedError(
-                "Automatic StateCollection sewing currently supports scalar COMSOL fields only."
+                "Automatic StateCollection sewing currently supports scalar fields only."
             )
         self.state = state
         self.context = context
@@ -393,11 +393,10 @@ class StateBlochSymmetryProvider:
         )
         self.field_kind = field_kind
         self.dimension = context.model.dimension
-        dataset_convention = BlochConvention.for_dataset(state.config.dataset_type)
-        if dataset_convention.sign != context.model.bloch_convention.sign:
+        if state.bloch_convention != context.model.bloch_convention:
             raise ValueError(
-                f"Symmetry model uses Bloch sign {context.model.bloch_convention.sign}, but "
-                f"dataset {state.config.dataset_type!r} requires {dataset_convention.sign}."
+                f"Symmetry model uses Bloch convention {context.model.bloch_convention}, but "
+                f"the input bundle uses {state.bloch_convention}."
             )
         self.bloch_sign = context.model.bloch_convention.sign
         shape = tuple(len(axis) for axis in context.k_points)
@@ -475,7 +474,7 @@ class StateBlochSymmetryProvider:
 
         full_source_bands = self._actual_bands(source_index)
         full_target_bands = self._actual_bands(target_index)
-        if self.state.integration_mode == "quadratic":
+        if self.state.inner_product.uses_full_bloch_fields:
             source = self._full_orthonormal_block(source_index, full_source_bands)
             transformed = self.action.apply_full_bloch(
                 source,
@@ -499,7 +498,7 @@ class StateBlochSymmetryProvider:
             target = self._orthonormal_block(target_index, full_target_bands)
             if np.any(target_shift):
                 target = target * self._fiber_phase(target_shift)[None, :]
-        matrix = self.state.metric_overlap(
+        matrix = self.state.inner_product.overlap(
             target,
             transformed,
             chunk_size=64,
@@ -942,7 +941,7 @@ class StateBlochSymmetryProvider:
     def _calculation_fingerprint(self) -> str:
         digest = hashlib.sha256()
         digest.update(b"PCWannier sewing input v2\0")
-        if self.state.integration_mode == "quadratic":
+        if self.state.inner_product.uses_full_bloch_fields:
             digest.update(b"quadratic full-Bloch sewing v1\0")
         for label, value in (
             ("real_lattice_vectors", self.state.config.real_lattice_vectors),
@@ -959,7 +958,9 @@ class StateBlochSymmetryProvider:
         if maxwell is not None:
             digest.update(maxwell.field_components.value.encode("utf-8"))
             digest.update(maxwell.metric_material.value.encode("utf-8"))
-        digest.update(str(self.state.integration_mode).encode("utf-8"))
+        digest.update(self.state.inner_product.mode.value.encode("utf-8"))
+        digest.update(self.state.inner_product.IMPLEMENTATION_VERSION.encode("utf-8"))
+        digest.update(self.state.bloch_convention.name.encode("utf-8"))
         bias = self.context.model.magnetic_bias_direction
         if bias is not None:
             _update_array_digest(digest, "magnetic_bias_direction", bias)

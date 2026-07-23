@@ -95,7 +95,7 @@ def test_cli_cache_paths_and_base_mode_are_dataset_independent(tmp_path, monkeyp
         raise AssertionError("--base should not load field or eigenvalue data")
 
     monkeypatch.setattr(cli_module, "load_input", fail_load_input)
-    monkeypatch.setattr(cli_module, "load_comsol_mesh", lambda path: mesh)
+    monkeypatch.setattr(cli_module, "load_mesh", lambda config: mesh)
     monkeypatch.setattr(
         cli_module,
         "write_base_figures",

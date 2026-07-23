@@ -22,7 +22,7 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
     band_count = int(config.band_calc_num)
     nv = state.extention_mesh.vertices.shape[0]
     wsum = np.zeros((nv, band_count), dtype=np.complex128)
-    sign = -1 if config.dataset_type.lower() == "comsol" else 1
+    sign = state.bloch_sign
     for i, j, k in state.k_indices():
         phase_vec = state.get_extention_phase(i, j, k)
         k_vec = get_kxyz(config, [i, j, k])[:dim]
@@ -32,9 +32,10 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
         coeff = ctx.output_state_coefficients_at(i, j, k)
         wsum += (emat @ coeff) * pvec[:, None]
     wsum /= np.sqrt(float(state.get_k_num()))
-    norms = state.metric_norms(
+    if state.extended_inner_product is None:
+        raise RuntimeError("Extended metric inner product has not been initialized.")
+    norms = state.extended_inner_product.norms(
         wsum,
-        extended=True,
         chunk_size=2048,
         name="Wannier norms",
     )

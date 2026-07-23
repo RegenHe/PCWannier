@@ -118,8 +118,8 @@ from .representation import (
     build_wannier_target_from_group_irrep,
     combined_target_matrix,
 )
+from ..conventions import BlochConvention
 from .specs import (
-    BlochConvention,
     DegeneracyTolerance,
     FieldKind,
     RepresentationAnalysisSpec,

@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 
+from pcwannier import BlochConvention
 from pcwannier.compute.gradient import Gradient
 from pcwannier.compute.context import CalculationContext
 from pcwannier.compute.initializer import StateInitializer
@@ -108,11 +109,11 @@ def test_hopping_fourier_roundtrip_is_hermitian_on_rectangular_lattice():
         band_calc_num=3,
         real_lattice_vectors=avec,
         lattice_const=1.0,
-        dataset_type="comsol",
+        dataset_type="synthetic-source",
     )
     tba = object.__new__(TBAModel)
     tba.config = config
-    tba.state = SimpleNamespace(k_shape=shape)
+    tba.state = SimpleNamespace(k_shape=shape, bloch_sign=-1)
 
     k_axis = np.arange(-shape[0] // 2, shape[0] // 2, dtype=float) / shape[0]
     kfrac = np.stack(np.meshgrid(k_axis, k_axis, indexing="ij"), axis=-1).reshape(-1, 2)
@@ -153,11 +154,11 @@ def test_band_path_does_not_reclose_periodically_equivalent_endpoints():
         real_lattice_vectors=np.eye(2),
         reciprocal_lattice_vectors=np.eye(2),
         lattice_const=1.0,
-        dataset_type="comsol",
+        dataset_type="synthetic-source",
     )
     tba = object.__new__(TBAModel)
     tba.config = config
-    tba.state = SimpleNamespace(k_shape=(4, 4, 1))
+    tba.state = SimpleNamespace(k_shape=(4, 4, 1), bloch_sign=-1)
 
     result = tba.gen_hs_bands({(0, 0, 0): np.array([[1.0]])})
 
@@ -235,7 +236,7 @@ def test_quadratic_m0_uses_full_bloch_fields_and_unwrapped_neighbor_phase():
         config=config,
         k_shape=(2, 1, 1),
         E_idx=band_indices,
-        integration_mode="quadratic",
+        inner_product=SimpleNamespace(uses_full_bloch_fields=True, overlap=overlap),
         bloch_sign=-1,
         k_indices=lambda: iter(np.ndindex((2, 1, 1))),
         turn_to_bloch=lambda: None,
@@ -244,7 +245,6 @@ def test_quadratic_m0_uses_full_bloch_fields_and_unwrapped_neighbor_phase():
         get_block=lambda *_: (_ for _ in ()).throw(
             AssertionError("quadratic M0 must not use periodic nodal blocks")
         ),
-        metric_overlap=overlap,
         get_transform=lambda: transforms,
     )
     mset = MSet(state, threads=1)
@@ -271,10 +271,11 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
     indices[0, 0, 0] = [0, 1]
     energies = np.empty((1, 1, 1), dtype=object)
     energies[0, 0, 0] = np.array([1.0, 2.0])
-    config = SimpleNamespace(kdim=2, integration_mode="nodal", dataset_type="comsol")
+    config = SimpleNamespace(kdim=2, integration_mode="nodal", dataset_type="synthetic-source")
     bundle = InputBundle(
         config=config,
         maxwell=MaxwellProblem.for_components("Ez"),
+        bloch_convention=BlochConvention(-1, "synthetic"),
         mesh=mesh,
         fields=fields,
         metric_material=np.ones(3),
@@ -354,7 +355,7 @@ def test_projection_rejects_nonpositive_or_nonfinite_basis_norm(norm):
         extended_metric_material=np.ones(3),
         compute_backend="python",
         E_idx=_object_grid([0]),
-        metric_norms=lambda *args, **kwargs: np.array([norm]),
+        extended_inner_product=SimpleNamespace(norms=lambda *args, **kwargs: np.array([norm])),
     )
 
     with pytest.raises(ValueError, match="strictly positive"):
@@ -519,7 +520,7 @@ def _two_band_overlap_state(metric_material=None, components="Ez", integration_m
     config = SimpleNamespace(
         kdim=2,
         integration_mode=integration_mode,
-        dataset_type="comsol",
+        dataset_type="synthetic-source",
         use_cached_data=[],
         real_lattice_vectors=np.eye(2),
         lattice_const=1.0,
@@ -534,6 +535,7 @@ def _two_band_overlap_state(metric_material=None, components="Ez", integration_m
         InputBundle(
             config=config,
             maxwell=MaxwellProblem.for_components(components),
+            bloch_convention=BlochConvention(-1, "synthetic"),
             mesh=mesh,
             fields=fields,
             metric_material=metric,
@@ -551,7 +553,7 @@ def test_state_metric_interface_controls_overlap_norms_and_extension():
     state = _two_band_overlap_state(metric, components="Hz")
     block = state.get_block(0, 0, 0)
 
-    expected_overlap = state.metric_overlap(block, block)
+    expected_overlap = state.inner_product.overlap(block, block)
     assert np.allclose(state._overlap_matrix(0, 0, 0), expected_overlap)
     assert not np.allclose(
         expected_overlap,
@@ -559,7 +561,7 @@ def test_state_metric_interface_controls_overlap_norms_and_extension():
     )
 
     expected_norms = np.real(np.diag(expected_overlap))
-    assert np.allclose(state.metric_norms(block.T), expected_norms)
+    assert np.allclose(state.inner_product.norms(block.T), expected_norms)
 
     state.extention([2, 1])
     assert np.array_equal(
@@ -593,9 +595,9 @@ def test_quadratic_phase_mass_is_cached_per_wavevector(monkeypatch):
     )
     block = state.get_block(0, 0, 0)
     wavevector = np.array([1.25, -0.75])
-    import pcwannier.compute.state as state_module
+    import pcwannier.compute.integration as integration_module
 
-    original = state_module.build_phase_weighted_triangle_mass
+    original = integration_module._build_phase_weighted_triangle_mass
     calls = 0
 
     def counted(*args, **kwargs):
@@ -603,10 +605,10 @@ def test_quadratic_phase_mass_is_cached_per_wavevector(monkeypatch):
         calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(state_module, "build_phase_weighted_triangle_mass", counted)
+    monkeypatch.setattr(integration_module, "_build_phase_weighted_triangle_mass", counted)
 
-    first = state.metric_overlap(block, block, phase_wavevector=wavevector)
-    second = state.metric_overlap(block, block, phase_wavevector=wavevector.copy())
+    first = state.inner_product.overlap(block, block, phase_wavevector=wavevector)
+    second = state.inner_product.overlap(block, block, phase_wavevector=wavevector.copy())
 
     assert calls == 1
     assert np.allclose(first, second)

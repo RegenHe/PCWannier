@@ -71,8 +71,7 @@ class MaxwellProblem:
                 FieldKind.MAGNETIC_AXIAL_Z,
             )
         raise NotImplementedError(
-            "field_components=full_vector is not implemented; the current COMSOL "
-            "reader supports scalar Ez and Hz fields only."
+            "field_components=full_vector is not implemented by the current scalar field pipeline."
         )
 
     def apply_time_reversal(self, values):

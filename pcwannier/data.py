@@ -9,6 +9,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from .config import IncarConfig
+from .conventions import BlochConvention
 from .maxwell import MaxwellProblem
 
 if TYPE_CHECKING:
@@ -130,8 +131,8 @@ class Mesh:
             return self._boundary_mask_cache.copy()
 
         mask = np.zeros(original_vertex_count, dtype=bool)
-        # COMSOL's edg block also contains material interfaces.  Triangle edges
-        # used only once are the actual exterior boundary of the integration mesh.
+        # Imported edge blocks may also contain material interfaces. Triangle
+        # edges used only once form the exterior boundary of the integration mesh.
         elems = np.asarray(self.elements, dtype=np.intp)
         edges = np.vstack((elems[:, [0, 1]], elems[:, [1, 2]], elems[:, [2, 0]]))
         edges.sort(axis=1)
@@ -220,16 +221,10 @@ class RawData:
 
 
 @dataclass
-class FieldData:
-    name: str
-    mesh: Mesh
-    field: np.ndarray
-
-
-@dataclass
 class InputBundle:
     config: IncarConfig
     maxwell: MaxwellProblem
+    bloch_convention: BlochConvention
     mesh: Mesh
     fields: np.ndarray
     metric_material: np.ndarray

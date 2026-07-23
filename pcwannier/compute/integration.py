@@ -3,10 +3,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from enum import Enum
+from threading import Lock
 
 import numpy as np
 
-from ..data import FieldData
 from .backend import BACKEND_NUMBA, resolve_backend
 
 _NUMBA_PARALLEL_COLUMN_THRESHOLD = 32
@@ -14,11 +15,144 @@ _NUMBA_PARALLEL_ALLOWED: ContextVar[bool] = ContextVar("pcwannier_numba_parallel
 
 
 @dataclass(frozen=True)
-class MeshIntegralView:
+class _MeshIntegralView:
     elements: np.ndarray
     tri_weights: np.ndarray
     nv: int
     vertices: np.ndarray | None = None
+
+
+class IntegrationMode(str, Enum):
+    NODAL = "nodal"
+    QUADRATIC = "quadratic"
+
+    @classmethod
+    def parse(cls, value: str | IntegrationMode) -> IntegrationMode:
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value).strip().lower())
+        except ValueError as exc:
+            allowed = ", ".join(item.value for item in cls)
+            raise ValueError(f"integration mode must be one of {allowed}; got {value!r}.") from exc
+
+
+class MetricInnerProduct:
+    """Metric-weighted FEM inner products on one immutable mesh view."""
+
+    IMPLEMENTATION_VERSION = "metric-inner-product-v1"
+
+    def __init__(
+        self,
+        mesh,
+        metric: np.ndarray,
+        *,
+        mode: str | IntegrationMode = IntegrationMode.NODAL,
+        backend: str | None = None,
+    ) -> None:
+        self.view = _mesh_integral_view(mesh)
+        self.metric = np.asarray(metric, dtype=np.complex128).reshape(-1)
+        if self.metric.shape != (self.view.nv,) or not np.all(np.isfinite(self.metric)):
+            raise ValueError(
+                "Metric material must contain one finite value per mesh vertex; "
+                f"expected {(self.view.nv,)}, got {self.metric.shape}."
+            )
+        self.mode = IntegrationMode.parse(mode)
+        self.backend = resolve_backend(backend)
+        self._phase_mass_cache: dict[bytes, np.ndarray] = {}
+        self._phase_mass_lock = Lock()
+
+    @property
+    def uses_full_bloch_fields(self) -> bool:
+        return self.mode is IntegrationMode.QUADRATIC
+
+    def overlap(
+        self,
+        left: np.ndarray,
+        right: np.ndarray,
+        *,
+        conjugate_left: bool = True,
+        phase_wavevector: np.ndarray | None = None,
+        chunk_size: int | None = None,
+    ) -> np.ndarray:
+        if phase_wavevector is None:
+            return _integrate_overlap_matrix_dispatch(
+                self.view,
+                left,
+                right,
+                self.metric,
+                conjugate_left=conjugate_left,
+                chunk_size=chunk_size,
+                backend=self.backend,
+                mode=self.mode.value,
+            )
+        if self.mode is not IntegrationMode.QUADRATIC:
+            raise ValueError("phase_wavevector is only valid for quadratic integration.")
+        wavevector = np.ascontiguousarray(phase_wavevector, dtype=np.float64).reshape(-1)
+        cache_key = wavevector.tobytes()
+        element_matrices = self._phase_mass_cache.get(cache_key)
+        if element_matrices is None:
+            with self._phase_mass_lock:
+                element_matrices = self._phase_mass_cache.get(cache_key)
+                if element_matrices is None:
+                    element_matrices = _build_phase_weighted_triangle_mass(
+                        self.view,
+                        self.metric,
+                        wavevector,
+                    )
+                    self._phase_mass_cache[cache_key] = element_matrices
+        return _integrate_overlap_element_matrices_dispatch(
+            self.view,
+            left,
+            right,
+            element_matrices,
+            conjugate_left=conjugate_left,
+            chunk_size=chunk_size,
+            backend=self.backend,
+        )
+
+    def norms(
+        self,
+        values: np.ndarray,
+        *,
+        chunk_size: int | None = None,
+        name: str = "metric norms",
+    ) -> np.ndarray:
+        result = _integrate_weighted_abs2_columns_dispatch(
+            self.view,
+            self.metric,
+            values,
+            chunk_size=chunk_size,
+            backend=self.backend,
+            mode=self.mode.value,
+        )
+        return validated_real(np.atleast_1d(result), name)
+
+    def norm(self, field: np.ndarray, *, name: str = "metric field norm") -> float:
+        values = self.norms(
+            np.asarray(field).reshape(-1, 1),
+            chunk_size=1,
+            name=name,
+        )
+        return float(values[0])
+
+    def restrict_elements(self, selector) -> MetricInnerProduct:
+        selected_elements = np.asarray(self.view.elements[selector], dtype=np.intp)
+        selected_weights = np.asarray(self.view.tri_weights[selector], dtype=np.float64)
+        if selected_elements.ndim != 2 or selected_elements.shape[1] != 3:
+            raise ValueError("Restricted integration view must contain triangular elements.")
+        restricted = _MeshIntegralView(
+            elements=selected_elements,
+            tri_weights=selected_weights,
+            nv=self.view.nv,
+            vertices=self.view.vertices,
+        )
+        return MetricInnerProduct(
+            restricted,
+            self.metric,
+            mode=self.mode,
+            backend=self.backend,
+        )
 
 
 @contextmanager
@@ -30,10 +164,10 @@ def numba_parallel_policy(enabled: bool):
         _NUMBA_PARALLEL_ALLOWED.reset(token)
 
 
-def mesh_integral_view(mesh) -> MeshIntegralView:
-    if isinstance(mesh, MeshIntegralView):
+def _mesh_integral_view(mesh) -> _MeshIntegralView:
+    if isinstance(mesh, _MeshIntegralView):
         return mesh
-    return MeshIntegralView(
+    return _MeshIntegralView(
         elements=np.asarray(mesh.elements, dtype=np.intp),
         tri_weights=np.asarray(mesh.tri_weights, dtype=np.float64),
         nv=int(mesh.vertices.shape[0]),
@@ -41,7 +175,7 @@ def mesh_integral_view(mesh) -> MeshIntegralView:
     )
 
 
-def build_phase_weighted_triangle_mass(
+def _build_phase_weighted_triangle_mass(
     mesh,
     weights_vector: np.ndarray,
     phase_wavevector: np.ndarray,
@@ -56,7 +190,7 @@ def build_phase_weighted_triangle_mass(
     interpolated from phase-shifted nodal values.
     """
 
-    view = mesh_integral_view(mesh)
+    view = _mesh_integral_view(mesh)
     if view.vertices is None:
         raise ValueError("Phase-aware integration requires mesh vertex coordinates.")
     vertices = np.asarray(view.vertices, dtype=np.float64)
@@ -104,7 +238,7 @@ def build_phase_weighted_triangle_mass(
     )
 
 
-def integrate_overlap_element_matrices(
+def _integrate_overlap_element_matrices_dispatch(
     mesh,
     left: np.ndarray,
     right: np.ndarray,
@@ -117,7 +251,7 @@ def integrate_overlap_element_matrices(
     """Contract FEM nodal fields with precomputed local element matrices."""
 
     selected_backend = resolve_backend(backend)
-    view = mesh_integral_view(mesh)
+    view = _mesh_integral_view(mesh)
     lmat = _to_k_nv(left, view.nv, "left")
     rmat = _to_k_nv(right, view.nv, "right")
     local = np.asarray(element_matrices, dtype=np.complex128)
@@ -142,38 +276,7 @@ def integrate_overlap_element_matrices(
     )
 
 
-def integrate_over_mesh(
-    data: FieldData,
-    *,
-    other: FieldData | None = None,
-    hermitian: bool = False,
-    real_only: bool = False,
-    chunk_size: int | None = None,
-    backend: str | None = None,
-) -> complex | np.ndarray:
-    selected_backend = resolve_backend(backend)
-    view = mesh_integral_view(data.mesh)
-
-    a = _to_nv_k(data.field, view.nv, "field")
-    if other is None:
-        if selected_backend == BACKEND_NUMBA:
-            out = _integrate_batch_numba(a, view.elements, view.tri_weights)
-        else:
-            out = _integrate_batch(a, view.elements, view.tri_weights, chunk_size)
-    else:
-        b = _to_nv_k(other.field, view.nv, "other field")
-        if a.shape[1] != b.shape[1]:
-            raise ValueError("A and B must have the same number of columns.")
-        if selected_backend == BACKEND_NUMBA:
-            out = _integrate_product_numba(a, b, view.elements, view.tri_weights, hermitian)
-        else:
-            out = _integrate_product(a, b, view.elements, view.tri_weights, hermitian, chunk_size)
-    if real_only:
-        out = out.real
-    return out[0] if out.shape == (1,) else out
-
-
-def integrate_weighted_columns(
+def _integrate_weighted_abs2_columns_dispatch(
     mesh,
     weights_vector: np.ndarray,
     values: np.ndarray,
@@ -183,31 +286,7 @@ def integrate_weighted_columns(
     mode: str = "nodal",
 ) -> np.ndarray:
     selected_backend = resolve_backend(backend)
-    view = mesh_integral_view(mesh)
-    left = np.asarray(weights_vector, dtype=np.complex128).reshape(view.nv)
-    right = _to_nv_k(values, view.nv, "values")
-    _validate_integration_mode(mode)
-    if mode == "quadratic":
-        repeated_left = np.broadcast_to(left[:, None], right.shape)
-        if selected_backend == BACKEND_NUMBA:
-            return _integrate_product_numba(repeated_left, right, view.elements, view.tri_weights, False)
-        return _integrate_product(repeated_left, right, view.elements, view.tri_weights, False, chunk_size)
-    if selected_backend == BACKEND_NUMBA:
-        return _integrate_weighted_columns_numba(left, right, view.elements, view.tri_weights)
-    return _integrate_weighted_columns(left, right, view.elements, view.tri_weights, chunk_size)
-
-
-def integrate_weighted_abs2_columns(
-    mesh,
-    weights_vector: np.ndarray,
-    values: np.ndarray,
-    *,
-    chunk_size: int | None = None,
-    backend: str | None = None,
-    mode: str = "nodal",
-) -> np.ndarray:
-    selected_backend = resolve_backend(backend)
-    view = mesh_integral_view(mesh)
+    view = _mesh_integral_view(mesh)
     left = np.asarray(weights_vector, dtype=np.complex128).reshape(view.nv)
     right = _to_nv_k(values, view.nv, "values")
     _validate_integration_mode(mode)
@@ -231,7 +310,7 @@ def integrate_weighted_abs2_columns(
     return _integrate_weighted_abs2_columns(left, right, view.elements, view.tri_weights, chunk_size)
 
 
-def integrate_overlap_matrix(
+def _integrate_overlap_matrix_dispatch(
     mesh,
     left: np.ndarray,
     right: np.ndarray,
@@ -243,7 +322,7 @@ def integrate_overlap_matrix(
     mode: str = "nodal",
 ) -> np.ndarray:
     selected_backend = resolve_backend(backend)
-    view = mesh_integral_view(mesh)
+    view = _mesh_integral_view(mesh)
     lmat = _to_k_nv(left, view.nv, "left")
     rmat = _to_k_nv(right, view.nv, "right")
     weights_vector = np.ones(view.nv, dtype=np.complex128) if weights_vector is None else np.asarray(weights_vector, dtype=np.complex128).reshape(view.nv)
@@ -277,19 +356,6 @@ def integrate_overlap_matrix(
             conjugate_left,
         )
     return _integrate_overlap_matrix(lmat, rmat, weights_vector, view.elements, view.tri_weights, conjugate_left, chunk_size)
-
-
-def _to_nv_k(arr, nv: int, name: str) -> np.ndarray:
-    arr = np.asarray(arr)
-    if arr.ndim == 1:
-        out = arr.reshape(nv, 1)
-    elif arr.ndim == 2:
-        out = arr if arr.shape[0] == nv else arr.T
-    else:
-        raise ValueError(f"{name} has invalid shape {arr.shape}")
-    if out.shape[0] != nv:
-        raise ValueError(f"{name} has invalid shape {arr.shape}; expected one dimension to be {nv}.")
-    return out.astype(np.complex128, copy=False)
 
 
 def _validate_integration_mode(mode: str) -> None:
@@ -326,39 +392,17 @@ def _to_k_nv(arr, nv: int, name: str) -> np.ndarray:
     return out.astype(np.complex128, copy=False)
 
 
-def _integrate_batch_numba(values: np.ndarray, elems: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    from .numba_kernels import integrate_batch_numba, integrate_batch_numba_parallel
-
-    if _NUMBA_PARALLEL_ALLOWED.get() and values.shape[1] >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
-        return integrate_batch_numba_parallel(values, elems, weights)
-    return integrate_batch_numba(values, elems, weights)
-
-
-def _integrate_product_numba(
-    a: np.ndarray,
-    b: np.ndarray,
-    elems: np.ndarray,
-    weights: np.ndarray,
-    hermitian: bool,
-) -> np.ndarray:
-    from .numba_kernels import integrate_product_numba, integrate_product_numba_parallel
-
-    if _NUMBA_PARALLEL_ALLOWED.get() and a.shape[1] >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
-        return integrate_product_numba_parallel(a, b, elems, weights, hermitian)
-    return integrate_product_numba(a, b, elems, weights, hermitian)
-
-
-def _integrate_weighted_columns_numba(
-    left: np.ndarray,
-    right: np.ndarray,
-    elems: np.ndarray,
-    weights: np.ndarray,
-) -> np.ndarray:
-    from .numba_kernels import integrate_weighted_columns_numba, integrate_weighted_columns_numba_parallel
-
-    if _NUMBA_PARALLEL_ALLOWED.get() and right.shape[1] >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
-        return integrate_weighted_columns_numba_parallel(left, right, elems, weights)
-    return integrate_weighted_columns_numba(left, right, elems, weights)
+def _to_nv_k(arr, nv: int, name: str) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        out = arr.reshape(nv, 1)
+    elif arr.ndim == 2:
+        out = arr if arr.shape[0] == nv else arr.T
+    else:
+        raise ValueError(f"{name} has invalid shape {arr.shape}")
+    if out.shape[0] != nv:
+        raise ValueError(f"{name} has invalid shape {arr.shape}; expected one dimension to be {nv}.")
+    return out.astype(np.complex128, copy=False)
 
 
 def _integrate_weighted_abs2_columns_numba(
@@ -444,42 +488,6 @@ def _integrate_overlap_element_matrices_numba(
     return integrate_overlap_element_matrices_numba(
         left, right, elems, element_matrices, conjugate_left
     )
-
-
-def _integrate_batch(values: np.ndarray, elems: np.ndarray, weights: np.ndarray, chunk_size: int | None) -> np.ndarray:
-    k_count = values.shape[1]
-    if chunk_size is None:
-        chunk_size = max(1, k_count)
-    out = np.empty(k_count, dtype=np.complex128)
-    for start in range(0, k_count, chunk_size):
-        end = min(start + chunk_size, k_count)
-        block = values[:, start:end]
-        tri_sum = block[elems[:, 0]] + block[elems[:, 1]] + block[elems[:, 2]]
-        out[start:end] = np.sum(tri_sum * weights[:, None], axis=0)
-    return out
-
-
-def _integrate_weighted_columns(
-    left: np.ndarray,
-    right: np.ndarray,
-    elems: np.ndarray,
-    weights: np.ndarray,
-    chunk_size: int | None,
-) -> np.ndarray:
-    k_count = right.shape[1]
-    if chunk_size is None:
-        chunk_size = max(1, k_count)
-    out = np.empty(k_count, dtype=np.complex128)
-    for start in range(0, k_count, chunk_size):
-        end = min(start + chunk_size, k_count)
-        block = right[:, start:end]
-        tri_sum = (
-            left[elems[:, 0], None] * block[elems[:, 0]]
-            + left[elems[:, 1], None] * block[elems[:, 1]]
-            + left[elems[:, 2], None] * block[elems[:, 2]]
-        )
-        out[start:end] = np.sum(tri_sum * weights[:, None], axis=0)
-    return out
 
 
 def _integrate_weighted_abs2_columns(
@@ -721,42 +729,4 @@ def _integrate_overlap_element_matrices(
             correction = (updated - total) - compensated
             total = updated
         out[:, start:end] = total
-    return out
-
-
-def _integrate_product(
-    a: np.ndarray,
-    b: np.ndarray,
-    elems: np.ndarray,
-    weights: np.ndarray,
-    hermitian: bool,
-    chunk_size: int | None,
-) -> np.ndarray:
-    k_count = a.shape[1]
-    if chunk_size is None:
-        chunk_size = max(1, k_count)
-    out = np.empty(k_count, dtype=np.complex128)
-    for start in range(0, k_count, chunk_size):
-        end = min(start + chunk_size, k_count)
-        total = np.zeros(end - start, dtype=np.complex128)
-        correction = np.zeros(end - start, dtype=np.complex128)
-        for tri, (e0, e1, e2) in enumerate(elems):
-            a0 = a[e0, start:end]
-            a1 = a[e1, start:end]
-            a2 = a[e2, start:end]
-            if hermitian:
-                a0 = np.conj(a0)
-                a1 = np.conj(a1)
-                a2 = np.conj(a2)
-            b0 = b[e0, start:end]
-            b1 = b[e1, start:end]
-            b2 = b[e2, start:end]
-            z = 2.0 * (a0 * b0 + a1 * b1 + a2 * b2)
-            z += a0 * b1 + a1 * b0 + a0 * b2 + a2 * b0 + a1 * b2 + a2 * b1
-            term = 0.25 * weights[tri] * z
-            compensated = term - correction
-            updated = total + compensated
-            correction = (updated - total) - compensated
-            total = updated
-        out[start:end] = total
     return out

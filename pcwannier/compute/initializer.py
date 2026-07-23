@@ -242,9 +242,10 @@ class StateInitializer:
                 h_columns.append(self.state.extention_mesh.rfunc(fn, cart_position, projection["xaxis_angluar"]))
 
         hmat = np.column_stack(h_columns)
-        norms = self.state.metric_norms(
+        if self.state.extended_inner_product is None:
+            raise RuntimeError("Extended metric inner product is not initialized.")
+        norms = self.state.extended_inner_product.norms(
             hmat,
-            extended=True,
             chunk_size=2048,
             name="projection basis norms",
         )
@@ -268,10 +269,9 @@ class StateInitializer:
             phase = self.state.get_extention_phase(i, j, k)
             fields = self.state.get_extention_block(i, j, k)
             fields *= phase[None, :]
-            amat = self.state.metric_overlap(
+            amat = self.state.extended_inner_product.overlap(
                 fields,
                 gmat.T,
-                extended=True,
                 chunk_size=64,
             )
             if self.config.proj_binarize:

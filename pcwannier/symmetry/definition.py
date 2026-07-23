@@ -7,7 +7,7 @@ from typing import Mapping, Protocol
 import numpy as np
 
 from .group import SpaceGroup, reduce_fractional
-from .specs import BlochConvention
+from ..conventions import BlochConvention
 from .tables import ConcreteFiniteGroup, FiniteGroupTable
 
 

@@ -119,9 +119,18 @@ def load_symmetry_group(path: str | Path, *, tolerance: float = 1.0e-8) -> Space
 
 def load_finite_group(path: str | Path) -> FiniteGroupDefinition:
     raw = _read_yaml(path, "Finite-group")
-    _require_keys(raw, {"name", "dimension", "elements", "irreps"}, "finite-group file", optional={"multiplication"})
+    _require_keys(
+        raw,
+        {"name", "dimension", "point_group_symbol", "elements", "irreps"},
+        "finite-group file",
+        optional={"multiplication"},
+    )
     name = _nonempty_string(raw["name"], "finite-group name")
     dimension = _positive_int(raw["dimension"], "dimension")
+    point_group_symbol = _nonempty_string(
+        raw["point_group_symbol"],
+        "point_group_symbol",
+    )
     elements_raw = raw["elements"]
     if not isinstance(elements_raw, list) or not elements_raw:
         raise ValueError("finite-group elements must be a non-empty YAML list.")
@@ -142,24 +151,27 @@ def load_finite_group(path: str | Path) -> FiniteGroupDefinition:
         )
     if len(element_names) != len(set(element_names)):
         raise ValueError("Finite-group element names must be unique.")
-    if any(has_action) and not all(has_action):
-        raise ValueError("Finite-group point_action must be supplied for either every element or none.")
-    if all(has_action):
-        multiplication = _multiplication_from_actions(tuple(point_actions))
-        if "multiplication" in raw:
-            declared = _parse_multiplication(raw["multiplication"], tuple(element_names))
-            if not np.array_equal(multiplication, declared):
-                raise ValueError("Declared finite-group multiplication disagrees with point_action products.")
-        actions = tuple(point_actions)
-    else:
-        if "multiplication" not in raw:
-            raise ValueError("Finite groups without point_action must define multiplication.")
-        multiplication = _parse_multiplication(raw["multiplication"], tuple(element_names))
-        actions = None
+    if not all(has_action):
+        raise ValueError(
+            "Finite-group label catalogs require point_action for every canonical element."
+        )
+    multiplication = _multiplication_from_actions(tuple(point_actions))
+    if "multiplication" in raw:
+        declared = _parse_multiplication(raw["multiplication"], tuple(element_names))
+        if not np.array_equal(multiplication, declared):
+            raise ValueError("Declared finite-group multiplication disagrees with point_action products.")
+    actions = tuple(point_actions)
     table = FiniteGroupTable(tuple(element_names), multiplication, name=name)
     irreps = _parse_irreps(raw["irreps"], table)
-    validate_irrep_table(table, irreps)
-    return FiniteGroupDefinition(name, dimension, table, actions, irreps)
+    validate_irrep_table(table, irreps, actions, dimension=dimension)
+    return FiniteGroupDefinition(
+        name,
+        dimension,
+        point_group_symbol,
+        table,
+        actions,
+        irreps,
+    )
 
 
 @lru_cache(maxsize=1)

@@ -15,16 +15,16 @@ from pcwannier.symmetry import (
 
 
 FINITE_GROUPS = {
-    "C1.yaml": ("C1", 1),
-    "C2.yaml": ("C2", 2),
-    "C3.yaml": ("C3", 3),
-    "C4.yaml": ("C4", 4),
-    "C6.yaml": ("C6", 6),
-    "Cs.yaml": ("Cs", 2),
-    "C2v.yaml": ("C2v", 4),
-    "C3v.yaml": ("C3v", 6),
-    "C4v.yaml": ("C4v", 8),
-    "C6v.yaml": ("C6v", 12),
+    "C1.yaml": ("C1", 1, "1"),
+    "C2.yaml": ("C2", 2, "2"),
+    "C3.yaml": ("C3", 3, "3"),
+    "C4.yaml": ("C4", 4, "4"),
+    "C6.yaml": ("C6", 6, "6"),
+    "Cs.yaml": ("Cs", 2, "m"),
+    "C2v.yaml": ("C2v", 4, "mm2"),
+    "C3v.yaml": ("C3v", 6, "3m"),
+    "C4v.yaml": ("C4v", 8, "4mm"),
+    "C6v.yaml": ("C6v", 12, "6mm"),
 }
 
 SPACE_GROUPS = {
@@ -65,12 +65,13 @@ def test_finite_group_database_is_complete_and_valid():
 
     loaded = load_builtin_finite_groups()
     assert {definition.name for definition in loaded.definitions} == {
-        name for name, _ in FINITE_GROUPS.values()
+        name for name, _, _ in FINITE_GROUPS.values()
     }
-    for filename, (name, order) in FINITE_GROUPS.items():
+    for filename, (name, order, point_group_symbol) in FINITE_GROUPS.items():
         definition = load_finite_group(root / filename)
         assert definition.name == name
         assert definition.table.order == order
+        assert definition.point_group_symbol == point_group_symbol
         assert sum(irrep.dimension**2 for irrep in definition.irreps) == order
 
 
@@ -84,6 +85,7 @@ def test_space_group_database_contains_all_wallpaper_groups():
             range(len(definition.group.operations))
         )
         assert identification.canonical.name == point_group
+        assert definition.point_group.symbol == identification.point_group_symbol
 
 
 def test_space_group_rotations_preserve_their_crystal_family_metric():
@@ -133,7 +135,7 @@ def test_all_closed_space_group_subsets_have_a_finite_group_model():
                     continue
                 identification = library.identify(concrete)
                 assert identification.canonical.name in {
-                    name for name, _ in FINITE_GROUPS.values()
+                    name for name, _, _ in FINITE_GROUPS.values()
                 }
 
 
@@ -158,7 +160,6 @@ def test_hexagonal_vector_irreps_match_fractional_point_actions(filename, irrep_
     irrep = next(value for value in definition.irreps if value.name == irrep_name)
     lattice = np.array([[1.0, 0.0], [-0.5, np.sqrt(3.0) / 2.0]])
 
-    assert definition.point_actions is not None
     assert all(np.issubdtype(action.dtype, np.integer) for action in definition.point_actions)
     for index, fractional_action in enumerate(definition.point_actions):
         cartesian_action = lattice.T @ fractional_action @ np.linalg.inv(lattice.T)
@@ -174,6 +175,7 @@ def test_radical_and_complex_expressions_are_evaluated_in_finite_group_yaml(tmp_
             [
                 "name: C1_expression",
                 "dimension: 2",
+                'point_group_symbol: "1"',
                 "elements:",
                 "  - name: E",
                 '    point_action: [["sqrt(1)", 0], [0, "2/2"]]',
@@ -229,9 +231,10 @@ def test_symmetry_scalar_expressions_reject_code_execution(tmp_path, expression)
     path.write_text(
         "\n".join(
             [
-                "name: unsafe",
-                "dimension: 1",
-                "elements:",
+                    "name: unsafe",
+                    "dimension: 1",
+                    'point_group_symbol: "1"',
+                    "elements:",
                 "  - name: E",
                 "    point_action: [[1]]",
                 "irreps:",
@@ -254,6 +257,7 @@ def test_point_actions_remain_integer_in_fractional_coordinates(tmp_path):
             [
                 "name: invalid",
                 "dimension: 2",
+                'point_group_symbol: "1"',
                 "elements:",
                 "  - name: E",
                 '    point_action: [[1, 0], [0, "sqrt(3)/2"]]',

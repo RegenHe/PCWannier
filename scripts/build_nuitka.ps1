@@ -43,6 +43,9 @@ $nuitkaOptions = @(
     "--enable-plugin=matplotlib",
     "--include-package=pcwannier",
     "--include-package-data=pcwannier.symmetry",
+    "--include-package=spglib",
+    "--include-package-data=spglib",
+    "--include-package=spgrep",
     "--output-dir=$OutDir",
     "--output-filename=$Name.exe"
 )

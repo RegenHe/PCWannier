@@ -27,7 +27,7 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             "unitarity=%.6g outer_unitarity=%.6g leakage=%.6g "
             "composition=%.6g twisted_composition=%.6g factor_phase=%.6g factor_cocycle=%.6g "
             "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s "
-            "unitary_characters=%s",
+            "small_representations=%s unitary_characters=%s",
             point.name,
             point.little_group_name or "unresolved",
             point.unitary_subgroup_name or point.little_group_name or "unresolved",
@@ -49,6 +49,14 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             True if factor is None else factor.raw_trivial,
             True if factor is None else factor.cohomologically_trivial,
             1 if factor is None else factor.bloch_sign,
+            (
+                ()
+                if point.resolved_little_group is None
+                else tuple(
+                    (irrep.name, irrep.dimension, irrep.label_source)
+                    for irrep in point.resolved_little_group.irreps
+                )
+            ),
             {name: complex(value) for name, value in point.unitary_characters.items()},
         )
         for block in point.degenerate_blocks:
@@ -95,7 +103,7 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
         elif factor is not None and not factor.cohomologically_trivial:
             LOGGER.info(
                 "Symmetry point %s uses a non-trivial projective factor: "
-                "ordinary irrep labels unavailable",
+                "small-representation labels are generated in the fixed PCWannier factor gauge",
                 point.name,
             )
 
@@ -131,4 +139,3 @@ def _format_irrep_decomposition(decomposition) -> str:
             continue
         terms.append(name if multiplicity == 1 else f"{multiplicity}{name}")
     return " + ".join(terms) or "none"
-

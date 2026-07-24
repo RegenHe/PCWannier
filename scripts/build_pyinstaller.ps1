@@ -48,7 +48,9 @@ $pyinstallerOptions = @(
     "--specpath", $workDir,
     "--collect-submodules", "scipy",
     "--collect-data", "matplotlib",
-    "--collect-data", "pcwannier.symmetry"
+    "--collect-data", "pcwannier.symmetry",
+    "--collect-all", "spglib",
+    "--collect-submodules", "spgrep"
 )
 
 if ($OneFile) {

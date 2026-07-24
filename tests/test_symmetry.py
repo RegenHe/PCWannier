@@ -134,8 +134,11 @@ def test_p4g_glide_uses_one_bloch_convention_for_field_target_and_factor():
             bloch_convention=convention,
         )
         assert not projective.factor_system.cohomologically_trivial
-        with pytest.raises(NotImplementedError, match="projective irreps"):
-            projective.require_irreps()
+        irreps = projective.require_irreps()
+        assert len(irreps) == 1
+        assert irreps[0].name == "P1"
+        assert irreps[0].dimension == 2
+        assert irreps[0].label_source == "projective"
 
 
 def test_square_k_mesh_mapping_and_closure_errors():

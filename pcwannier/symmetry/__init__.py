@@ -80,14 +80,20 @@ from .definition import (
     FiniteGroupIdentification,
     FiniteGroupLibrary,
     GroupIrrep,
-    ProjectiveIrrepResolver,
     ResolvedIrrep,
     ResolvedLittleGroup,
+    ResolvedSmallRepresentation,
     SpaceGroupDefinition,
     SymmetryGroupDefinition,
     build_factor_system,
     identify_finite_group,
     resolve_little_group,
+)
+from .crystallography import (
+    CrystallographicEmbedding,
+    PointGroupIdentification,
+    identify_point_group,
+    symmetry_engine_versions,
 )
 from .io import (
     compose_symmetry_model,
@@ -128,7 +134,7 @@ from .specs import (
     SymmetryCalculationSpec,
     WannierTargetSpec,
 )
-from .tables import AutomaticIrrepCharacter, ConcreteFiniteGroup, ConjugacyClass, FiniteGroupTable
+from .tables import ConcreteFiniteGroup, ConjugacyClass, FiniteGroupTable
 from .twisted import (
     TwistedRepresentation,
     build_little_group_twisted_pair,
@@ -168,7 +174,7 @@ __all__ = [
     "IrrepDecomposition",
     "GroupIrrep",
     "FiniteGroupTable",
-    "AutomaticIrrepCharacter",
+    "CrystallographicEmbedding",
     "IntertwinerSpace",
     "LittleGroupElement",
     "OrbitAction",
@@ -183,6 +189,7 @@ __all__ = [
     "RepresentationPointSpec",
     "ResolvedLittleGroup",
     "ResolvedIrrep",
+    "ResolvedSmallRepresentation",
     "RepresentativeGaugeDiagnostics",
     "SewingDiagnostics",
     "SewingMatrixCache",
@@ -253,7 +260,8 @@ __all__ = [
     "compose_symmetry_model",
     "resolve_symmetry_file",
     "ConcreteFiniteGroup",
-    "ProjectiveIrrepResolver",
+    "PointGroupIdentification",
+    "identify_point_group",
     "outer_band_grid",
     "periodic_difference",
     "periodic_equivalent",
@@ -266,6 +274,7 @@ __all__ = [
     "save_sewing_matrix_cache",
     "solve_intertwiner_space",
     "symmetrize_gradient",
+    "symmetry_engine_versions",
     "validate_frozen_window_covariance",
     "validate_outer_window_closure",
     "validate_wannier_symmetry",

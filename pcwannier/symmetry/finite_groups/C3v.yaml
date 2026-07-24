@@ -2,6 +2,7 @@
 # use an orthonormal internal (x, y) basis and may therefore contain sqrt(3).
 name: C3v
 dimension: 2
+point_group_symbol: "3m"
 elements:
   - name: E
     point_action: [[1, 0], [0, 1]]

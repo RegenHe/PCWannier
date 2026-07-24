@@ -224,11 +224,6 @@ def decompose_little_group_characters(
     if set(physical_characters) != set(names):
         raise ValueError("Physical characters must contain every little-group operation exactly once.")
     physical_values = np.asarray([physical_characters[name] for name in names], dtype=np.complex128)
-    cochain = little_group_definition.factor_system.trivializing_cochain
-    if cochain is None:
-        little_group_definition.require_irreps()
-        raise AssertionError("unreachable")
-    physical_values = cochain * physical_values
     raw: dict[str, complex] = {}
     rounded: dict[str, int] = {}
     residuals: dict[str, float] = {}
@@ -240,14 +235,20 @@ def decompose_little_group_characters(
         rounded[irrep.name] = nearest
         residuals[irrep.name] = float(abs(multiplicity - nearest))
     class_residuals = {}
-    for conjugacy_class in table.conjugacy_classes:
-        class_names = tuple(
-            table.element_names[index] for index in conjugacy_class.element_indices
-        )
-        values = [physical_values[index] for index in conjugacy_class.element_indices]
-        average = sum(values) / len(values)
-        label = "{" + ",".join(str(name) for name in class_names) + "}"
-        class_residuals[label] = max((abs(value - average) for value in values), default=0.0)
+    cochain = little_group_definition.factor_system.trivializing_cochain
+    if cochain is not None:
+        ordinary_values = cochain * physical_values
+        for conjugacy_class in table.conjugacy_classes:
+            class_names = tuple(
+                table.element_names[index] for index in conjugacy_class.element_indices
+            )
+            values = [ordinary_values[index] for index in conjugacy_class.element_indices]
+            average = sum(values) / len(values)
+            label = "{" + ",".join(str(name) for name in class_names) + "}"
+            class_residuals[label] = max(
+                (abs(value - average) for value in values),
+                default=0.0,
+            )
     return IrrepDecomposition(raw, rounded, residuals, class_residuals)
 
 
@@ -1009,8 +1010,6 @@ def _irrep_unavailable_reason(
     factor = resolved_little_group.factor_system
     if any(factor.antiunitary_flags):
         return "magnetic corepresentation labels are unavailable"
-    if not factor.cohomologically_trivial:
-        return "projective irrep labels are unavailable for a non-trivial factor system"
     if leakage > tolerance:
         return f"band subspace leakage {leakage:.6g} exceeds {tolerance:.6g}"
     if twisted_residual > tolerance:

@@ -14,12 +14,6 @@ class ConjugacyClass:
     element_indices: tuple[int, ...]
 
 
-@dataclass(frozen=True)
-class AutomaticIrrepCharacter:
-    dimension: int
-    characters: tuple[complex, ...]
-
-
 class FiniteGroupTable:
     """A finite multiplication table independent of any space-group embedding."""
 
@@ -105,58 +99,6 @@ class FiniteGroupTable:
             output.append(ConjugacyClass(tuple(sorted(members))))
             remaining.difference_update(members)
         return tuple(output)
-
-    @cached_property
-    def regular_matrices(self) -> tuple[np.ndarray, ...]:
-        matrices = []
-        for element in range(self.order):
-            matrix = np.zeros((self.order, self.order), dtype=np.complex128)
-            matrix[self.multiplication[element], np.arange(self.order)] = 1.0
-            matrix.setflags(write=False)
-            matrices.append(matrix)
-        return tuple(matrices)
-
-    @cached_property
-    def automatic_irreps(self) -> tuple[AutomaticIrrepCharacter, ...]:
-        blocks = [np.eye(self.order, dtype=np.complex128)]
-        central_operators = []
-        for conjugacy_class in self.conjugacy_classes:
-            class_sum = sum(
-                self.regular_matrices[index] for index in conjugacy_class.element_indices
-            )
-            central_operators.extend(
-                (
-                    0.5 * (class_sum + class_sum.conj().T),
-                    (class_sum - class_sum.conj().T) / (2.0j),
-                )
-            )
-        for operator in central_operators:
-            refined = []
-            for basis in blocks:
-                restricted = basis.conj().T @ operator @ basis
-                values, vectors = np.linalg.eigh(0.5 * (restricted + restricted.conj().T))
-                for cluster in _eigenvalue_clusters(values):
-                    child = basis @ vectors[:, cluster]
-                    child, _ = np.linalg.qr(child)
-                    refined.append(child)
-            blocks = refined
-
-        irreps = []
-        for basis in blocks:
-            isotypic_dimension = basis.shape[1]
-            dimension = int(round(np.sqrt(isotypic_dimension)))
-            if dimension * dimension != isotypic_dimension:
-                raise ValueError(
-                    "Could not resolve finite-group irreducible characters from the regular representation."
-                )
-            characters = tuple(
-                complex(np.trace(basis.conj().T @ matrix @ basis) / dimension)
-                for matrix in self.regular_matrices
-            )
-            irreps.append(AutomaticIrrepCharacter(dimension, characters))
-        irreps.sort(key=lambda item: (item.dimension, _character_sort_key(item.characters)))
-        _validate_automatic_character_table(self, irreps)
-        return tuple(irreps)
 
     def _validate_associativity(self) -> None:
         for left in range(self.order):
@@ -257,42 +199,3 @@ class ConcreteFiniteGroup:
             bool(self.group.operations[index].antiunitary)
             for index in self.operation_indices
         )
-
-
-def _eigenvalue_clusters(values: np.ndarray) -> tuple[np.ndarray, ...]:
-    if values.size == 0:
-        return ()
-    scale = max(1.0, float(np.max(np.abs(values))))
-    threshold = 1.0e-9 * scale
-    clusters = []
-    start = 0
-    for index in range(1, values.size):
-        if abs(values[index] - values[index - 1]) > threshold:
-            clusters.append(np.arange(start, index))
-            start = index
-    clusters.append(np.arange(start, values.size))
-    return tuple(clusters)
-
-
-def _character_sort_key(characters: tuple[complex, ...]) -> tuple[float, ...]:
-    values = []
-    for value in characters:
-        values.extend((round(value.real, 10), round(value.imag, 10)))
-    return tuple(values)
-
-
-def _validate_automatic_character_table(
-    table: FiniteGroupTable,
-    irreps: list[AutomaticIrrepCharacter],
-) -> None:
-    if sum(irrep.dimension**2 for irrep in irreps) != table.order:
-        raise ValueError("Irreducible-character dimensions do not satisfy the finite-group sum rule.")
-    for left_index, left in enumerate(irreps):
-        for right_index, right in enumerate(irreps):
-            inner = sum(
-                np.conj(left.characters[index]) * right.characters[index]
-                for index in range(table.order)
-            ) / table.order
-            expected = 1.0 if left_index == right_index else 0.0
-            if abs(inner - expected) > 1.0e-7:
-                raise ValueError("Automatically generated irreducible characters are not orthonormal.")

@@ -1,5 +1,6 @@
 name: Cs
 dimension: 2
+point_group_symbol: "m"
 elements:
   - name: E
     point_action: [[1, 0], [0, 1]]

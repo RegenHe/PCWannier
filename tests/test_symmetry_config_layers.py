@@ -186,12 +186,13 @@ def test_invalid_finite_group_irrep_and_unknown_target_are_rejected(tmp_path):
         compose_symmetry_model(base, SymmetryCalculationSpec((), analysis))
 
 
-def test_finite_group_can_use_explicit_multiplication_without_point_actions(tmp_path):
+def test_finite_group_label_catalog_requires_point_actions(tmp_path):
     path = tmp_path / "abstract-c2.yaml"
     path.write_text(
         """
 name: AbstractC2
 dimension: 2
+point_group_symbol: "2"
 elements:
   - name: E
   - name: a
@@ -209,11 +210,8 @@ irreps:
         encoding="utf-8",
     )
 
-    definition = load_finite_group(path)
-
-    assert definition.point_actions is None
-    assert definition.table.element_orders == (1, 2)
-    assert {irrep.name for irrep in definition.irreps} == {"plus", "minus"}
+    with pytest.raises(ValueError, match="require point_action"):
+        load_finite_group(path)
 
 
 def test_site_groups_are_identified_from_center_geometry():
@@ -250,8 +248,10 @@ def test_p4g_factor_system_reports_projective_points_without_fallback():
     assert not xpoint.factor_system.is_trivial
     assert not xpoint.factor_system.raw_trivial
     assert not xpoint.factor_system.cohomologically_trivial
-    with pytest.raises(NotImplementedError, match="projective irreps"):
-        xpoint.require_irreps()
+    projective_irreps = xpoint.require_irreps()
+    assert [(irrep.name, irrep.dimension, irrep.label_source) for irrep in projective_irreps] == [
+        ("P1", 2, "projective")
+    ]
 
     # The chosen p4g representatives have a non-unit raw factor at M, but it is
     # removed by a one-cochain. Ordinary irreps are therefore valid after rephasing.

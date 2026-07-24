@@ -1,5 +1,6 @@
 name: C2v
 dimension: 2
+point_group_symbol: "mm2"
 elements:
   - name: E
     point_action: [[1, 0], [0, 1]]

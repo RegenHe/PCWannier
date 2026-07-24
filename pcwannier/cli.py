@@ -17,7 +17,11 @@ from .outputs import (
 )
 from .runtime_info import format_elapsed, format_memory, memory_snapshot, now, start_memory_tracking
 from .sources import load_input, load_mesh
-from .symmetry import load_builtin_finite_groups, load_finite_group
+from .symmetry import (
+    load_builtin_finite_groups,
+    load_finite_group,
+    symmetry_engine_versions,
+)
 from .timing import timed_step
 
 LOGGER = logging.getLogger(__name__)
@@ -130,19 +134,25 @@ def main(argv=None) -> int:
     )
     if config.symmetry_context is not None:
         symmetry_model = config.symmetry_context.model
+        spglib_version, spgrep_version = symmetry_engine_versions()
+        definition = symmetry_model.group_definition
         target_summary = ", ".join(
             f"{target.name}:{target.wannier_dimension}" for target in symmetry_model.targets
         ) or "none"
         LOGGER.info(
-            "symmetry file=%s group=%s operations=%s targets=%s target_dimensions=%s "
+            "symmetry file=%s group=%s point_group=%s spglib=%s spgrep=%s "
+            "operations=%s targets=%s target_dimensions=%s "
             "constrained_localization=%s output_basis=%s bloch_convention=%s(sign=%s) "
             "magnetic_bias=%s unitary=%s antiunitary=%s",
             config.symmetry_resolved_path or config.input_path(config.symmetry_file),
             (
-                symmetry_model.group_definition.name
-                if symmetry_model.group_definition is not None
+                definition.name
+                if definition is not None
                 else "legacy"
             ),
+            None if definition is None else definition.point_group.symbol,
+            spglib_version,
+            spgrep_version,
             len(symmetry_model.group.operations),
             len(symmetry_model.targets),
             target_summary,

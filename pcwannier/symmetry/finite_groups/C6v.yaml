@@ -2,6 +2,7 @@
 # use an orthonormal internal basis and may therefore contain sqrt(3).
 name: C6v
 dimension: 2
+point_group_symbol: "6mm"
 elements:
   - name: E
     point_action: [[1, 0], [0, 1]]

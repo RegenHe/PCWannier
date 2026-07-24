@@ -1,5 +1,6 @@
 name: C4
 dimension: 2
+point_group_symbol: "4"
 elements:
   - name: E
     point_action: [[1, 0], [0, 1]]

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import permutations, product
-from typing import Mapping, Protocol
+from typing import Mapping
 
 import numpy as np
 
 from .group import SpaceGroup, reduce_fractional
 from ..conventions import BlochConvention
+from .crystallography import (
+    PointGroupIdentification,
+    enumerate_little_group_representations,
+    identify_point_group,
+    validate_catalog_characters,
+)
 from .tables import ConcreteFiniteGroup, FiniteGroupTable
 
 
@@ -27,8 +33,9 @@ class GroupIrrep:
 class FiniteGroupDefinition:
     name: str
     dimension: int
+    point_group_symbol: str
     table: FiniteGroupTable
-    point_actions: tuple[np.ndarray, ...] | None
+    point_actions: tuple[np.ndarray, ...]
     irreps: tuple[GroupIrrep, ...]
 
     def irrep(self, name: str) -> GroupIrrep:
@@ -47,6 +54,8 @@ class FiniteGroupIdentification:
     canonical_to_actual: tuple[int, ...]
     mapping_method: str
     candidate_count: int
+    point_group_symbol: str
+    point_group_number: int
 
     def canonical_name_for_operation(self, operation_index: int) -> str:
         actual = self.concrete.local_index(operation_index)
@@ -172,11 +181,28 @@ class FiniteGroupLibrary:
         names = [definition.name for definition in items]
         if not items or len(names) != len(set(names)):
             raise ValueError("Finite-group library names must be unique and non-empty.")
+        symbols = [definition.point_group_symbol for definition in items]
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("Finite-group point_group_symbol values must be unique.")
         self.definitions = items
 
     def identify(self, concrete: ConcreteFiniteGroup) -> FiniteGroupIdentification:
+        point_group = identify_point_group(
+            concrete.rotations,
+            concrete.group.dimension,
+        )
+        definitions = tuple(
+            definition
+            for definition in self.definitions
+            if definition.point_group_symbol == point_group.symbol
+        )
+        if not definitions:
+            raise ValueError(
+                f"spglib identified point group {point_group.symbol!r}, but no matching "
+                "finite-group label catalog is installed."
+            )
         matches = []
-        for definition in self.definitions:
+        for definition in definitions:
             if definition.table.order != concrete.table.order:
                 continue
             isomorphisms = _group_isomorphisms(concrete.table, definition.table)
@@ -192,7 +218,7 @@ class FiniteGroupLibrary:
                 for mapping in isomorphisms
                 if _point_action_invariants_match(concrete, definition, mapping)
             ]
-            if definition.point_actions is not None and not geometric:
+            if not geometric:
                 continue
             candidates = exact or geometric or isomorphisms
             method = (
@@ -214,6 +240,8 @@ class FiniteGroupLibrary:
                     tuple(inverse),
                     method,
                     len(isomorphisms),
+                    point_group.symbol,
+                    point_group.number,
                 )
             )
         if not matches:
@@ -222,7 +250,10 @@ class FiniteGroupLibrary:
                 tuple(sorted(concrete.table.element_orders)),
                 tuple(sorted(len(value.element_indices) for value in concrete.table.conjugacy_classes)),
             )
-            raise ValueError(f"No canonical finite group matches actual group signature {signature}.")
+            raise ValueError(
+                f"No canonical finite group matches spglib point group "
+                f"{point_group.symbol!r} with actual signature {signature}."
+            )
         exact = [match for match in matches if match.mapping_method == "point_action"]
         if len(exact) == 1:
             return exact[0]
@@ -358,12 +389,56 @@ class FactorSystem:
             raise ValueError("Physical and target representations use different factor-system phases.")
 
 
-class ProjectiveIrrepResolver(Protocol):
-    def resolve(
-        self,
-        identification: FiniteGroupIdentification,
-        factor_system: FactorSystem,
-    ) -> tuple[ResolvedIrrep, ...]: ...
+@dataclass(frozen=True)
+class ResolvedSmallRepresentation:
+    name: str
+    operation_indices: tuple[int, ...]
+    matrices: tuple[np.ndarray, ...]
+    factor_system: FactorSystem
+    label_source: str
+
+    def __post_init__(self) -> None:
+        name = str(self.name).strip()
+        if not name:
+            raise ValueError("Small-representation name must not be empty.")
+        indices = tuple(int(value) for value in self.operation_indices)
+        if not indices or len(indices) != len(set(indices)):
+            raise ValueError("Small-representation operation indices must be unique.")
+        matrices = tuple(np.asarray(value, dtype=np.complex128) for value in self.matrices)
+        if len(matrices) != len(indices):
+            raise ValueError("Small-representation matrices must match operation indices.")
+        dimension = matrices[0].shape[0]
+        if dimension <= 0 or any(value.shape != (dimension, dimension) for value in matrices):
+            raise ValueError("Small-representation matrices must be non-empty and square.")
+        if any(not np.all(np.isfinite(value)) for value in matrices):
+            raise ValueError("Small-representation matrices must be finite.")
+        stored = []
+        for matrix in matrices:
+            value = matrix.copy()
+            value.setflags(write=False)
+            stored.append(value)
+        source = str(self.label_source).strip()
+        if source not in {"catalog", "projective"}:
+            raise ValueError("Small-representation label_source must be catalog or projective.")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "operation_indices", indices)
+        object.__setattr__(self, "matrices", tuple(stored))
+        object.__setattr__(self, "label_source", source)
+
+    @property
+    def dimension(self) -> int:
+        return int(self.matrices[0].shape[0])
+
+    @property
+    def characters(self) -> tuple[complex, ...]:
+        return tuple(complex(np.trace(matrix)) for matrix in self.matrices)
+
+    def matrix_for_global_index(self, operation_index: int) -> np.ndarray:
+        try:
+            local = self.operation_indices.index(int(operation_index))
+        except ValueError as exc:
+            raise ValueError("Operation does not belong to this small representation.") from exc
+        return self.matrices[local]
 
 
 @dataclass(frozen=True)
@@ -372,7 +447,7 @@ class ResolvedLittleGroup:
     concrete: ConcreteFiniteGroup
     identification: FiniteGroupIdentification
     factor_system: FactorSystem
-    irreps: tuple[ResolvedIrrep, ...]
+    irreps: tuple[ResolvedSmallRepresentation, ...]
     k_fractional: np.ndarray | None = None
     reciprocal_lattice_shifts: tuple[tuple[int, ...], ...] = ()
 
@@ -380,19 +455,14 @@ class ResolvedLittleGroup:
     def table(self) -> FiniteGroupTable:
         return self.concrete.table
 
-    def require_irreps(self) -> tuple[ResolvedIrrep, ...]:
+    def require_irreps(self) -> tuple[ResolvedSmallRepresentation, ...]:
         if any(self.factor_system.antiunitary_flags):
             raise NotImplementedError(
                 f"Little group {self.name!r} contains antiunitary operations; ordinary character "
                 "tables do not describe magnetic corepresentations."
             )
-        if not self.factor_system.is_trivial:
-            raise NotImplementedError(
-                f"Little co-group {self.name!r} has a non-trivial factor system "
-                f"(phase_residual={self.factor_system.phase_residual:.6g}, "
-                f"cocycle_residual={self.factor_system.cocycle_residual:.6g}); "
-                "projective irreps and small representations are not implemented."
-            )
+        if not self.irreps:
+            raise RuntimeError(f"Little group {self.name!r} has no enumerated small representations.")
         return self.irreps
 
 
@@ -403,6 +473,7 @@ class SpaceGroupDefinition:
     tolerance: float
     group: SpaceGroup
     finite_groups: FiniteGroupLibrary
+    point_group: PointGroupIdentification = field(init=False)
     _identification_cache: dict[tuple[int, ...], FiniteGroupIdentification] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
@@ -413,6 +484,14 @@ class SpaceGroupDefinition:
     def __post_init__(self) -> None:
         if self.dimension != self.group.dimension:
             raise ValueError("Space-group definition dimension does not match its operations.")
+        object.__setattr__(
+            self,
+            "point_group",
+            identify_point_group(
+                (operation.rotation for operation in self.group.operations),
+                self.dimension,
+            ),
+        )
 
     def identify_operations(self, operation_indices) -> FiniteGroupIdentification:
         indices = tuple(int(value) for value in operation_indices)
@@ -452,7 +531,6 @@ class SpaceGroupDefinition:
         operation_indices,
         k_fractional,
         *,
-        projective_resolver: ProjectiveIrrepResolver | None = None,
         bloch_convention: BlochConvention | None = None,
     ) -> ResolvedLittleGroup:
         convention = BlochConvention() if bloch_convention is None else bloch_convention
@@ -462,10 +540,9 @@ class SpaceGroupDefinition:
             raise ValueError(f"k_fractional must have shape {(self.dimension,)}.")
         reduced_k = reduce_fractional(kpoint, self.tolerance).reduced
         cache_key = (indices, np.ascontiguousarray(reduced_k).tobytes(), convention.sign)
-        if projective_resolver is None:
-            cached = self._little_group_cache.get(cache_key)
-            if cached is not None:
-                return cached
+        cached = self._little_group_cache.get(cache_key)
+        if cached is not None:
+            return cached
         identification = self.identify_operations(indices)
         concrete = identification.concrete
         reciprocal_shifts = []
@@ -485,15 +562,16 @@ class SpaceGroupDefinition:
             self.tolerance,
             bloch_convention=convention,
         )
-        if factor.cohomologically_trivial and not any(factor.antiunitary_flags):
-            irreps = tuple(
-                identification.resolved_irrep(irrep.name)
-                for irrep in identification.canonical.irreps
+        irreps = (
+            ()
+            if any(factor.antiunitary_flags)
+            else _enumerate_resolved_small_representations(
+                concrete,
+                identification,
+                factor,
+                self.tolerance,
             )
-        elif projective_resolver is not None:
-            irreps = tuple(projective_resolver.resolve(identification, factor))
-        else:
-            irreps = ()
+        )
         stored_k = reduced_k.copy()
         stored_k.setflags(write=False)
         result = ResolvedLittleGroup(
@@ -505,8 +583,7 @@ class SpaceGroupDefinition:
             stored_k,
             tuple(reciprocal_shifts),
         )
-        if projective_resolver is None:
-            self._little_group_cache[cache_key] = result
+        self._little_group_cache[cache_key] = result
         return result
 
 
@@ -595,6 +672,80 @@ def build_factor_system(
     )
 
 
+def _enumerate_resolved_small_representations(
+    concrete: ConcreteFiniteGroup,
+    identification: FiniteGroupIdentification,
+    factor_system: FactorSystem,
+    tolerance: float,
+) -> tuple[ResolvedSmallRepresentation, ...]:
+    generated = enumerate_little_group_representations(
+        concrete,
+        factor_system,
+        tolerance,
+    )
+    cochain = factor_system.trivializing_cochain
+    output = []
+    matched_names: set[str] = set()
+    for generated_index, matrices in enumerate(generated, start=1):
+        characters = np.asarray(
+            [np.trace(matrix) for matrix in matrices],
+            dtype=np.complex128,
+        )
+        if cochain is None:
+            name = f"P{generated_index}"
+            label_source = "projective"
+        else:
+            ordinary_characters = cochain * characters
+            candidates = []
+            for catalog_irrep in identification.canonical.irreps:
+                expected = np.asarray(
+                    [
+                        catalog_irrep.characters[canonical]
+                        for canonical in identification.actual_to_canonical
+                    ],
+                    dtype=np.complex128,
+                )
+                if np.allclose(
+                    ordinary_characters,
+                    expected,
+                    rtol=0.0,
+                    atol=max(10.0 * tolerance, 1.0e-7),
+                ):
+                    candidates.append(catalog_irrep.name)
+            if len(candidates) != 1:
+                raise ValueError(
+                    "Could not uniquely match a spgrep small representation to the "
+                    f"{identification.canonical.name} label catalog; matches={candidates}."
+                )
+            name = candidates[0]
+            if name in matched_names:
+                raise ValueError(f"spgrep generated duplicate ordinary irrep label {name!r}.")
+            matched_names.add(name)
+            label_source = "catalog"
+        output.append(
+            ResolvedSmallRepresentation(
+                name,
+                concrete.operation_indices,
+                matrices,
+                factor_system,
+                label_source,
+            )
+        )
+    if cochain is not None:
+        expected_names = {irrep.name for irrep in identification.canonical.irreps}
+        if matched_names != expected_names:
+            missing = sorted(expected_names - matched_names)
+            raise ValueError(f"spgrep did not generate catalog irreps {missing}.")
+        output.sort(
+            key=lambda value: next(
+                index
+                for index, irrep in enumerate(identification.canonical.irreps)
+                if irrep.name == value.name
+            )
+        )
+    return tuple(output)
+
+
 def build_group_irrep(
     table: FiniteGroupTable,
     name: str,
@@ -637,7 +788,13 @@ def build_group_irrep(
     return irrep
 
 
-def validate_irrep_table(table: FiniteGroupTable, irreps: tuple[GroupIrrep, ...]) -> None:
+def validate_irrep_table(
+    table: FiniteGroupTable,
+    irreps: tuple[GroupIrrep, ...],
+    point_actions: tuple[np.ndarray, ...],
+    *,
+    dimension: int,
+) -> None:
     names = [irrep.name for irrep in irreps]
     if not irreps or len(names) != len(set(names)):
         raise ValueError("Irrep names must be unique and the irrep table must be non-empty.")
@@ -653,22 +810,12 @@ def validate_irrep_table(table: FiniteGroupTable, irreps: tuple[GroupIrrep, ...]
                 raise ValueError(
                     f"Irrep characters {left.name!r} and {right.name!r} violate character orthogonality."
                 )
-    automatic = list(table.automatic_irreps)
-    for irrep in irreps:
-        match = next(
-            (
-                position
-                for position, candidate in enumerate(automatic)
-                if candidate.dimension == irrep.dimension
-                and np.allclose(candidate.characters, irrep.characters, rtol=0.0, atol=1.0e-7)
-            ),
-            None,
-        )
-        if match is None:
-            raise ValueError(f"Irrep {irrep.name!r} does not match the finite-group character table.")
-        automatic.pop(match)
-    if automatic:
-        raise ValueError("The supplied irrep table is incomplete.")
+    validate_catalog_characters(
+        point_actions,
+        table,
+        (irrep.characters for irrep in irreps),
+        dimension=dimension,
+    )
 
 
 def _group_isomorphisms(actual: FiniteGroupTable, canonical: FiniteGroupTable):
@@ -727,8 +874,6 @@ def _point_actions_match(
     definition: FiniteGroupDefinition,
     mapping,
 ) -> bool:
-    if definition.point_actions is None:
-        return False
     return all(
         np.array_equal(concrete.rotations[actual], definition.point_actions[canonical])
         for actual, canonical in enumerate(mapping)
@@ -740,8 +885,6 @@ def _point_action_invariants_match(
     definition: FiniteGroupDefinition,
     mapping,
 ) -> bool:
-    if definition.point_actions is None:
-        return False
     return all(
         _linear_action_signature(concrete.rotations[actual])
         == _linear_action_signature(definition.point_actions[canonical])

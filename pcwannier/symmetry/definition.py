@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from itertools import permutations, product
+from itertools import product
 from typing import Mapping
 
 import numpy as np
 
-from .group import SpaceGroup, reduce_fractional
+from .group import SpaceGroup, little_group, reduce_fractional
 from ..conventions import BlochConvention
 from .crystallography import (
     PointGroupIdentification,
@@ -328,12 +328,6 @@ class FactorSystem:
         object.__setattr__(self, "antiunitary_flags", flags)
 
     @property
-    def is_trivial(self) -> bool:
-        """Compatibility alias for cohomologically_trivial."""
-
-        return self.cohomologically_trivial
-
-    @property
     def raw_trivial(self) -> bool:
         return self.phase_residual <= self.tolerance
 
@@ -473,6 +467,7 @@ class SpaceGroupDefinition:
     tolerance: float
     group: SpaceGroup
     finite_groups: FiniteGroupLibrary
+    algebra_tolerance: float = 1.0e-10
     point_group: PointGroupIdentification = field(init=False)
     _identification_cache: dict[tuple[int, ...], FiniteGroupIdentification] = field(
         default_factory=dict, init=False, repr=False, compare=False
@@ -484,6 +479,8 @@ class SpaceGroupDefinition:
     def __post_init__(self) -> None:
         if self.dimension != self.group.dimension:
             raise ValueError("Space-group definition dimension does not match its operations.")
+        if not np.isfinite(self.algebra_tolerance) or self.algebra_tolerance <= 0.0:
+            raise ValueError("Symmetry algebra tolerance must be positive and finite.")
         object.__setattr__(
             self,
             "point_group",
@@ -523,7 +520,7 @@ class SpaceGroupDefinition:
             return _extend_one_dimensional_magnetic_irrep(
                 identification,
                 unitary_irrep,
-                self.tolerance,
+                self.algebra_tolerance,
             )
 
     def resolve_little_group(
@@ -560,6 +557,7 @@ class SpaceGroupDefinition:
             concrete,
             reduced_k,
             self.tolerance,
+            algebra_tolerance=self.algebra_tolerance,
             bloch_convention=convention,
         )
         irreps = (
@@ -569,7 +567,7 @@ class SpaceGroupDefinition:
                 concrete,
                 identification,
                 factor,
-                self.tolerance,
+                self.algebra_tolerance,
             )
         )
         stored_k = reduced_k.copy()
@@ -587,9 +585,6 @@ class SpaceGroupDefinition:
         return result
 
 
-SymmetryGroupDefinition = SpaceGroupDefinition
-
-
 def identify_finite_group(
     concrete_group: ConcreteFiniteGroup,
     library: FiniteGroupLibrary,
@@ -605,16 +600,9 @@ def resolve_little_group(
     bloch_convention: BlochConvention | None = None,
 ) -> ResolvedLittleGroup:
     if operation_indices is None:
-        kpoint = np.asarray(k_fractional, dtype=float)
         operation_indices = tuple(
-            index
-            for index, operation in enumerate(definition.group.operations)
-            if np.allclose(
-                operation.act_reciprocal(kpoint) - kpoint,
-                np.rint(operation.act_reciprocal(kpoint) - kpoint),
-                rtol=0.0,
-                atol=definition.tolerance,
-            )
+            element.operation_index
+            for element in little_group(definition.group, k_fractional)
         )
     return definition.resolve_little_group(
         operation_indices,
@@ -626,11 +614,16 @@ def resolve_little_group(
 def build_factor_system(
     concrete: ConcreteFiniteGroup,
     k_fractional,
-    tolerance: float,
+    coordinate_tolerance: float,
     *,
+    algebra_tolerance: float = 1.0e-10,
     bloch_convention: BlochConvention | None = None,
 ) -> FactorSystem:
     convention = BlochConvention() if bloch_convention is None else bloch_convention
+    if not np.isfinite(coordinate_tolerance) or coordinate_tolerance <= 0.0:
+        raise ValueError("Coordinate tolerance must be positive and finite.")
+    if not np.isfinite(algebra_tolerance) or algebra_tolerance <= 0.0:
+        raise ValueError("Algebra tolerance must be positive and finite.")
     kpoint = np.asarray(k_fractional, dtype=float)
     if kpoint.shape != (concrete.group.dimension,):
         raise ValueError(f"k_fractional must have shape {(concrete.group.dimension,)}.")
@@ -647,18 +640,18 @@ def build_factor_system(
         0.0,
         None,
         convention.sign,
-        tolerance,
+        algebra_tolerance,
         concrete.antiunitary_flags,
     )
     cocycle_residual = provisional.cocycle_residual_for(concrete.table.multiplication)
-    if cocycle_residual > max(100.0 * tolerance, 1.0e-8):
+    if cocycle_residual > max(100.0 * algebra_tolerance, 1.0e-10):
         raise ValueError(
             f"Computed factor system violates the cocycle condition (residual={cocycle_residual:.6g})."
         )
     cochain = _trivializing_cochain(
         concrete.table,
         phases,
-        tolerance,
+        algebra_tolerance,
         concrete.antiunitary_flags,
     )
     return FactorSystem(
@@ -667,7 +660,7 @@ def build_factor_system(
         cocycle_residual,
         cochain,
         convention.sign,
-        tolerance,
+        algebra_tolerance,
         concrete.antiunitary_flags,
     )
 
@@ -839,24 +832,58 @@ def _group_isomorphisms(actual: FiniteGroupTable, canonical: FiniteGroupTable):
         len(actual_buckets[key]) != len(canonical_buckets[key]) for key in actual_buckets
     ):
         return ()
-    keys = tuple(sorted(actual_buckets))
-    bucket_permutations = tuple(
-        tuple(permutations(canonical_buckets[key])) for key in keys
+    candidates = {
+        actual_index: tuple(canonical_buckets[key])
+        for key, actual_indices in actual_buckets.items()
+        for actual_index in actual_indices
+    }
+    assignment_order = tuple(
+        sorted(
+            candidates,
+            key=lambda index: (
+                len(candidates[index]),
+                actual.element_orders[index],
+                actual_class_sizes[index],
+                index,
+            ),
+        )
     )
-    output = []
-    for selected_buckets in product(*bucket_permutations):
-        mapping = [None] * actual.order
-        mapping[identity_a] = identity_c
-        for key, selected in zip(keys, selected_buckets):
-            for actual_index, canonical_index in zip(actual_buckets[key], selected):
-                mapping[actual_index] = canonical_index
-        if all(
-            mapping[int(actual.multiplication[left, right])]
-            == int(canonical.multiplication[mapping[left], mapping[right]])
-            for left in range(actual.order)
-            for right in range(actual.order)
-        ):
-            output.append(tuple(int(value) for value in mapping))
+    mapping = [-1] * actual.order
+    mapping[identity_a] = identity_c
+    used = {identity_c}
+    output: list[tuple[int, ...]] = []
+
+    def compatible() -> bool:
+        assigned = tuple(index for index, value in enumerate(mapping) if value >= 0)
+        for left in assigned:
+            canonical_left = mapping[left]
+            for right in assigned:
+                result = int(actual.multiplication[left, right])
+                if mapping[result] < 0:
+                    continue
+                expected = int(
+                    canonical.multiplication[canonical_left, mapping[right]]
+                )
+                if mapping[result] != expected:
+                    return False
+        return True
+
+    def search(position: int) -> None:
+        if position == len(assignment_order):
+            output.append(tuple(mapping))
+            return
+        actual_index = assignment_order[position]
+        for canonical_index in candidates[actual_index]:
+            if canonical_index in used:
+                continue
+            mapping[actual_index] = canonical_index
+            used.add(canonical_index)
+            if compatible():
+                search(position + 1)
+            used.remove(canonical_index)
+            mapping[actual_index] = -1
+
+    search(0)
     return tuple(output)
 
 

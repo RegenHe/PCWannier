@@ -8,7 +8,6 @@ from pcwannier.symmetry import (
     SpaceGroupOperation,
     build_symmetry_context,
     build_symmetry_stars,
-    combined_target_matrix,
     project_target_gauge_to_stars,
     propagate_target_gauge,
     symmetrize_gradient,
@@ -85,7 +84,7 @@ def test_square_2c_gradient_pullback_and_star_propagation_follow_right_action_co
     representative_k = _fractional_at(context, generic_star.representative_index)
     for member in generic_star.members:
         path = member.canonical_path
-        dmat = combined_target_matrix(model.targets, path.operation_index, representative_k)
+        dmat = context.target_matrix(path.operation_index, representative_k)
         raw_gradient[_state_index(member.k_index)] = dmat @ generator @ dmat.conj().T
 
     constrained = symmetrize_gradient(raw_gradient, context, stars)
@@ -150,7 +149,7 @@ def _max_target_residual(gauge, context) -> float:
             source = _state_index(mapping.source_k_index)
             target = _state_index(mapping.target_k_index)
             source_k = _fractional_at(context, mapping.source_k_index)
-            dmat = combined_target_matrix(context.model.targets, operation_index, source_k)
+            dmat = context.target_matrix(operation_index, source_k)
             source_gauge = gauge[source].conj() if operation.antiunitary else gauge[source]
             maximum = max(
                 maximum,

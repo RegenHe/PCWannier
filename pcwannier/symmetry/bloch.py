@@ -13,6 +13,7 @@ from .cache import SewingMatrixCache, SewingMatrixCacheEntry, load_sewing_matrix
 from .field_action import cartesian_field_matrix
 from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
 from .specs import FieldKind
+from .stars import fractional_at, state_index
 
 LOGGER = logging.getLogger(__name__)
 
@@ -402,7 +403,7 @@ class StateBlochSymmetryProvider:
         shape = tuple(len(axis) for axis in context.k_points)
         self._k_indices = tuple(np.ndindex(shape))
         self._k_fractional_points = np.asarray(
-            [self._fractional_at(index) for index in self._k_indices], dtype=float
+            [fractional_at(self.context, index) for index in self._k_indices], dtype=float
         )
         fractional = fractional_mesh_vertices(
             state.mesh, state.config.real_lattice_vectors, state.config.lattice_const
@@ -664,8 +665,12 @@ class StateBlochSymmetryProvider:
         operation = operation or self.context.model.group.operations[mapping.operation_index]
         source_index = tuple(mapping.source_k_index)
         target_index = tuple(mapping.target_k_index)
-        source_k = self._fractional_at(source_index) if source_k_fractional is None else np.asarray(source_k_fractional)
-        target_k = self._fractional_at(target_index)
+        source_k = (
+            fractional_at(self.context, source_index)
+            if source_k_fractional is None
+            else np.asarray(source_k_fractional)
+        )
+        target_k = fractional_at(self.context, target_index)
         transformed = operation.act_reciprocal(source_k)
         shift = np.rint(transformed - target_k).astype(np.int64)
         return SewingMatrixRequest(
@@ -708,36 +713,34 @@ class StateBlochSymmetryProvider:
             raise ValueError("Periodic k-point matching did not yield an integer reciprocal shift.")
         return self._k_indices[flat], representative, shift
 
-    def _fractional_at(self, index) -> np.ndarray:
-        return np.asarray(
-            [self.context.k_points[axis][index[axis]] for axis in range(self.dimension)],
-            dtype=float,
-        )
-
-    def _state_index(self, index) -> tuple[int, int, int]:
-        values = list(index) + [0, 0, 0]
-        return int(values[0]), int(values[1]), int(values[2])
-
     def _orthonormal_block(self, index, band_indices) -> np.ndarray:
-        state_index = self._state_index(index)
-        actual = tuple(int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1))
+        storage_index = state_index(index)
+        actual = tuple(
+            int(value)
+            for value in np.asarray(self.state.E_idx[storage_index]).reshape(-1)
+        )
         requested = tuple(int(value) for value in band_indices)
         missing = sorted(set(requested) - set(actual))
         if missing:
             raise ValueError(f"Actual Bloch bands {missing} are missing at k index {tuple(index)}.")
         local = [actual.index(band) for band in requested]
-        block = self.state.get_block(*state_index)
-        correction = np.asarray(self.state.get_transform()[state_index], dtype=np.complex128)
+        block = self.state.get_block(*storage_index)
+        correction = np.asarray(
+            self.state.get_transform()[storage_index], dtype=np.complex128
+        )
         orthonormal = (block.T @ correction).T
         return orthonormal[local]
 
     def _full_orthonormal_block(self, index, band_indices) -> np.ndarray:
         periodic = self._orthonormal_block(index, band_indices)
-        return periodic * self.state.get_phase(*self._state_index(index))[None, :]
+        return periodic * self.state.get_phase(*state_index(index))[None, :]
 
     def _actual_bands(self, index) -> tuple[int, ...]:
-        state_index = self._state_index(index)
-        return tuple(int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1))
+        storage_index = state_index(index)
+        return tuple(
+            int(value)
+            for value in np.asarray(self.state.E_idx[storage_index]).reshape(-1)
+        )
 
     def _validate_periodic_node_data(self, tolerance: float) -> None:
         classes = self.action.interpolator.periodic_node_classes
@@ -757,14 +760,15 @@ class StateBlochSymmetryProvider:
                 )
 
         for k_index in self._k_indices:
-            state_index = self._state_index(k_index)
-            block = self.state.get_block(*state_index)
+            storage_index = state_index(k_index)
+            block = self.state.get_block(*storage_index)
             scales = np.maximum(
                 np.max(np.abs(block), axis=1),
                 np.finfo(float).tiny,
             )
             actual_bands = tuple(
-                int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1)
+                int(value)
+                for value in np.asarray(self.state.E_idx[storage_index]).reshape(-1)
             )
             for nodes in classes:
                 node_indices = np.asarray(nodes, dtype=np.intp)
@@ -775,7 +779,7 @@ class StateBlochSymmetryProvider:
                     band = actual_bands[worst] if worst < len(actual_bands) else worst
                     raise ValueError(
                         "Periodic-equivalent FEM nodes have inconsistent periodic Bloch fields: "
-                        f"k={state_index}, band={band}, nodes={nodes}, "
+                        f"k={storage_index}, band={band}, nodes={nodes}, "
                         f"relative_residual={residuals[worst]:.6g}, tolerance={tolerance:.6g}."
                     )
 
@@ -791,7 +795,7 @@ class StateBlochSymmetryProvider:
         if cached is not None:
             return cached
         transform = np.asarray(
-            self.state.get_transform()[self._state_index(key)], dtype=np.complex128
+            self.state.get_transform()[state_index(key)], dtype=np.complex128
         )
         if transform.shape != (band_count, band_count):
             raise ValueError("Outer-window orthogonalization transform has an invalid shape.")
@@ -968,10 +972,20 @@ class StateBlochSymmetryProvider:
             digest.update(bytes((int(operation.antiunitary),)))
         transforms = self.state.get_transform()
         for k_index in self._k_indices:
-            state_index = self._state_index(k_index)
-            _update_array_digest(digest, f"bands:{state_index}", self._actual_bands(k_index))
-            _update_array_digest(digest, f"field:{state_index}", self.state.get_block(*state_index))
-            _update_array_digest(digest, f"transform:{state_index}", transforms[state_index])
+            storage_index = state_index(k_index)
+            _update_array_digest(
+                digest, f"bands:{storage_index}", self._actual_bands(k_index)
+            )
+            _update_array_digest(
+                digest,
+                f"field:{storage_index}",
+                self.state.get_block(*storage_index),
+            )
+            _update_array_digest(
+                digest,
+                f"transform:{storage_index}",
+                transforms[storage_index],
+            )
         return digest.hexdigest()
 
 

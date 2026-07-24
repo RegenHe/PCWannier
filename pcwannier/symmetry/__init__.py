@@ -4,7 +4,6 @@ from .analysis import (
     BlochSymmetryPointAnalysis,
     DegenerateBlock,
     IrrepDecomposition,
-    LittleGroupElement,
     RepresentationCompatibility,
     SewingDiagnostics,
     SymmetryAnalysisResult,
@@ -14,7 +13,6 @@ from .analysis import (
     decompose_little_group_characters,
     group_degenerate_bands,
     intertwiner_residual,
-    little_group,
     run_symmetry_analysis,
     run_bloch_symmetry_analysis,
 )
@@ -36,6 +34,7 @@ from .cache import (
 )
 from .group import (
     CrystallographicOrbit,
+    LittleGroupElement,
     OrbitAction,
     OrbitPoint,
     PeriodicImage,
@@ -48,6 +47,7 @@ from .group import (
     apply_magnetic_bias,
     build_crystallographic_orbit,
     build_k_mappings,
+    little_group,
     periodic_difference,
     periodic_equivalent,
     reduce_fractional,
@@ -84,7 +84,6 @@ from .definition import (
     ResolvedLittleGroup,
     ResolvedSmallRepresentation,
     SpaceGroupDefinition,
-    SymmetryGroupDefinition,
     build_factor_system,
     identify_finite_group,
     resolve_little_group,
@@ -101,7 +100,6 @@ from .io import (
     load_finite_group,
     load_space_group,
     load_symmetry,
-    load_symmetry_group,
     resolve_symmetry_file,
 )
 from .localization import (
@@ -115,6 +113,7 @@ from .localization import (
     symmetrize_gradient,
 )
 from .representation import (
+    CombinedTargetRepresentation,
     SiteIrrep,
     SymmetryContext,
     SymmetryModel,
@@ -122,7 +121,6 @@ from .representation import (
     apply_magnetic_bias_to_model,
     build_symmetry_context,
     build_wannier_target_from_group_irrep,
-    combined_target_matrix,
 )
 from ..conventions import BlochConvention
 from .specs import (
@@ -157,6 +155,7 @@ __all__ = [
     "AntiunitaryOperationDiagnostic",
     "BlochSymmetryAnalysisResult",
     "BlochSymmetryPointAnalysis",
+    "CombinedTargetRepresentation",
     "BlochConvention",
     "BlochSymmetryAction",
     "apply_magnetic_bias",
@@ -206,7 +205,6 @@ __all__ = [
     "SymmetryAnalysisResult",
     "SymmetryContext",
     "SymmetryCalculationSpec",
-    "SymmetryGroupDefinition",
     "SymmetryDisentanglementIteration",
     "SymmetryDisentanglementResult",
     "SymmetryGaugeResult",
@@ -239,7 +237,6 @@ __all__ = [
     "cartesian_field_matrix",
     "coefficient_metric_overlap",
     "compare_representations",
-    "combined_target_matrix",
     "construct_symmetry_gauge",
     "decompose_little_group_characters",
     "disentangle_symmetry_constrained",
@@ -251,7 +248,6 @@ __all__ = [
     "load_sewing_matrix_cache",
     "localize_symmetry_constrained",
     "load_symmetry",
-    "load_symmetry_group",
     "load_space_group",
     "load_finite_group",
     "load_builtin_finite_groups",

@@ -72,6 +72,17 @@ class TwistedRepresentation:
         return self.factor_system.cocycle_residual_for(self.product_table)
 
     @property
+    def unitarity_error(self) -> float:
+        identity = np.eye(self.dimension, dtype=np.complex128)
+        return max(
+            (
+                float(np.linalg.norm(matrix.conj().T @ matrix - identity, ord="fro"))
+                for matrix in self.matrices
+            ),
+            default=0.0,
+        )
+
+    @property
     def product_residual(self) -> float:
         residual = 0.0
         for left in range(self.order):
@@ -95,6 +106,12 @@ class TwistedRepresentation:
         if cocycle > threshold:
             raise ValueError(
                 f"Factor system violates the cocycle condition: residual={cocycle:.6g}, "
+                f"tolerance={threshold:.6g}."
+            )
+        unitarity = self.unitarity_error
+        if unitarity > threshold:
+            raise ValueError(
+                f"Matrices are not unitary: residual={unitarity:.6g}, "
                 f"tolerance={threshold:.6g}."
             )
         product = self.product_residual

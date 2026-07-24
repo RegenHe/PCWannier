@@ -7,9 +7,20 @@ import numpy as np
 
 from ..compute.kspace import neighbor_reciprocal_lattice_vectors
 from .bloch import StateBlochSymmetryProvider
+from .constraints import (
+    propagate_physical_frame,
+    propagate_projector,
+    semilinear_value,
+)
 from .gauge import SymmetryGaugeResult, project_intertwiner
-from .representation import SymmetryContext, combined_target_matrix
-from .stars import SymmetryKStar, SymmetryStarPartition
+from .representation import SymmetryContext
+from .stars import (
+    SymmetryKStar,
+    SymmetryStarPartition,
+    fractional_at as _fractional_at,
+    state_index as _state_index,
+    state_shape as _state_shape,
+)
 from .twisted import build_little_group_twisted_pair
 
 
@@ -173,14 +184,14 @@ def validate_frozen_window_covariance(
             )
             source_projector = source_frozen @ source_frozen.conj().T
             target_projector = target_frozen @ target_frozen.conj().T
-            transformed_projector = (
-                source_projector.conj()
-                if operation.antiunitary
-                else source_projector
-            )
             residual = float(
                 np.linalg.norm(
-                    target_projector - dmat @ transformed_projector @ dmat.conj().T,
+                    target_projector
+                    - propagate_projector(
+                        dmat,
+                        source_projector,
+                        antiunitary=operation.antiunitary,
+                    ),
                     ord="fro",
                 )
             )
@@ -361,8 +372,12 @@ def evaluate_projector_symmetry(
                 _bands_at(bands, mapping.target_k_index),
             )
             source_k = _fractional_at(context, mapping.source_k_index)
-            target_matrix = combined_target_matrix(targets, operation_index, source_k)
-            transformed_source = source.conj() if operation.antiunitary else source
+            target_matrix = context.target_matrix(
+                operation_index,
+                source_k,
+                targets=targets,
+            )
+            transformed_source = semilinear_value(source, operation.antiunitary)
             frame_values.append(
                 float(
                     np.linalg.norm(
@@ -372,13 +387,15 @@ def evaluate_projector_symmetry(
                 )
             )
             source_projector = source @ source.conj().T
-            if operation.antiunitary:
-                source_projector = source_projector.conj()
             projector_values.append(
                 float(
                     np.linalg.norm(
                         target @ target.conj().T
-                        - dmat @ source_projector @ dmat.conj().T,
+                        - propagate_projector(
+                            dmat,
+                            source_projector,
+                            antiunitary=operation.antiunitary,
+                        ),
                         ord="fro",
                     )
                 )
@@ -395,7 +412,7 @@ def evaluate_projector_symmetry(
 
 
 def _symmetrized_z(initializer, context, provider, bands, frame, star: SymmetryKStar):
-    representative_member = _representative_member(star)
+    representative_member = star.representative_member
     dimension = len(_bands_at(bands, star.representative_index))
     accumulator = np.zeros((dimension, dimension), dtype=np.complex128)
     path_count = 0
@@ -470,7 +487,7 @@ def _updated_representative_frame(
         raise RuntimeError(f"Frozen window exceeds N_W at k={star.representative_index}.")
     projector_frozen = frozen @ frozen.conj().T
     complement_projector = np.eye(zmat.shape[0]) - projector_frozen
-    little_paths = _representative_member(star).paths
+    little_paths = star.representative_member.paths
 
     if len(little_paths) == 1:
         restricted = complement_projector @ zmat @ complement_projector
@@ -491,7 +508,7 @@ def _updated_representative_frame(
                 _bands_at(bands, path.target_k_index),
             )
         )
-        target.append(combined_target_matrix(context.model.targets, path.operation_index, representative_k))
+        target.append(context.target_matrix(path.operation_index, representative_k))
 
     physical_representation, target_representation = build_little_group_twisted_pair(
         context,
@@ -543,7 +560,7 @@ def _restore_representative_constraints(
         candidate = np.column_stack(
             (frozen, _orthogonal_complement_columns(current, frozen, remaining))
         )
-        paths = _representative_member(star).paths
+        paths = star.representative_member.paths
         representative_k = _fractional_at(context, star.representative_index)
         physical = [
             provider.sewing_matrix_between_mapping(
@@ -554,7 +571,7 @@ def _restore_representative_constraints(
             for path in paths
         ]
         target = [
-            combined_target_matrix(context.model.targets, path.operation_index, representative_k)
+            context.target_matrix(path.operation_index, representative_k)
             for path in paths
         ]
         physical_representation, target_representation = build_little_group_twisted_pair(
@@ -646,12 +663,16 @@ def _propagate_representatives(representatives, context, stars, provider, bands)
                     _bands_at(bands, path.source_k_index),
                     _bands_at(bands, path.target_k_index),
                 )
-                target = combined_target_matrix(
-                    context.model.targets, path.operation_index, representative_k
-                )
+                target = context.target_matrix(path.operation_index, representative_k)
                 operation = context.model.group.operations[path.operation_index]
-                source = representative.conj() if operation.antiunitary else representative
-                candidates.append(dmat @ source @ target.conj().T)
+                candidates.append(
+                    propagate_physical_frame(
+                        dmat,
+                        representative,
+                        target,
+                        antiunitary=operation.antiunitary,
+                    )
+                )
             canonical = representative if member.flat_index == star.representative_flat_index else candidates[0]
             for candidate in candidates:
                 path_residual = max(
@@ -823,24 +844,5 @@ def _copy_matrix_grid(values):
     return result
 
 
-def _representative_member(star):
-    return next(member for member in star.members if member.flat_index == star.representative_flat_index)
-
-
-def _fractional_at(context, index):
-    return np.asarray(
-        [context.k_points[axis][index[axis]] for axis in range(context.model.dimension)],
-        dtype=float,
-    )
-
-
 def _bands_at(grid, index):
     return tuple(int(value) for value in np.asarray(grid[_state_index(index)]).reshape(-1))
-
-
-def _state_shape(k_shape):
-    return tuple((list(k_shape) + [1, 1, 1])[:3])
-
-
-def _state_index(index):
-    return (tuple(int(value) for value in index) + (0, 0, 0))[:3]

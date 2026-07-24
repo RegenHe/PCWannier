@@ -13,7 +13,6 @@ from pcwannier.symmetry import (
     SpaceGroupOperation,
     WannierTargetSpec,
     build_symmetry_context,
-    combined_target_matrix,
     construct_symmetry_gauge,
     disentangle_symmetry_constrained,
     validate_frozen_window_covariance,
@@ -235,7 +234,7 @@ def test_square_2c_target_is_selected_from_four_dimensional_outer_space():
 
     def physical(operation_index, source_index, _target_index):
         kpoint = _fractional_at(context, source_index)
-        target = combined_target_matrix(model.targets, operation_index, kpoint)
+        target = context.target_matrix(operation_index, kpoint)
         return np.block([[target, np.zeros_like(target)], [np.zeros_like(target), target]])
 
     provider = _SyntheticProvider(context, physical)

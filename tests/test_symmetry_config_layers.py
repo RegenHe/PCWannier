@@ -15,6 +15,7 @@ from pcwannier.symmetry import (
     RepresentationPointSpec,
     SymmetryCalculationSpec,
     WannierTargetSpec,
+    build_twisted_representation,
     compose_symmetry_model,
     identify_finite_group,
     load_builtin_finite_groups,
@@ -62,7 +63,7 @@ def test_p4mm_little_groups_are_resolved_automatically():
         resolved = resolve_little_group(definition, kpoint)
         assert resolved.name == group_name
         assert {irrep.name for irrep in resolved.require_irreps()} == irrep_names
-        assert resolved.factor_system.is_trivial
+        assert resolved.factor_system.cohomologically_trivial
 
 
 def test_c2v_embeddings_keep_distinct_and_stable_element_mappings():
@@ -118,6 +119,32 @@ def test_incar_owns_targets_analysis_and_uses_space_group_fallback(tmp_path):
     assert model.symmetry_gauge.enabled
     assert model.symmetry_gauge.tolerance == pytest.approx(1.0e-8)
     assert model.symmetry_gauge.max_iterations == 20
+    assert config.symmetry_algebra_tolerance == pytest.approx(1.0e-11)
+    assert model.algebra_tolerance == pytest.approx(1.0e-11)
+    assert model.group_definition.algebra_tolerance == pytest.approx(1.0e-11)
+
+
+def test_coordinate_and_group_algebra_tolerances_are_independent():
+    definition = load_space_group(
+        P4MM,
+        tolerance=1.0e-3,
+        algebra_tolerance=1.0e-12,
+    )
+    resolved = resolve_little_group(definition, [0.0, 0.0])
+
+    assert definition.tolerance == pytest.approx(1.0e-3)
+    assert definition.algebra_tolerance == pytest.approx(1.0e-12)
+    assert resolved.factor_system.tolerance == pytest.approx(1.0e-12)
+    assert resolved.factor_system.cocycle_residual < 1.0e-12
+    assert all(
+        build_twisted_representation(
+            resolved,
+            irrep.operation_indices,
+            irrep.matrices,
+        ).product_residual
+        < 1.0e-12
+        for irrep in resolved.require_irreps()
+    )
 
 
 def test_existing_custom_space_group_takes_priority_over_builtin_name(tmp_path):
@@ -241,11 +268,11 @@ def test_p4g_factor_system_reports_projective_points_without_fallback():
     mpoint = resolve_little_group(definition, [0.5, 0.5])
 
     assert gamma.factor_system.phase_residual == pytest.approx(0.0)
-    assert gamma.factor_system.is_trivial
+    assert gamma.factor_system.cohomologically_trivial
     assert gamma.factor_system.raw_trivial
     assert gamma.factor_system.cohomologically_trivial
     assert xpoint.factor_system.phase_residual > 1.0
-    assert not xpoint.factor_system.is_trivial
+    assert not xpoint.factor_system.cohomologically_trivial
     assert not xpoint.factor_system.raw_trivial
     assert not xpoint.factor_system.cohomologically_trivial
     projective_irreps = xpoint.require_irreps()
@@ -256,7 +283,7 @@ def test_p4g_factor_system_reports_projective_points_without_fallback():
     # The chosen p4g representatives have a non-unit raw factor at M, but it is
     # removed by a one-cochain. Ordinary irreps are therefore valid after rephasing.
     assert mpoint.factor_system.phase_residual > 1.0
-    assert mpoint.factor_system.is_trivial
+    assert mpoint.factor_system.cohomologically_trivial
     assert not mpoint.factor_system.raw_trivial
     assert mpoint.factor_system.cohomologically_trivial
     assert mpoint.factor_system.trivializing_cochain is not None
@@ -278,6 +305,7 @@ def _minimal_incar() -> str:
             "symmetry_file = missing/path/p4mm.yaml",
             "symmetry_constrained = true",
             "symmetry_tolerance = 1e-8",
+            "symmetry_algebra_tolerance = 1e-11",
             "symmetry_max_iter = 20",
             "wannier_targets",
             "center_s_A1; 0.0, 0.0; A1",

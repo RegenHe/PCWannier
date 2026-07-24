@@ -15,13 +15,11 @@ from .symmetry import (
     FiniteGroupIdentification,
     SpaceGroupDefinition,
     SymmetryContext,
-    SymmetryGroupDefinition,
     SymmetryModel,
     identify_finite_group,
     load_finite_group,
     load_space_group,
     load_symmetry,
-    load_symmetry_group,
 )
 
 __all__ = [
@@ -37,7 +35,6 @@ __all__ = [
     "PrimaryField",
     "SpaceGroupDefinition",
     "SymmetryContext",
-    "SymmetryGroupDefinition",
     "SymmetryModel",
     "__version__",
     "load_config",
@@ -46,7 +43,6 @@ __all__ = [
     "load_space_group",
     "identify_finite_group",
     "load_symmetry",
-    "load_symmetry_group",
     "run_calculation",
     "run_bloch_symmetry_preanalysis",
     "write_base_figures",

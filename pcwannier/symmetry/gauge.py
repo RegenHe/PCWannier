@@ -6,8 +6,14 @@ from typing import TYPE_CHECKING, Mapping, Sequence
 import numpy as np
 
 from .bloch import StateBlochSymmetryProvider
-from .representation import SymmetryContext, combined_target_matrix
-from .stars import SymmetryStarPartition, build_symmetry_stars
+from .constraints import propagate_physical_frame, semilinear_value
+from .representation import SymmetryContext
+from .stars import (
+    SymmetryStarPartition,
+    build_symmetry_stars,
+    fractional_at as _fractional_at,
+    state_index as _state_index,
+)
 from .twisted import TwistedRepresentation, build_little_group_twisted_pair
 
 if TYPE_CHECKING:
@@ -317,7 +323,13 @@ def construct_symmetry_gauge(
             physical.append(
                 provider.sewing_matrix_between_mapping(path, source_bands, target_bands)
             )
-            target.append(combined_target_matrix(targets, path.operation_index, representative_k))
+            target.append(
+                context.target_matrix(
+                    path.operation_index,
+                    representative_k,
+                    targets=targets,
+                )
+            )
             operation_indices.append(path.operation_index)
 
         physical_representation, target_representation = build_little_group_twisted_pair(
@@ -380,14 +392,20 @@ def construct_symmetry_gauge(
                 dmat = provider.sewing_matrix_between_mapping(
                     path, source_bands, target_bands
                 )
-                target_matrix = combined_target_matrix(targets, path.operation_index, representative_k)
-                operation = context.model.group.operations[path.operation_index]
-                source_matrix = (
-                    representative_gauge.conj()
-                    if operation.antiunitary
-                    else representative_gauge
+                target_matrix = context.target_matrix(
+                    path.operation_index,
+                    representative_k,
+                    targets=targets,
                 )
-                candidates.append(dmat @ source_matrix @ target_matrix.conj().T)
+                operation = context.model.group.operations[path.operation_index]
+                candidates.append(
+                    propagate_physical_frame(
+                        dmat,
+                        representative_gauge,
+                        target_matrix,
+                        antiunitary=operation.antiunitary,
+                    )
+                )
             canonical = candidates[0]
             for candidate in candidates[1:]:
                 path_residual = max(
@@ -461,12 +479,14 @@ def evaluate_symmetry_gauge(
                 mapping, source_bands, target_bands
             )
             source_k = _fractional_at(context, source_index)
-            target_matrix = combined_target_matrix(targets, operation_index, source_k)
+            target_matrix = context.target_matrix(
+                operation_index,
+                source_k,
+                targets=targets,
+            )
             source_gauge = gauge[_state_index(source_index)]
             target_gauge = gauge[_state_index(mapping.target_k_index)]
-            transformed_source = (
-                source_gauge.conj() if operation.antiunitary else source_gauge
-            )
+            transformed_source = semilinear_value(source_gauge, operation.antiunitary)
             value = float(
                 np.linalg.norm(
                     dmat @ transformed_source - target_gauge @ target_matrix,
@@ -615,15 +635,3 @@ def _bands_for_evaluation(fixed, grid, index) -> tuple[int, ...]:
     if fixed is None:
         raise ValueError("A fixed or per-k physical band window is required.")
     return tuple(int(value) for value in fixed)
-
-
-def _fractional_at(context: SymmetryContext, index) -> np.ndarray:
-    return np.asarray(
-        [context.k_points[axis][index[axis]] for axis in range(context.model.dimension)],
-        dtype=float,
-    )
-
-
-def _state_index(index) -> tuple[int, int, int]:
-    values = list(index) + [0, 0, 0]
-    return int(values[0]), int(values[1]), int(values[2])

@@ -42,6 +42,7 @@ class IncarConfig:
     symmetry_constrained: bool = False
     symmetry_output_basis: str = "strict"
     symmetry_tolerance: float = 1.0e-8
+    symmetry_algebra_tolerance: float = 1.0e-10
     symmetry_max_iter: int = 20
     symmetry_svd_tolerance: float = 1.0e-10
     symmetry_validate_wannier: bool = True
@@ -389,7 +390,11 @@ class IncarParser:
                 raise ValueError("symmetry_file is enabled but no path was supplied.")
             symmetry_path = resolve_symmetry_file(str(cfg.symmetry_file), cfg.base_dir)
             cfg.symmetry_resolved_path = symmetry_path
-            model = load_symmetry(symmetry_path, tolerance=cfg.symmetry_tolerance)
+            model = load_symmetry(
+                symmetry_path,
+                tolerance=cfg.symmetry_tolerance,
+                algebra_tolerance=cfg.symmetry_algebra_tolerance,
+            )
             if cfg.magnetic_bias_direction is not None:
                 model = apply_magnetic_bias_to_model(
                     model,
@@ -538,6 +543,7 @@ class IncarParser:
             "DOS_eps",
             "finite_DOS_eps",
             "symmetry_tolerance",
+            "symmetry_algebra_tolerance",
             "symmetry_svd_tolerance",
             "symmetry_real_space_tolerance",
             "symmetry_minimum_retained_norm",
@@ -995,6 +1001,11 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         raise ValueError("disentangle_mixing must lie in (0, 1].")
     if not np.isfinite(cfg.symmetry_tolerance) or cfg.symmetry_tolerance <= 0.0:
         raise ValueError("symmetry_tolerance must be positive and finite.")
+    if (
+        not np.isfinite(cfg.symmetry_algebra_tolerance)
+        or cfg.symmetry_algebra_tolerance <= 0.0
+    ):
+        raise ValueError("symmetry_algebra_tolerance must be positive and finite.")
     if cfg.magnetic_bias_direction is not None:
         bias = np.asarray(cfg.magnetic_bias_direction, dtype=float)
         if bias.shape != (3,) or not np.all(np.isfinite(bias)):

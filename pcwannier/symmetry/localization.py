@@ -8,9 +8,15 @@ import numpy as np
 import scipy.linalg
 
 from .bloch import StateBlochSymmetryProvider
+from .constraints import propagate_target_gauge as _propagate_target_matrix
 from .gauge import GaugeResidualReport, SymmetryGaugeResult, evaluate_symmetry_gauge
-from .representation import SymmetryContext, combined_target_matrix
-from .stars import SymmetryKStar, SymmetryStarPartition
+from .representation import SymmetryContext
+from .stars import (
+    SymmetryStarPartition,
+    fractional_at as _fractional_at,
+    state_index as _state_index,
+    state_shape as _state_shape,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -63,7 +69,7 @@ def symmetrize_gradient(
     targets = context.model.targets
     for star in stars.stars:
         representative_k = _fractional_at(context, star.representative_index)
-        little_member = _representative_member(star)
+        little_member = star.representative_member
         little_count = len(little_member.paths)
         if little_count == 0:
             raise RuntimeError(f"Representative k={star.representative_index} has an empty little group.")
@@ -74,7 +80,11 @@ def symmetrize_gradient(
         for member in star.members:
             member_gradient = np.asarray(raw_gradient[_state_index(member.k_index)], dtype=np.complex128)
             for path in member.paths:
-                dmat = combined_target_matrix(targets, path.operation_index, representative_k)
+                dmat = context.target_matrix(
+                    path.operation_index,
+                    representative_k,
+                    targets=targets,
+                )
                 operation = context.model.group.operations[path.operation_index]
                 pulled = member_gradient.conj() if operation.antiunitary else member_gradient
                 accumulator += dmat.conj().T @ pulled @ dmat
@@ -90,8 +100,10 @@ def symmetrize_gradient(
         constrained = accumulator / little_count
         little_projected = []
         for path in little_member.paths:
-            dmat = combined_target_matrix(
-                targets, path.operation_index, representative_k
+            dmat = context.target_matrix(
+                path.operation_index,
+                representative_k,
+                targets=targets,
             )
             operation = context.model.group.operations[path.operation_index]
             pulled = constrained.conj() if operation.antiunitary else constrained
@@ -125,10 +137,19 @@ def propagate_target_gauge(
         for member in star.members:
             candidates = []
             for path in member.paths:
-                dmat = combined_target_matrix(targets, path.operation_index, representative_k)
+                dmat = context.target_matrix(
+                    path.operation_index,
+                    representative_k,
+                    targets=targets,
+                )
                 operation = context.model.group.operations[path.operation_index]
-                source = matrix.conj() if operation.antiunitary else matrix
-                candidates.append(dmat @ source @ dmat.conj().T)
+                candidates.append(
+                    _propagate_target_matrix(
+                        dmat,
+                        matrix,
+                        antiunitary=operation.antiunitary,
+                    )
+                )
             if not candidates:
                 raise RuntimeError(f"Star member k={member.k_index} has no propagation path.")
             if member.flat_index == star.representative_flat_index:
@@ -175,17 +196,23 @@ def project_target_gauge_to_stars(
                     f"got {member_matrix.shape}."
                 )
             for path in member.paths:
-                dmat = combined_target_matrix(targets, path.operation_index, representative_k)
+                dmat = context.target_matrix(
+                    path.operation_index,
+                    representative_k,
+                    targets=targets,
+                )
                 operation = context.model.group.operations[path.operation_index]
                 pulled = member_matrix.conj() if operation.antiunitary else member_matrix
                 pulled_back.append(dmat.conj().T @ pulled @ dmat)
         matrix = sum(pulled_back) / len(pulled_back)
-        little_paths = _representative_member(star).paths
+        little_paths = star.representative_member.paths
         for iteration in range(1, max_iterations + 1):
             projected_terms = []
             for path in little_paths:
-                dmat = combined_target_matrix(
-                    targets, path.operation_index, representative_k
+                dmat = context.target_matrix(
+                    path.operation_index,
+                    representative_k,
+                    targets=targets,
                 )
                 operation = context.model.group.operations[path.operation_index]
                 source = matrix.conj() if operation.antiunitary else matrix
@@ -196,14 +223,22 @@ def project_target_gauge_to_stars(
                 (
                     float(
                         np.linalg.norm(
-                            combined_target_matrix(targets, path.operation_index, representative_k)
+                            context.target_matrix(
+                                path.operation_index,
+                                representative_k,
+                                targets=targets,
+                            )
                             @ (
                                 matrix.conj()
                                 if context.model.group.operations[path.operation_index].antiunitary
                                 else matrix
                             )
                             - matrix
-                            @ combined_target_matrix(targets, path.operation_index, representative_k),
+                            @ context.target_matrix(
+                                path.operation_index,
+                                representative_k,
+                                targets=targets,
+                            ),
                             ord="fro",
                         )
                     )
@@ -466,25 +501,3 @@ def _polar_unitary(matrix: np.ndarray, relative_tolerance: float) -> np.ndarray:
             f"rank={rank}, required={matrix.shape[0]}, singular_values={singular_values.tolist()}."
         )
     return left @ vh
-
-
-def _representative_member(star: SymmetryKStar):
-    return next(
-        member for member in star.members if member.flat_index == star.representative_flat_index
-    )
-
-
-def _fractional_at(context: SymmetryContext, index) -> np.ndarray:
-    return np.asarray(
-        [context.k_points[axis][index[axis]] for axis in range(context.model.dimension)],
-        dtype=float,
-    )
-
-
-def _state_shape(k_shape: tuple[int, ...]) -> tuple[int, int, int]:
-    return tuple((list(k_shape) + [1, 1, 1])[:3])
-
-
-def _state_index(index) -> tuple[int, int, int]:
-    values = list(index) + [0, 0, 0]
-    return int(values[0]), int(values[1]), int(values[2])

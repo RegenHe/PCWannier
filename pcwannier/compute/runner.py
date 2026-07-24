@@ -552,10 +552,10 @@ def _validate_symmetry_gauge_prerequisites(analysis, tolerance: float) -> None:
                 f"Physical sewing space is not closed at {point.name}: "
                 f"unitarity residual={point.diagnostics.unitarity_error:.6g}."
             )
-        if point.diagnostics.max_composition_residual > tolerance:
+        if point.diagnostics.outer_composition_residual > tolerance:
             raise RuntimeError(
                 f"Sewing composition residual at {point.name} is "
-                f"{point.diagnostics.max_composition_residual:.6g}."
+                f"{point.diagnostics.outer_composition_residual:.6g}."
             )
 
 

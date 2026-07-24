@@ -124,30 +124,69 @@ class WannierTargetRepresentation:
         return output
 
 
-def combined_target_matrix(
-    targets,
-    operation: int | SpaceGroupOperation,
-    k_fractional,
-) -> np.ndarray:
-    """Return the block-diagonal target representation in YAML target order."""
-    items = tuple(targets)
-    if not items:
-        return np.empty((0, 0), dtype=np.complex128)
-    group = items[0].group
-    if any(target.group is not group for target in items):
-        raise ValueError("Combined Wannier targets must belong to the same space group.")
-    convention = items[0].bloch_convention
-    if any(target.bloch_convention != convention for target in items):
-        raise ValueError("Combined Wannier targets must use the same Bloch convention.")
-    blocks = [target.matrix(operation, k_fractional) for target in items]
-    total = sum(block.shape[0] for block in blocks)
-    output = np.zeros((total, total), dtype=np.complex128)
-    offset = 0
-    for block in blocks:
-        size = block.shape[0]
-        output[offset : offset + size, offset : offset + size] = block
-        offset += size
-    return output
+@dataclass(frozen=True)
+class CombinedTargetRepresentation:
+    """Cached block-diagonal target representation in configured target order."""
+
+    targets: tuple[WannierTargetRepresentation, ...]
+    _matrix_cache: dict[tuple[int, bytes], np.ndarray] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def __init__(self, targets) -> None:
+        items = tuple(targets)
+        if not items:
+            raise ValueError("A combined target representation requires at least one target.")
+        group = items[0].group
+        if any(target.group is not group for target in items):
+            raise ValueError("Combined Wannier targets must belong to the same space group.")
+        convention = items[0].bloch_convention
+        if any(target.bloch_convention != convention for target in items):
+            raise ValueError("Combined Wannier targets must use the same Bloch convention.")
+        object.__setattr__(self, "targets", items)
+        object.__setattr__(self, "_matrix_cache", {})
+
+    @property
+    def group(self) -> SpaceGroup:
+        return self.targets[0].group
+
+    @property
+    def bloch_convention(self) -> BlochConvention:
+        return self.targets[0].bloch_convention
+
+    @property
+    def dimension(self) -> int:
+        return sum(target.wannier_dimension for target in self.targets)
+
+    def matrix(
+        self,
+        operation: int | SpaceGroupOperation,
+        k_fractional,
+    ) -> np.ndarray:
+        operation_index = (
+            int(operation)
+            if isinstance(operation, (int, np.integer))
+            else self.group.operation_index(operation)
+        )
+        kpoint = np.asarray(k_fractional, dtype=float)
+        if kpoint.shape != (self.group.dimension,) or not np.all(np.isfinite(kpoint)):
+            raise ValueError(
+                f"k_fractional must have shape {(self.group.dimension,)} and be finite."
+            )
+        cache_key = (operation_index, np.ascontiguousarray(kpoint).tobytes())
+        cached = self._matrix_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        blocks = [target.matrix(operation_index, kpoint) for target in self.targets]
+        output = np.zeros((self.dimension, self.dimension), dtype=np.complex128)
+        offset = 0
+        for block in blocks:
+            size = block.shape[0]
+            output[offset : offset + size, offset : offset + size] = block
+            offset += size
+        output.setflags(write=False)
+        self._matrix_cache[cache_key] = output
+        return output
 
 
 @dataclass(frozen=True)
@@ -162,8 +201,18 @@ class SymmetryModel:
     bloch_convention: BlochConvention = field(default_factory=BlochConvention)
     boundary_tolerance: float = 1.0e-6
     magnetic_bias_direction: np.ndarray | None = None
+    algebra_tolerance: float = 1.0e-10
 
     def __post_init__(self) -> None:
+        if not np.isfinite(self.algebra_tolerance) or self.algebra_tolerance <= 0.0:
+            raise ValueError("Symmetry algebra tolerance must be positive and finite.")
+        if (
+            self.group_definition is not None
+            and self.group_definition.algebra_tolerance != self.algebra_tolerance
+        ):
+            raise ValueError(
+                "Symmetry model and space-group definition use different algebra tolerances."
+            )
         if not np.isfinite(self.boundary_tolerance) or self.boundary_tolerance <= 0.0:
             raise ValueError("Symmetry boundary tolerance must be positive and finite.")
         if any(target.bloch_convention != self.bloch_convention for target in self.targets):
@@ -192,6 +241,37 @@ class SymmetryContext:
     model: SymmetryModel
     k_points: tuple[np.ndarray, ...]
     k_mappings: tuple[tuple[SymmetryKMapping, ...], ...]
+    _target_representation_cache: dict[
+        tuple[str, ...], CombinedTargetRepresentation
+    ] = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    def target_representation(
+        self,
+        targets=None,
+    ) -> CombinedTargetRepresentation:
+        items = self.model.targets if targets is None else tuple(targets)
+        key = tuple(target.name for target in items)
+        if not key:
+            raise ValueError("No Wannier targets are configured.")
+        for target in items:
+            if self.model.target(target.name) is not target:
+                raise ValueError(
+                    f"Target {target.name!r} does not belong to this symmetry context."
+                )
+        cached = self._target_representation_cache.get(key)
+        if cached is None:
+            cached = CombinedTargetRepresentation(items)
+            self._target_representation_cache[key] = cached
+        return cached
+
+    def target_matrix(
+        self,
+        operation: int | SpaceGroupOperation,
+        k_fractional,
+        *,
+        targets=None,
+    ) -> np.ndarray:
+        return self.target_representation(targets).matrix(operation, k_fractional)
 
 
 def build_symmetry_context(model: SymmetryModel, k_points) -> SymmetryContext:
@@ -231,6 +311,7 @@ def apply_magnetic_bias_to_model(
             definition.tolerance,
             group,
             definition.finite_groups,
+            definition.algebra_tolerance,
         )
     return SymmetryModel(
         model.dimension,
@@ -243,6 +324,7 @@ def apply_magnetic_bias_to_model(
         model.bloch_convention,
         model.boundary_tolerance,
         np.asarray(magnetic_bias_direction, dtype=float),
+        model.algebra_tolerance,
     )
 
 

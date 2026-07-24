@@ -14,7 +14,7 @@ from pcwannier.symmetry import (
     build_symmetry_context,
     build_symmetry_stars,
     build_twisted_representation,
-    combined_target_matrix,
+    CombinedTargetRepresentation,
     compose_symmetry_model,
     load_symmetry,
     project_intertwiner,
@@ -94,10 +94,11 @@ def test_ez_and_hz_time_reversal_have_maxwell_signs():
 
 def test_magnetic_target_and_equivalent_physical_corepresentation_intertwine():
     model = _magnetic_p4mm_model()
+    combined_target = CombinedTargetRepresentation(model.targets)
     operation_indices = tuple(range(len(model.group.operations)))
     resolved = model.group_definition.resolve_little_group(operation_indices, [0.0, 0.0])
     target_matrices = tuple(
-        combined_target_matrix(model.targets, index, [0.0, 0.0])
+        combined_target.matrix(index, [0.0, 0.0])
         for index in operation_indices
     )
     target = build_twisted_representation(resolved, operation_indices, target_matrices)
@@ -125,6 +126,7 @@ def test_magnetic_target_and_equivalent_physical_corepresentation_intertwine():
 
 def test_antiunitary_projection_recovers_a_phase_odd_trial_column():
     model = _magnetic_p4mm_model()
+    combined_target = CombinedTargetRepresentation(model.targets)
     operation_indices = (0, 5)  # E and antiunitary sigma_y on the k_x=1/2 line.
     kpoint = np.array([0.5, 0.2])
     resolved = model.group_definition.resolve_little_group(operation_indices, kpoint)
@@ -138,7 +140,7 @@ def test_antiunitary_projection_recovers_a_phase_odd_trial_column():
         resolved,
         operation_indices,
         tuple(
-            combined_target_matrix(model.targets, index, kpoint)
+            combined_target.matrix(index, kpoint)
             for index in operation_indices
         ),
     )
@@ -168,7 +170,7 @@ def test_antiunitary_star_propagation_satisfies_gauge_relation():
             source_k = np.asarray(
                 [context.k_points[axis_index][mapping.source_k_index[axis_index]] for axis_index in range(2)]
             )
-            dmat = combined_target_matrix(model.targets, operation_index, source_k)
+            dmat = context.target_matrix(operation_index, source_k)
             source_gauge = propagated.gauge[source]
             transformed = source_gauge.conj() if operation.antiunitary else source_gauge
             residual = np.linalg.norm(

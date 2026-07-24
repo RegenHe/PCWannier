@@ -329,6 +329,38 @@ class SymmetryKMapping:
     reciprocal_lattice_shift: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class LittleGroupElement:
+    operation_index: int
+    reciprocal_lattice_shift: tuple[int, ...]
+
+
+def little_group(
+    group: SpaceGroup,
+    k_fractional,
+) -> tuple[LittleGroupElement, ...]:
+    kpoint = np.asarray(k_fractional, dtype=float)
+    if kpoint.shape != (group.dimension,) or not np.all(np.isfinite(kpoint)):
+        raise ValueError(f"k_fractional must have shape {(group.dimension,)} and be finite.")
+    elements = []
+    for operation_index, operation in enumerate(group.operations):
+        displacement = operation.act_reciprocal(kpoint) - kpoint
+        reciprocal_shift = np.rint(displacement).astype(np.int64)
+        if np.allclose(
+            displacement,
+            reciprocal_shift,
+            rtol=0.0,
+            atol=group.tolerance,
+        ):
+            elements.append(
+                LittleGroupElement(
+                    operation_index,
+                    tuple(int(value) for value in reciprocal_shift),
+                )
+            )
+    return tuple(elements)
+
+
 def build_k_mappings(
     group: SpaceGroup,
     k_points: Iterable[np.ndarray],

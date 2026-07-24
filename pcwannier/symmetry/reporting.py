@@ -25,7 +25,8 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             "unitary_operations=%s antiunitary_operations=%s classes=%s mapping=%s k=%s "
             "outer_bands(1-based)=%s analyzed_bands(1-based)=%s blocks=%s "
             "unitarity=%.6g outer_unitarity=%.6g leakage=%.6g "
-            "composition=%.6g twisted_composition=%.6g factor_phase=%.6g factor_cocycle=%.6g "
+            "outer_exact_composition=%.6g selected_twisted_composition=%.6g "
+            "factor_phase=%.6g factor_cocycle=%.6g "
             "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s "
             "small_representations=%s unitary_characters=%s",
             point.name,
@@ -42,8 +43,8 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             point.diagnostics.unitarity_error,
             point.outer_unitarity_error,
             point.diagnostics.leakage,
-            point.diagnostics.max_composition_residual,
-            point.diagnostics.max_twisted_composition_residual,
+            point.diagnostics.outer_composition_residual,
+            point.diagnostics.selected_twisted_composition_residual,
             0.0 if factor is None else factor.phase_residual,
             0.0 if factor is None else factor.cocycle_residual,
             True if factor is None else factor.raw_trivial,
@@ -113,10 +114,14 @@ def log_target_compatibilities(
 ) -> None:
     for result in results:
         LOGGER.info(
-            "Target compatibility %s: targets=%s target_irreps=%s compatible=%s "
-            "direct_intertwiner_dimension=%s",
+            "Target compatibility %s: targets=%s target_unitary_characters=%s "
+            "target_irreps=%s compatible=%s direct_intertwiner_dimension=%s",
             result.point_name,
             result.target_names,
+            {
+                name: complex(value)
+                for name, value in result.target_unitary_characters.items()
+            },
             (
                 {}
                 if result.target_decomposition is None

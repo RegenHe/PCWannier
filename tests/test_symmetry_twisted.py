@@ -142,6 +142,24 @@ def test_factor_cocycle_is_checked_independently_of_stored_diagnostic():
         representation.require_valid()
 
 
+def test_twisted_representation_validation_rejects_nonunitary_matrices():
+    concrete = ConcreteFiniteGroup.from_space_group(_glide_group())
+    factor = build_factor_system(concrete, [0.5, 0.0], 1.0e-10)
+    valid = _projective_regular_representation(concrete, factor)
+    basis = np.array([[1.0, 0.3], [0.0, 1.0]], dtype=np.complex128)
+    basis_inverse = np.linalg.inv(basis)
+    nonunitary = TwistedRepresentation(
+        tuple(basis @ matrix @ basis_inverse for matrix in valid.matrices),
+        valid.product_table,
+        valid.factor_system,
+    )
+
+    assert nonunitary.product_residual < 1.0e-12
+    assert nonunitary.unitarity_error > 1.0e-2
+    with pytest.raises(ValueError, match="not unitary"):
+        nonunitary.require_valid(tolerance=1.0e-10)
+
+
 def test_symmorphic_space_group_has_unit_factor_system():
     definition = load_space_group(P4MM)
     concrete = ConcreteFiniteGroup.from_space_group(definition.group)
@@ -301,9 +319,9 @@ def test_projective_high_symmetry_analysis_keeps_direct_intertwiner(monkeypatch)
 
     assert point.factor_system is not None
     assert not point.factor_system.cohomologically_trivial
-    assert point.physical_decomposition is None
-    assert compatibility.target_decomposition is None
-    assert compatibility.compatibility is None
+    assert point.physical_decomposition.multiplicities == {"P1": 1}
+    assert compatibility.target_decomposition.multiplicities == {"P1": 1}
+    assert compatibility.compatibility.compatible
     assert compatibility.intertwiner_dimension is not None
     assert compatibility.intertwiner_dimension > 0
-    assert point.diagnostics.max_twisted_composition_residual < 1.0e-12
+    assert point.diagnostics.selected_twisted_composition_residual < 1.0e-12

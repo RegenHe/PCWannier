@@ -77,6 +77,7 @@ def load_space_group(
     path: str | Path,
     *,
     tolerance: float = 1.0e-8,
+    algebra_tolerance: float = 1.0e-10,
     finite_groups: FiniteGroupLibrary | None = None,
 ) -> SpaceGroupDefinition:
     raw = _read_yaml(path, "Space-group")
@@ -97,11 +98,21 @@ def load_space_group(
         float(tolerance),
         group,
         finite_groups or load_builtin_finite_groups(),
+        float(algebra_tolerance),
     )
 
 
-def load_symmetry(path: str | Path, *, tolerance: float = 1.0e-8) -> SymmetryModel:
-    definition = load_space_group(path, tolerance=tolerance)
+def load_symmetry(
+    path: str | Path,
+    *,
+    tolerance: float = 1.0e-8,
+    algebra_tolerance: float = 1.0e-10,
+) -> SymmetryModel:
+    definition = load_space_group(
+        path,
+        tolerance=tolerance,
+        algebra_tolerance=algebra_tolerance,
+    )
     return SymmetryModel(
         definition.dimension,
         definition.tolerance,
@@ -110,11 +121,8 @@ def load_symmetry(path: str | Path, *, tolerance: float = 1.0e-8) -> SymmetryMod
         None,
         None,
         definition,
+        algebra_tolerance=definition.algebra_tolerance,
     )
-
-
-def load_symmetry_group(path: str | Path, *, tolerance: float = 1.0e-8) -> SpaceGroupDefinition:
-    return load_space_group(path, tolerance=tolerance)
 
 
 def load_finite_group(path: str | Path) -> FiniteGroupDefinition:
@@ -262,6 +270,7 @@ def compose_symmetry_model(
         convention,
         boundary_tolerance,
         base.magnetic_bias_direction,
+        base.algebra_tolerance,
     )
 
 

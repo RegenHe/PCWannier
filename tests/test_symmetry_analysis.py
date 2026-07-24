@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+import pcwannier.symmetry.analysis as symmetry_analysis_module
 from pcwannier import BlochConvention
 from pcwannier.compute.integration import MetricInnerProduct
 from pcwannier.compute.state import StateCollection
@@ -19,24 +20,30 @@ from pcwannier.symmetry import (
     DegeneracyTolerance,
     FieldKind,
     IrrepDecomposition,
+    RepresentationAnalysisSpec,
+    RepresentationPointSpec,
     SpaceGroupOperation,
     StateBlochSymmetryProvider,
+    SymmetryCalculationSpec,
+    WannierTargetSpec,
     analyze_bloch_symmetry,
     apply_magnetic_bias_to_model,
     build_symmetry_context,
     coefficient_metric_overlap,
     compare_representations,
+    compose_symmetry_model,
     decompose_little_group_characters,
     group_degenerate_bands,
     intertwiner_residual,
     little_group,
+    load_symmetry,
     run_symmetry_analysis,
     run_bloch_symmetry_analysis,
     load_sewing_matrix_cache,
     save_sewing_matrix_cache,
 )
 
-from .symmetry_models import p4mm_model, square_2c_model
+from .symmetry_models import P4MM, p4mm_model, square_2c_model
 
 
 def _square_mesh(points_per_axis: int = 5) -> Mesh:
@@ -319,7 +326,7 @@ def test_state_provider_gives_a1_and_e_sewing_matrices():
     full = run_symmetry_analysis(state, gamma_context)
     point = full.physical.point("Gamma")
     assert point.diagnostics.unitarity_error < 1e-12
-    assert point.diagnostics.max_composition_residual < 1e-12
+    assert point.diagnostics.outer_composition_residual < 1e-12
     assert point.physical_decomposition.multiplicities["E"] == 1
     assert full.target_compatibility("Gamma").point_name == "Gamma"
 
@@ -449,7 +456,7 @@ def test_representation_analysis_rejects_noninvariant_energy_block():
     fields = np.asarray([np.sin(2 * np.pi * x), np.sin(2 * np.pi * y)])
     state = _synthetic_state(fields, energies=[1.0, 2.0])
 
-    with pytest.raises(ValueError, match="Degenerate block.*not invariant"):
+    with pytest.raises(ValueError, match="Degenerate block.*not a valid unitary"):
         run_symmetry_analysis(state, context)
 
 
@@ -515,6 +522,98 @@ def test_bloch_analysis_reports_leakage_without_constructing_an_irrep():
     assert "leakage" in block.irrep_unavailable_reason
 
 
+def test_band_basis_leakage_does_not_use_globally_mixed_sewing_blocks():
+    model = p4mm_model()
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    elements = little_group(model.group, [0.0, 0.0])
+    mixed = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    full_matrices = {
+        model.group.operations[element.operation_index].name: mixed
+        for element in elements
+    }
+
+    class BandBasisProvider:
+        def __init__(self):
+            self.context = context
+
+        def mapping(self, operation_index, source_index):
+            return context.k_mappings[operation_index][0]
+
+        def sewing_matrix_in_band_basis(
+            self,
+            mapping,
+            source_band_indices,
+            target_band_indices=None,
+            **kwargs,
+        ):
+            target = (
+                tuple(source_band_indices)
+                if target_band_indices is None
+                else tuple(target_band_indices)
+            )
+            return np.zeros(
+                (len(target), len(tuple(source_band_indices))),
+                dtype=np.complex128,
+            )
+
+    old_leakage, old_coupled = symmetry_analysis_module._matrix_subspace_leakage(
+        full_matrices,
+        (0, 1),
+        (0,),
+        1.0e-10,
+    )
+    leakage, coupled = symmetry_analysis_module._band_basis_subspace_leakage(
+        BandBasisProvider(),
+        elements,
+        (0, 0),
+        np.zeros(2),
+        full_matrices,
+        (0, 1),
+        (0,),
+        1.0e-10,
+    )
+
+    assert old_leakage > 1.0
+    assert old_coupled == (1,)
+    assert leakage == pytest.approx(0.0)
+    assert coupled == ()
+
+
+def test_nonunitary_band_representation_does_not_receive_an_irrep_label():
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0, 1), None),)
+    )
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+    provider = StateBlochSymmetryProvider(state, context)
+    original = provider.sewing_matrix_in_band_basis
+    basis = np.array([[1.0, 0.4], [0.0, 1.0]], dtype=np.complex128)
+    basis_inverse = np.linalg.inv(basis)
+
+    def nonunitary_band_basis(*args, **kwargs):
+        matrix = original(*args, **kwargs)
+        if matrix.shape == (2, 2):
+            return basis @ matrix @ basis_inverse
+        return matrix
+
+    provider.sewing_matrix_in_band_basis = nonunitary_band_basis
+    block = run_bloch_symmetry_analysis(
+        state, context, provider=provider
+    ).point("Gamma").degenerate_blocks[0]
+
+    assert block.twisted_composition_residual < 1.0e-10
+    assert block.unitarity_error > 1.0e-2
+    assert block.decomposition is None
+    assert "unitarity" in block.irrep_unavailable_reason
+
+
 def test_bloch_analysis_can_disable_degenerate_block_splitting():
     model = p4mm_model()
     context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
@@ -567,6 +666,61 @@ def test_magnetic_bloch_analysis_only_calls_unitary_traces_characters():
     assert block.decomposition is None
     assert "corepresentation" in block.irrep_unavailable_reason
     assert len(block.antiunitary_diagnostics) == 4
+
+
+def test_magnetic_target_compatibility_excludes_antiunitary_traces():
+    base = apply_magnetic_bias_to_model(
+        load_symmetry(P4MM),
+        np.eye(2),
+        [0.0, 0.0, 1.0],
+    )
+    target_specs = (
+        WannierTargetSpec("p_plus", [0.0, 0.0], "E_plus"),
+        WannierTargetSpec("p_minus", [0.0, 0.0], "E_minus"),
+        WannierTargetSpec("s", [0.0, 0.0], "A"),
+    )
+    tolerance = DegeneracyTolerance()
+    analysis = RepresentationAnalysisSpec(
+        FieldKind.SCALAR,
+        tolerance,
+        (
+            RepresentationPointSpec(
+                "Gamma",
+                np.zeros(2),
+                (0, 1, 2),
+                tuple(target.name for target in target_specs),
+                tolerance,
+            ),
+        ),
+    )
+    model = compose_symmetry_model(
+        base,
+        SymmetryCalculationSpec(target_specs, analysis),
+    )
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    px = np.sin(2 * np.pi * mesh.vertices[:, 0])
+    py = np.sin(2 * np.pi * mesh.vertices[:, 1])
+    fields = np.asarray(
+        [
+            (px + 1j * py) / np.sqrt(2.0),
+            (px - 1j * py) / np.sqrt(2.0),
+            np.cos(2 * np.pi * mesh.vertices[:, 0])
+            + np.cos(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0, 1.0])
+
+    result = run_symmetry_analysis(state, context)
+    point = result.physical.point("Gamma")
+    compatibility = result.target_compatibility("Gamma")
+
+    assert set(compatibility.target_unitary_characters) == set(
+        point.unitary_operation_names
+    )
+    assert not set(compatibility.target_unitary_characters) & set(
+        point.antiunitary_operation_names
+    )
 
 
 def test_bloch_analysis_reuses_one_full_outer_sewing_per_operation():

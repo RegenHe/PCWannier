@@ -28,6 +28,13 @@ class SymmetryKStar:
     representative_flat_index: int
     members: tuple[SymmetryStarMember, ...]
 
+    @property
+    def representative_member(self) -> SymmetryStarMember:
+        for member in self.members:
+            if member.flat_index == self.representative_flat_index:
+                return member
+        raise RuntimeError("A symmetry star does not contain its representative.")
+
 
 @dataclass(frozen=True)
 class SymmetryStarPartition:
@@ -38,6 +45,32 @@ class SymmetryStarPartition:
     def star_for(self, k_index) -> SymmetryKStar:
         index = tuple(int(value) for value in k_index)
         return self.stars[int(self.k_to_star[index])]
+
+
+def fractional_at(context: SymmetryContext, index) -> np.ndarray:
+    values = tuple(int(value) for value in index)
+    if len(values) != context.model.dimension:
+        raise ValueError(
+            f"k index must contain {context.model.dimension} entries; got {len(values)}."
+        )
+    return np.asarray(
+        [context.k_points[axis][values[axis]] for axis in range(context.model.dimension)],
+        dtype=float,
+    )
+
+
+def state_shape(k_shape) -> tuple[int, int, int]:
+    values = tuple(int(value) for value in k_shape)
+    if len(values) > 3 or any(value <= 0 for value in values):
+        raise ValueError("k shape must contain one to three positive dimensions.")
+    return (values + (1, 1, 1))[:3]
+
+
+def state_index(index) -> tuple[int, int, int]:
+    values = tuple(int(value) for value in index)
+    if len(values) > 3 or any(value < 0 for value in values):
+        raise ValueError("k index must contain one to three non-negative entries.")
+    return (values + (0, 0, 0))[:3]
 
 
 def build_symmetry_stars(context: SymmetryContext) -> SymmetryStarPartition:
@@ -90,4 +123,3 @@ def build_symmetry_stars(context: SymmetryContext) -> SymmetryStarPartition:
         raise RuntimeError("Symmetry-star construction did not cover the complete k mesh.")
     k_to_star.setflags(write=False)
     return SymmetryStarPartition(shape, tuple(stars), k_to_star)
-

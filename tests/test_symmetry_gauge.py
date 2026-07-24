@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 
 from pcwannier.symmetry import (
+    CombinedTargetRepresentation,
     build_symmetry_context,
     build_symmetry_stars,
-    combined_target_matrix,
     little_group,
     project_intertwiner,
     solve_intertwiner_space,
@@ -87,6 +87,7 @@ def test_c4v_ten_by_ten_mesh_has_twenty_one_stars():
 def test_square_2c_target_has_direct_intertwiners_at_high_symmetry_points():
     model = square_2c_model()
     target = model.target("square_2c_A1")
+    combined_target = CombinedTargetRepresentation((target,))
     rng = np.random.default_rng(321)
     raw = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
     basis_change, _ = np.linalg.qr(raw)
@@ -96,7 +97,7 @@ def test_square_2c_target_has_direct_intertwiners_at_high_symmetry_points():
             element.operation_index for element in little_group(model.group, point.k_fractional)
         )
         target_matrices = [
-            combined_target_matrix((target,), index, point.k_fractional)
+            combined_target.matrix(index, point.k_fractional)
             for index in operation_indices
         ]
         physical_matrices = [

@@ -101,6 +101,72 @@ def test_even_kmesh_half_r_set_has_no_inverse_duplicates():
             assert negative not in residues
 
 
+def test_nyquist_detection_accepts_unpadded_2d_vectors():
+    shape = (10, 10, 1)
+
+    assert TBAModel.is_nyquist([5, 0], shape)
+    assert TBAModel.is_nyquist([0, 5], shape)
+    assert TBAModel.is_nyquist([5, 5], shape)
+    assert not TBAModel.is_nyquist([1, 0], shape)
+
+
+def test_collect_hoppings_is_complete_and_independent_of_band_neighbors():
+    tba = object.__new__(TBAModel)
+    tba.config = SimpleNamespace(
+        neighbor=[[1, 0]],
+        kdim=2,
+        band_calc_num=1,
+    )
+    tba.state = SimpleNamespace(k_shape=(4, 4, 1))
+    tba.threads = 1
+    tba._projected_k_hamiltonians = lambda: (
+        np.empty((0, 2)),
+        np.empty((0, 1, 1)),
+    )
+    tba.gen_hopping = lambda r=None: np.asarray(
+        [[10 * int(r[0]) + int(r[1])]],
+        dtype=np.complex128,
+    )
+
+    hoppings = tba.collect_hoppings()
+    complete = TBAModel.R_half_rect(tba.state.k_shape)
+    expected_keys = {(0, 0, 0)} | {tuple(row) for row in complete}
+
+    assert set(hoppings) == expected_keys
+    assert len(hoppings) == 1 + len(complete)
+    assert tba.config.neighbor == [[1, 0]]
+
+
+def test_band_neighbor_selection_does_not_change_complete_hopping_output():
+    tba = object.__new__(TBAModel)
+    tba.config = SimpleNamespace(
+        neighbor=[[-1, 0]],
+        kdim=2,
+        band_calc_num=1,
+    )
+    tba.state = SimpleNamespace(k_shape=(4, 4, 1))
+    tba.threads = 1
+    tba._projected_k_hamiltonians = lambda: (
+        np.empty((0, 2)),
+        np.empty((0, 1, 1)),
+    )
+    tba.gen_hopping = lambda r=None: np.asarray(
+        [[10 * int(r[0]) + int(r[1])]],
+        dtype=np.complex128,
+    )
+    hoppings = tba.collect_hoppings()
+
+    selected = tba._hoppings_for_neighbors(
+        hoppings,
+        np.asarray(tba.config.neighbor, dtype=int),
+    )
+
+    assert (-1, 0, 0) not in hoppings
+    assert selected.shape == (1, 1, 1)
+    assert selected[0, 0, 0] == pytest.approx(-10.0)
+    assert len(hoppings) == 1 + len(TBAModel.R_half_rect(tba.state.k_shape))
+
+
 def test_hopping_fourier_roundtrip_is_hermitian_on_rectangular_lattice():
     rng = np.random.default_rng(1234)
     shape = (4, 4, 1)

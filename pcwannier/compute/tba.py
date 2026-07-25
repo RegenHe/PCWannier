@@ -102,10 +102,7 @@ class TBAModel:
         k_cart, projected = self._projected_k_hamiltonians()
         h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
         neighbors = np.asarray(self.config.neighbor, dtype=int)
-        hop_array = np.asarray(
-            [hoppings[tuple((list(row) + [0, 0, 0])[:3])] for row in neighbors],
-            dtype=np.complex128,
-        )
+        hop_array = self._hoppings_for_neighbors(hoppings, neighbors)
         reconstructed = self._h_of_k_factory(h0, neighbors, hop_array)(k_cart)
         matrix_errors = np.linalg.norm(reconstructed - projected, axis=(1, 2))
         direct_eigenvalues = np.linalg.eigvalsh(self._hermitian_batch(projected))
@@ -179,11 +176,15 @@ class TBAModel:
         return 0.5 * (array + np.conjugate(np.swapaxes(array, -2, -1)))
 
     def collect_hoppings(self) -> dict[tuple[int, int, int], np.ndarray]:
+        complete_neighbors = self.R_half_rect(self.state.k_shape)
         if not self.config.neighbor:
-            self.config.neighbor = self.R_half_rect(self.state.k_shape).tolist()
+            self.config.neighbor = complete_neighbors[:, : int(self.config.kdim)].tolist()
         self._projected_k_hamiltonians()
 
-        r_list = [(0, 0, 0)] + [tuple((list(r) + [0, 0, 0])[:3]) for r in self.config.neighbor]
+        r_list = [(0, 0, 0)] + [
+            tuple(int(value) for value in row)
+            for row in complete_neighbors
+        ]
 
         def calc_r(r3):
             return tuple(int(x) for x in r3), self.gen_hopping(r3)
@@ -220,7 +221,7 @@ class TBAModel:
 
         h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
         neigh = np.asarray(config.neighbor, dtype=int)
-        hops = np.asarray([hoppings[tuple((list(r) + [0, 0, 0])[:3])] for r in neigh], dtype=np.complex128)
+        hops = self._hoppings_for_neighbors(hoppings, neigh)
         h_of_k = self._h_of_k_factory(h0, neigh, hops)
         hks = h_of_k(self._kfrac_to_kcart(k_path))
         energies = np.linalg.eigvalsh(hks) if config.hermitian else np.sort(np.linalg.eigvals(hks))
@@ -287,7 +288,7 @@ class TBAModel:
         k_flat = kfrac.reshape(int(np.prod(nk_shape)), kdim)
         h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
         neigh = np.asarray(config.neighbor, dtype=int)
-        hops = np.asarray([hoppings[tuple((list(r) + [0, 0, 0])[:3])] for r in neigh], dtype=np.complex128)
+        hops = self._hoppings_for_neighbors(hoppings, neigh)
         hks = self._h_of_k_factory(h0, neigh, hops)(self._kfrac_to_kcart(k_flat))
         eigvals, eigvecs = np.linalg.eigh(hks)
         result.bz_eigvals = eigvals.reshape(*nk_shape, int(config.band_calc_num))
@@ -297,6 +298,30 @@ class TBAModel:
     def _kfrac_to_kcart(self, kfrac: np.ndarray) -> np.ndarray:
         reciprocal = np.asarray(self.config.reciprocal_lattice_vectors, dtype=float)[: self.config.kdim, :]
         return (kfrac @ reciprocal) * (2.0 * np.pi / float(self.config.lattice_const))
+
+    def _hoppings_for_neighbors(
+        self,
+        hoppings: dict[tuple[int, int, int], np.ndarray],
+        neighbors: np.ndarray,
+    ) -> np.ndarray:
+        rows = np.asarray(neighbors, dtype=int)
+        if rows.size == 0:
+            band_count = int(self.config.band_calc_num)
+            return np.empty((0, band_count, band_count), dtype=np.complex128)
+        if rows.ndim == 1:
+            rows = rows.reshape(1, -1)
+        kdim = int(self.config.kdim)
+        if rows.ndim != 2 or rows.shape[1] < kdim:
+            raise ValueError(f"neighbor vectors must have at least {kdim} components.")
+        rows = rows[:, :kdim]
+        selected = []
+        for row in rows:
+            key = tuple((row.tolist() + [0, 0, 0])[:3])
+            value = hoppings.get(key)
+            if value is None:
+                value = self.gen_hopping(key)
+            selected.append(np.asarray(value, dtype=np.complex128))
+        return np.asarray(selected, dtype=np.complex128)
 
     def _h_of_k_factory(self, h0: np.ndarray, neigh: np.ndarray, hops: np.ndarray):
         config = self.config
@@ -327,14 +352,15 @@ class TBAModel:
 
     @staticmethod
     def is_nyquist(r, kshape) -> bool:
-        coords = list(map(int, r))
+        shape = tuple(int(value) for value in kshape)
+        coords = (list(map(int, r)) + [0] * len(shape))[: len(shape)]
         all_zero = True
-        for axis, n_axis in enumerate(kshape):
-            val = coords[axis] % int(n_axis)
+        for axis, n_axis in enumerate(shape):
+            val = coords[axis] % n_axis
             if val != 0:
                 all_zero = False
-            if int(n_axis) % 2 == 0:
-                if (2 * val) % int(n_axis) != 0:
+            if n_axis % 2 == 0:
+                if (2 * val) % n_axis != 0:
                     return False
             elif val != 0:
                 return False
@@ -355,7 +381,7 @@ class TBAModel:
                 for value, n_axis in zip(residues, shape)
             )
             out.append((signed + (0, 0, 0))[:3])
-        return np.asarray(out, dtype=int)
+        return np.asarray(out, dtype=int).reshape(-1, 3)
 
     @staticmethod
     def group_bands(energies: np.ndarray, delta_rel=1e-3, delta_abs=None):

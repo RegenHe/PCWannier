@@ -20,6 +20,7 @@ from .sources import load_input, load_mesh
 from .symmetry import (
     load_builtin_finite_groups,
     load_finite_group,
+    load_point_group_from_spglib,
     symmetry_engine_versions,
 )
 from .timing import timed_step
@@ -35,7 +36,10 @@ def parse_args(argv=None):
         "-g",
         "--group",
         metavar="NAME",
-        help="Print a finite-group character table and exit, for example: --group c4v",
+        help=(
+            "Print a finite-group character table and exit, for example: "
+            "--group c4v or --group m-3m"
+        ),
     )
     parser.add_argument("-t", "--threads", type=int, default=os.cpu_count() or 1, help="Number of worker threads")
     parser.add_argument(
@@ -260,7 +264,8 @@ def _configure_analysis_cache_paths(config, out_dir: Path | None) -> None:
 
 
 def _load_cli_finite_group(value: str):
-    requested = Path(value).expanduser()
+    raw_value = str(value).strip()
+    requested = Path(raw_value).expanduser()
     candidates = [requested]
     if requested.suffix == "":
         candidates.append(requested.with_suffix(".yaml"))
@@ -277,8 +282,15 @@ def _load_cli_finite_group(value: str):
     ]
     if len(matches) == 1:
         return matches[0]
+    try:
+        return load_point_group_from_spglib(raw_value)
+    except ValueError as exc:
+        point_group_error = str(exc)
     available = ", ".join(definition.name for definition in library.definitions)
-    raise ValueError(f"Unknown finite group {value!r}; available groups: {available}.")
+    raise ValueError(
+        f"Unknown finite group {value!r}; built-in groups: {available}. "
+        f"3D point-group lookup also failed: {point_group_error}"
+    )
 
 
 def _format_finite_group_table(definition) -> str:
@@ -309,6 +321,7 @@ def _format_finite_group_table(definition) -> str:
     return "\n".join(
         [
             f"Finite group: {definition.name}",
+            f"Point-group symbol: {definition.point_group_symbol}",
             f"Order: {table.order}",
             f"Canonical elements: {', '.join(table.element_names)}",
             "Conjugacy classes:",

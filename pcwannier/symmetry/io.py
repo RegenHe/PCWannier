@@ -25,7 +25,7 @@ from .representation import (
     build_wannier_target_from_group_irrep,
 )
 from .specs import SymmetryCalculationSpec
-from .tables import FiniteGroupTable
+from .tables import ConcreteFiniteGroup, FiniteGroupTable
 
 
 _FINITE_GROUP_FILES = (
@@ -190,6 +190,96 @@ def load_symmetry_from_spglib(
         definition,
         algebra_tolerance=definition.algebra_tolerance,
     )
+
+
+@lru_cache(maxsize=1)
+def _spglib_point_group_hall_numbers() -> dict[str, int]:
+    """Return one deterministic crystallographic setting for each 3D point group."""
+
+    output: dict[str, int] = {}
+    for hall_number in range(1, 531):
+        group_type = spglib.get_spacegroup_type(hall_number)
+        if group_type is None:
+            continue
+        keys = {
+            str(group_type.pointgroup_international),
+            str(group_type.pointgroup_schoenflies),
+        }
+        for key in keys:
+            normalized = _normalize_point_group_name(key)
+            output.setdefault(normalized, hall_number)
+    return output
+
+
+def _normalize_point_group_name(value: str) -> str:
+    return str(value).strip().replace(" ", "").replace("_", "").casefold()
+
+
+@lru_cache(maxsize=None)
+def load_point_group_from_spglib(
+    symbol: str,
+    *,
+    tolerance: float = 1.0e-8,
+) -> FiniteGroupDefinition:
+    """Generate a finite-group character table from a 3D point-group symbol.
+
+    spglib supplies a standard crystallographic rotation set.  The existing
+    finite-group library then identifies the group and delegates irrep
+    enumeration to spgrep, exactly as it does for calculated little groups.
+    """
+
+    requested = str(symbol).strip()
+    if not requested:
+        raise ValueError("Point-group symbol must be non-empty.")
+    hall_number = _spglib_point_group_hall_numbers().get(
+        _normalize_point_group_name(requested)
+    )
+    if hall_number is None:
+        raise ValueError(
+            f"Unknown crystallographic point-group symbol {requested!r}. "
+            "Use a Hermann-Mauguin symbol such as 'm-3m' or a Schoenflies "
+            "symbol such as 'Oh'."
+        )
+
+    group_type = spglib.get_spacegroup_type(hall_number)
+    symmetry = spglib.get_symmetry_from_database(hall_number)
+    if group_type is None or symmetry is None:
+        raise ValueError(
+            f"spglib could not construct point group {requested!r} from Hall {hall_number}."
+        )
+
+    unique: dict[tuple[int, ...], np.ndarray] = {}
+    for raw_rotation in np.asarray(symmetry["rotations"], dtype=np.int64):
+        key = tuple(int(value) for value in raw_rotation.reshape(-1))
+        unique.setdefault(key, raw_rotation.copy())
+    rotations = sorted(
+        unique.values(),
+        key=lambda rotation: (
+            0 if np.array_equal(rotation, np.eye(3, dtype=np.int64)) else 1,
+            tuple(int(value) for value in rotation.reshape(-1)),
+        ),
+    )
+    operations = tuple(
+        SpaceGroupOperation(
+            rotation,
+            np.zeros(3, dtype=float),
+            "E" if index == 0 else f"g{index:02d}",
+        )
+        for index, rotation in enumerate(rotations)
+    )
+    concrete = ConcreteFiniteGroup.from_space_group(
+        SpaceGroup(operations, tolerance),
+        name=str(group_type.pointgroup_international),
+    )
+    definition = load_builtin_finite_groups().identify(concrete).canonical
+    expected = _normalize_point_group_name(group_type.pointgroup_international)
+    if _normalize_point_group_name(definition.point_group_symbol) != expected:
+        raise RuntimeError(
+            "Generated finite-group catalog has an inconsistent point-group symbol: "
+            f"expected {group_type.pointgroup_international!r}, got "
+            f"{definition.point_group_symbol!r}."
+        )
+    return definition
 
 
 def load_space_group(

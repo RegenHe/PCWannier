@@ -235,6 +235,22 @@ def test_group_mode_prints_character_table_without_incar_or_log(tmp_path, monkey
     assert not (tmp_path / "log.txt").exists()
 
 
+def test_group_mode_generates_three_dimensional_point_group_with_spgrep(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["--group", "m-3m"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Finite group: O_h" in output
+    assert "Point-group symbol: m-3m" in output
+    assert "Order: 48" in output
+    for label in ("A1g", "A2g", "Eg", "T1g", "T2g", "A1u", "T1u"):
+        assert label in output
+    assert not (tmp_path / "log.txt").exists()
+
+
 def test_input_and_group_modes_are_mutually_exclusive():
     with pytest.raises(SystemExit):
         parse_args(["-i", "incar", "--group", "c4v"])

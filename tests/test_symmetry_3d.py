@@ -12,9 +12,31 @@ from pcwannier.symmetry import (
     build_symmetry_context,
     cartesian_field_matrix,
     little_group,
+    load_point_group_from_spglib,
     load_symmetry_from_spglib,
     regularize_gamma_zero_modes,
 )
+
+
+def test_spglib_point_group_catalog_supports_hm_and_schoenflies_names():
+    international = load_point_group_from_spglib("m-3m")
+    schoenflies = load_point_group_from_spglib("O_h")
+
+    assert international.name == schoenflies.name == "O_h"
+    assert international.point_group_symbol == "m-3m"
+    assert international.table.order == 48
+    assert {irrep.name for irrep in international.irreps} == {
+        "A1g",
+        "A2g",
+        "Eg",
+        "T1g",
+        "T2g",
+        "A1u",
+        "A2u",
+        "Eu",
+        "T1u",
+        "T2u",
+    }
 
 
 def test_pm3m_database_and_little_groups():

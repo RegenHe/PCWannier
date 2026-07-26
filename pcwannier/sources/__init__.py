@@ -5,8 +5,12 @@ from pathlib import Path
 from ..conventions import BlochConvention
 from .base import SourceAdapter
 from .comsol import COMSOL_SOURCE, load_comsol_data, load_comsol_mesh, match_data_to_mesh
+from .mpb import MPB_SOURCE, load_mpb_grid
 
-_SOURCES = {COMSOL_SOURCE.name: COMSOL_SOURCE}
+_SOURCES = {
+    COMSOL_SOURCE.name: COMSOL_SOURCE,
+    MPB_SOURCE.name: MPB_SOURCE,
+}
 
 
 def resolve_source(name: str) -> SourceAdapter:
@@ -52,6 +56,7 @@ __all__ = [
     "load_comsol_mesh",
     "load_input",
     "load_mesh",
+    "load_mpb_grid",
     "match_data_to_mesh",
     "resolve_source",
 ]

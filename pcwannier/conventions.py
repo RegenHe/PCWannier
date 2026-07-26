@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 
 @dataclass(frozen=True)
@@ -15,3 +16,10 @@ class BlochConvention:
             raise ValueError("Bloch convention sign must be -1 or 1.")
         if not str(self.name).strip():
             raise ValueError("Bloch convention name must not be empty.")
+
+
+class BlochFieldRepresentation(str, Enum):
+    """Representation stored by an external field-data source."""
+
+    FULL_BLOCH = "full_bloch"
+    PERIODIC_PART = "periodic_part"

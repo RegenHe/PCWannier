@@ -9,7 +9,7 @@ from ..maxwell import FieldComponents
 
 if TYPE_CHECKING:
     from ..config import IncarConfig
-    from ..data import InputBundle, Mesh
+    from ..data import InputBundle, Mesh, PeriodicGrid
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,14 @@ class SourceAdapter:
     bloch_convention: BlochConvention
     supported_field_components: frozenset[FieldComponents]
     input_loader: Callable[[IncarConfig], InputBundle]
-    mesh_loader: Callable[[str | Path], Mesh]
+    mesh_loader: Callable[[str | Path], Mesh | PeriodicGrid]
+    required_config_fields: tuple[str, ...] = (
+        "mesh_file",
+        "dataset_file",
+        "metric_file",
+        "E_file",
+    )
+    supported_dimensions: frozenset[int] = frozenset({2})
 
     def validate_field_components(self, value: str | FieldComponents) -> None:
         components = FieldComponents.parse(value)
@@ -26,7 +33,21 @@ class SourceAdapter:
             supported = ", ".join(
                 item.value for item in sorted(self.supported_field_components, key=lambda item: item.value)
             )
+            description = (
+                "scalar Ez and Hz"
+                if self.supported_field_components
+                == frozenset({FieldComponents.EZ, FieldComponents.HZ})
+                else supported
+            )
             raise NotImplementedError(
                 f"Data source {self.name!r} does not support field_components={components.value}; "
-                f"it currently supports scalar Ez and Hz (available values: {supported})."
+                f"it currently supports {description} (available values: {supported})."
+            )
+
+    def validate_dimension(self, dimension: int) -> None:
+        if int(dimension) not in self.supported_dimensions:
+            supported = ", ".join(str(value) for value in sorted(self.supported_dimensions))
+            raise NotImplementedError(
+                f"Data source {self.name!r} does not support dimension={dimension}; "
+                f"available dimensions: {supported}."
             )

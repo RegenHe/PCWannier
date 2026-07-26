@@ -7,6 +7,7 @@ name = "pcwannier"
 dynamic = ["version"]
 requires-python = ">=3.10"
 dependencies = [
+  "h5py>=3.12",
   "matplotlib>=3.10",
   "numpy>=2.0",
   "PyYAML>=6.0",

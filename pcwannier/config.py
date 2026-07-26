@@ -156,11 +156,11 @@ class IncarConfig:
             "real_lattice_vectors",
             "k_points",
             "band_window",
-            "dataset_file",
-            "metric_file",
-            "mesh_file",
-            "E_file",
         ]
+        from .sources import resolve_source
+
+        source = resolve_source(self.dataset_type)
+        required.extend(source.required_config_fields)
         if mode == "calculation":
             required.extend(("composition_of_b", "projections", "extension"))
         else:
@@ -1046,6 +1046,9 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
     if cfg.real_lattice_vectors is None:
         return cfg
     cfg.kdim = len(cfg.real_lattice_vectors)
+    from .sources import resolve_source
+
+    resolve_source(cfg.dataset_type).validate_dimension(cfg.kdim)
     reciprocal = np.asarray(cfg.reciprocal_lattice_vectors, dtype=float)
     if reciprocal.size > 0 and np.allclose(reciprocal, 0.0):
         reciprocal = (np.linalg.inv(np.asarray(cfg.real_lattice_vectors, dtype=float)) @ np.eye(cfg.kdim)).T

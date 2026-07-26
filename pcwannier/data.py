@@ -9,7 +9,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from .config import IncarConfig
-from .conventions import BlochConvention
+from .conventions import BlochConvention, BlochFieldRepresentation
 from .maxwell import MaxwellProblem
 
 if TYPE_CHECKING:
@@ -213,6 +213,202 @@ class Mesh:
         return Mesh(copy.deepcopy(self.vertices, memo), copy.deepcopy(self.elements, memo), copy.deepcopy(self.edge, memo))
 
 
+class PeriodicGrid:
+    """Uniform periodic sampling grid in one crystallographic cell.
+
+    The lattice vectors are stored as rows. ``sample_offset=0`` gives the
+    half-open MPB grid u_i = i / N - 1/2.  The class exposes 2D plot
+    triangles for existing output code, but numerical integration never uses
+    those triangles.
+    """
+
+    integration_family = "uniform_grid"
+
+    def __init__(
+        self,
+        shape,
+        lattice_vectors,
+        *,
+        sample_offset=0.0,
+    ) -> None:
+        grid_shape = tuple(int(value) for value in shape)
+        if not grid_shape or len(grid_shape) > 3 or any(value <= 0 for value in grid_shape):
+            raise ValueError("Periodic grid shape must contain one to three positive integers.")
+        lattice = np.asarray(lattice_vectors, dtype=float)
+        dimension = len(grid_shape)
+        if lattice.shape != (dimension, dimension) or not np.all(np.isfinite(lattice)):
+            raise ValueError(
+                f"Periodic grid lattice must have finite shape {(dimension, dimension)}."
+            )
+        determinant = float(np.linalg.det(lattice))
+        if not np.isfinite(determinant) or abs(determinant) <= np.finfo(float).tiny:
+            raise ValueError("Periodic grid lattice must have positive non-zero volume.")
+        offset = np.broadcast_to(np.asarray(sample_offset, dtype=float), (dimension,)).copy()
+        if not np.all(np.isfinite(offset)):
+            raise ValueError("Periodic grid sample offsets must be finite.")
+
+        self.base_shape = grid_shape
+        self.shape = grid_shape
+        self.lattice_vectors = lattice
+        self.sample_offset = offset
+        self.base_cell_volume = abs(determinant)
+        self.cell_volume = self.base_cell_volume
+        self.tile_shape = (1,) * dimension
+        self.edge = None
+        self._set_fractional_vertices(self._base_fractional_vertices())
+
+    @property
+    def dimension(self) -> int:
+        return len(self.shape)
+
+    @property
+    def point_count(self) -> int:
+        return int(np.prod(self.shape, dtype=np.int64))
+
+    def _base_fractional_vertices(self) -> np.ndarray:
+        axes = [
+            (np.arange(size, dtype=float) + self.sample_offset[axis]) / size - 0.5
+            for axis, size in enumerate(self.base_shape)
+        ]
+        return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, self.dimension)
+
+    def _set_fractional_vertices(self, fractional: np.ndarray) -> None:
+        self.fractional_vertices = np.asarray(fractional, dtype=float)
+        self.vertices = self.fractional_vertices @ self.lattice_vectors
+        self.elements = self._plot_elements()
+        self.tri_weights = self._plot_triangle_weights()
+        if self.point_count > 1:
+            steps = [
+                np.linalg.norm(self.lattice_vectors[axis]) / self.shape[axis]
+                for axis in range(self.dimension)
+            ]
+            self.mindist = float(min(steps))
+        else:
+            self.mindist = 0.0
+
+    def _plot_elements(self) -> np.ndarray:
+        if self.dimension != 2:
+            return np.empty((0, 3), dtype=np.intp)
+        nx, ny = self.shape
+        if nx < 2 or ny < 2:
+            return np.empty((0, 3), dtype=np.intp)
+        cells_i, cells_j = np.meshgrid(
+            np.arange(nx - 1, dtype=np.intp),
+            np.arange(ny - 1, dtype=np.intp),
+            indexing="ij",
+        )
+        lower = (cells_i * ny + cells_j).reshape(-1)
+        right = lower + ny
+        upper = lower + 1
+        diagonal = right + 1
+        first = np.column_stack((lower, right, diagonal))
+        second = np.column_stack((lower, diagonal, upper))
+        return (
+            np.stack((first, second), axis=1)
+            .reshape(-1, 3)
+            .astype(np.intp, copy=False)
+        )
+
+    def _plot_triangle_weights(self) -> np.ndarray:
+        if self.elements.size == 0:
+            return np.empty(0, dtype=float)
+        triangles = self.vertices[self.elements]
+        edge1 = triangles[:, 1] - triangles[:, 0]
+        edge2 = triangles[:, 2] - triangles[:, 0]
+        determinant = edge1[:, 0] * edge2[:, 1] - edge1[:, 1] * edge2[:, 0]
+        return np.abs(determinant) / 6.0
+
+    def func(self, fn, offset=(0.0, 0.0)) -> np.ndarray:
+        if self.dimension != 2:
+            raise NotImplementedError("Projection functions currently support 2D grids.")
+        dx = self.vertices[:, 0] - offset[0]
+        dy = self.vertices[:, 1] - offset[1]
+        return np.asarray(fn(dx, dy), dtype=np.complex128)
+
+    def rfunc(self, fn, offset=(0.0, 0.0), ang=0.0) -> np.ndarray:
+        if self.dimension != 2:
+            raise NotImplementedError("Projection functions currently support 2D grids.")
+        dx = self.vertices[:, 0] - offset[0]
+        dy = self.vertices[:, 1] - offset[1]
+        return np.asarray(
+            fn(np.hypot(dx, dy), np.arctan2(dy, dx) + np.deg2rad(ang)),
+            dtype=np.complex128,
+        )
+
+    def extension(
+        self,
+        n: list[int],
+        real_lattice_vectors: list[list[float]],
+        lattice_const: float,
+    ) -> np.ndarray:
+        extension = tuple(int(value) for value in n)
+        if len(extension) != self.dimension or any(value <= 0 for value in extension):
+            raise ValueError(
+                f"extension must contain {self.dimension} positive integers."
+            )
+        expected_lattice = np.asarray(real_lattice_vectors, dtype=float) * float(lattice_const)
+        if expected_lattice.shape != self.lattice_vectors.shape or not np.allclose(
+            expected_lattice,
+            self.lattice_vectors,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+        ):
+            raise ValueError("Periodic grid lattice does not match the calculation lattice.")
+
+        base_shape = self.base_shape
+        new_shape = tuple(base_shape[axis] * extension[axis] for axis in range(self.dimension))
+        center_tiles = np.floor((np.asarray(extension, dtype=float) - 1.0) / 2.0)
+        axes = []
+        for axis, size in enumerate(new_shape):
+            base_size = base_shape[axis]
+            tile = np.arange(size, dtype=np.int64) // base_size
+            local = np.arange(size, dtype=np.int64) % base_size
+            axes.append(
+                tile
+                - center_tiles[axis]
+                + (local + self.sample_offset[axis]) / base_size
+                - 0.5
+            )
+        fractional = np.stack(
+            np.meshgrid(*axes, indexing="ij"), axis=-1
+        ).reshape(-1, self.dimension)
+        global_indices = np.indices(new_shape, dtype=np.int64)
+        mapping_multi = tuple(
+            (global_indices[axis] % base_shape[axis]).reshape(-1)
+            for axis in range(self.dimension)
+        )
+        mapping = np.ravel_multi_index(mapping_multi, base_shape).astype(np.intp)
+
+        self.shape = new_shape
+        self.tile_shape = extension
+        self.cell_volume = self.base_cell_volume * int(np.prod(extension))
+        self._set_fractional_vertices(fractional)
+        return mapping
+
+    def fingerprint_items(self) -> tuple[tuple[str, np.ndarray], ...]:
+        return (
+            ("grid_base_shape", np.asarray(self.base_shape, dtype=np.int64)),
+            ("grid_shape", np.asarray(self.shape, dtype=np.int64)),
+            ("grid_tile_shape", np.asarray(self.tile_shape, dtype=np.int64)),
+            ("grid_lattice", np.asarray(self.lattice_vectors, dtype=np.float64)),
+            ("grid_offset", np.asarray(self.sample_offset, dtype=np.float64)),
+        )
+
+    def __deepcopy__(self, memo=None):
+        result = PeriodicGrid(
+            self.base_shape,
+            copy.deepcopy(self.lattice_vectors, memo),
+            sample_offset=copy.deepcopy(self.sample_offset, memo),
+        )
+        if self.tile_shape != (1,) * self.dimension:
+            result.extension(
+                list(self.tile_shape),
+                (self.lattice_vectors / 1.0).tolist(),
+                1.0,
+            )
+        return result
+
+
 @dataclass
 class RawData:
     point_matrix: np.ndarray
@@ -225,13 +421,14 @@ class InputBundle:
     config: IncarConfig
     maxwell: MaxwellProblem
     bloch_convention: BlochConvention
-    mesh: Mesh
+    mesh: Mesh | PeriodicGrid
     fields: np.ndarray
     metric_material: np.ndarray
     energies: np.ndarray
     band_indices: np.ndarray
     inner_band_indices: np.ndarray
     energy_matrix: np.ndarray
+    field_representation: BlochFieldRepresentation = BlochFieldRepresentation.FULL_BLOCH
     symmetry: SymmetryContext | None = None
 
 
@@ -287,8 +484,8 @@ class HoppingReconstructionDiagnostics:
 @dataclass
 class RunResult:
     config: IncarConfig
-    mesh: Mesh
-    extended_mesh: Mesh
+    mesh: Mesh | PeriodicGrid
+    extended_mesh: Mesh | PeriodicGrid
     extended_metric_material: np.ndarray
     orthogonality_report: np.ndarray
     S: np.ndarray | None

@@ -221,6 +221,14 @@ def _interpolate_complex(triang: Triangulation, values: np.ndarray, points: np.n
 
 def _interpolate_real_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, tile_count: int) -> np.ndarray:
     """Interpolate a tiled non-conforming mesh without building a global triangle finder."""
+    if getattr(mesh, "integration_family", "finite_element") == "uniform_grid":
+        triang = Triangulation(
+            mesh.vertices[:, 0],
+            mesh.vertices[:, 1],
+            mesh.elements,
+        )
+        return _interpolate_real(triang, values, points)
+
     tile_count = max(1, int(tile_count))
     if mesh.elements.shape[0] % tile_count != 0:
         raise ValueError("Extended mesh element count is incompatible with its tile count.")

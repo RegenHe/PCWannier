@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..data import InputBundle, Mesh
+from ..conventions import BlochFieldRepresentation
+from ..data import InputBundle, Mesh, PeriodicGrid
 from ..matrix_io import load_cell_matrix
-from .integration import MetricInnerProduct
+from .integration import create_metric_inner_product
 from .kspace import get_kxyz
 from .parallel import parallel_map
 
@@ -34,7 +35,7 @@ class StateCollection:
                 f"Metric material must contain one finite value per mesh vertex; "
                 f"expected {expected_metric_shape}, got {self.metric_material.shape}."
             )
-        self.inner_product = MetricInnerProduct(
+        self.inner_product = create_metric_inner_product(
             self.mesh,
             self.metric_material,
             mode=self.config.integration_mode,
@@ -58,10 +59,13 @@ class StateCollection:
         self.transform: np.ndarray | None = None
         self.normalization_transform: np.ndarray | None = None
         self.transform_correction: np.ndarray | None = None
-        self.is_bloch = False
+        self.is_bloch = (
+            bundle.field_representation
+            is BlochFieldRepresentation.PERIODIC_PART
+        )
         self.is_orthogonalized = False
-        self.extention_mesh: Mesh | None = None
-        self.extended_inner_product: MetricInnerProduct | None = None
+        self.extention_mesh: Mesh | PeriodicGrid | None = None
+        self.extended_inner_product = None
         self.space_to_original_mapping: np.ndarray | None = None
         self.extended_metric_material: np.ndarray | None = None
         self._identity_transform: np.ndarray | None = None
@@ -331,10 +335,10 @@ class StateCollection:
             float(self.config.lattice_const),
         )
         metric = self.get_extended_metric_material()
-        self.extended_inner_product = MetricInnerProduct(
+        self.extended_inner_product = create_metric_inner_product(
             self.extention_mesh,
             metric,
-            mode=self.inner_product.mode,
+            mode=self.config.integration_mode,
             backend=self.inner_product.backend,
         )
 

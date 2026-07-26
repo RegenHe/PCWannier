@@ -50,7 +50,8 @@ $pyinstallerOptions = @(
     "--collect-data", "matplotlib",
     "--collect-data", "pcwannier.symmetry",
     "--collect-all", "spglib",
-    "--collect-submodules", "spgrep"
+    "--collect-submodules", "spgrep",
+    "--collect-all", "h5py"
 )
 
 if ($OneFile) {

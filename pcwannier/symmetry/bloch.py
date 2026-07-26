@@ -27,6 +27,12 @@ def fractional_mesh_vertices(mesh, real_lattice_vectors, lattice_const: float) -
     """Convert Cartesian mesh vertices to row-vector fractional coordinates."""
     lattice = np.asarray(real_lattice_vectors, dtype=float)
     dimension = lattice.shape[0]
+    stored = getattr(mesh, "fractional_vertices", None)
+    if stored is not None:
+        fractional = np.asarray(stored, dtype=float)
+        if fractional.ndim != 2 or fractional.shape[1] != dimension:
+            raise ValueError("Stored fractional grid coordinates have an invalid shape.")
+        return fractional
     vertices = np.asarray(mesh.vertices, dtype=float)
     if lattice.shape != (dimension, dimension) or vertices.shape[1] != dimension:
         raise ValueError("Mesh and real-space lattice dimensions do not match.")
@@ -69,15 +75,99 @@ class BarycentricStencil:
             raise ValueError("Quasi-periodic interpolation requires lattice shifts.")
         kpoint = np.asarray(k_fractional, dtype=float).reshape(-1)
         shifts = np.asarray(self.lattice_shifts, dtype=np.int64)
-        if shifts.ndim != 2 or shifts.shape[0] != self.vertex_indices.shape[0]:
+        if shifts.ndim not in {2, 3} or shifts.shape[0] != self.vertex_indices.shape[0]:
             raise ValueError("Barycentric lattice shifts have an invalid shape.")
-        if shifts.shape[1] != kpoint.size:
+        if shifts.shape[-1] != kpoint.size:
             raise ValueError("Bloch k point and interpolation lattice shifts have different dimensions.")
-        sampled = self.apply(values)
-        phase = np.exp(2j * np.pi * int(bloch_sign) * (shifts @ kpoint))
-        if sampled.ndim == 2:
-            return sampled * phase[None, :]
-        return sampled * phase[None, :, None]
+        if shifts.ndim == 2:
+            sampled = self.apply(values)
+            phase = np.exp(2j * np.pi * int(bloch_sign) * (shifts @ kpoint))
+            if sampled.ndim == 2:
+                return sampled * phase[None, :]
+            return sampled * phase[None, :, None]
+
+        phase = np.exp(
+            2j * np.pi * int(bloch_sign) * np.einsum(
+                "vcd,d->vc",
+                shifts,
+                kpoint,
+                optimize=True,
+            )
+        )
+        weighted = self.weights * phase
+        array = np.asarray(values)
+        if array.ndim == 2:
+            return np.einsum(
+                "nvc,vc->nv",
+                array[:, self.vertex_indices],
+                weighted,
+                optimize=True,
+            )
+        if array.ndim == 3:
+            return np.einsum(
+                "nvcd,vc->nvd",
+                array[:, self.vertex_indices, :],
+                weighted,
+                optimize=True,
+            )
+        raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
+
+
+class PeriodicGridInterpolator:
+    """Multilinear interpolation on a half-open periodic regular grid."""
+
+    periodic_node_classes: tuple[tuple[int, ...], ...] = ()
+
+    def __init__(self, grid, *, tolerance: float = 1.0e-8):
+        self.shape = tuple(int(value) for value in grid.shape)
+        self.dimension = len(self.shape)
+        self.sample_offset = np.asarray(grid.sample_offset, dtype=float)
+        self.tolerance = float(tolerance)
+        if self.dimension not in {2, 3}:
+            raise NotImplementedError(
+                "Periodic regular-grid interpolation supports 2D and 3D grids."
+            )
+        if self.sample_offset.shape != (self.dimension,):
+            raise ValueError("Periodic grid sample offset has an invalid shape.")
+
+    def stencil(self, points) -> BarycentricStencil:
+        query = np.asarray(points, dtype=float)
+        if query.ndim != 2 or query.shape[1] != self.dimension:
+            raise ValueError(
+                f"Interpolation points must have shape (N, {self.dimension})."
+            )
+        shape = np.asarray(self.shape, dtype=np.int64)
+        start = self.sample_offset / shape - 0.5
+        scaled = (query - start) * shape
+        nearest = np.rint(scaled)
+        exact = np.abs(scaled - nearest) <= self.tolerance * shape
+        scaled = np.where(exact, nearest, scaled)
+        lower = np.floor(scaled).astype(np.int64)
+        fraction = scaled - lower
+
+        corners = tuple(product((0, 1), repeat=self.dimension))
+        indices = np.empty((query.shape[0], len(corners)), dtype=np.intp)
+        weights = np.empty((query.shape[0], len(corners)), dtype=float)
+        lattice_shifts = np.empty(
+            (query.shape[0], len(corners), self.dimension), dtype=np.int64
+        )
+        for corner_index, corner in enumerate(corners):
+            corner_array = np.asarray(corner, dtype=np.int64)
+            raw = lower + corner_array
+            wrapped = np.mod(raw, shape)
+            shifts = np.floor_divide(raw, shape)
+            indices[:, corner_index] = np.ravel_multi_index(
+                tuple(wrapped[:, axis] for axis in range(self.dimension)),
+                self.shape,
+            )
+            component_weights = np.where(
+                corner_array[None, :] == 0,
+                1.0 - fraction,
+                fraction,
+            )
+            weights[:, corner_index] = np.prod(component_weights, axis=1)
+            lattice_shifts[:, corner_index] = shifts
+        return BarycentricStencil(indices, weights, lattice_shifts)
 
 
 class PeriodicTriangleInterpolator:
@@ -248,6 +338,7 @@ class BlochSymmetryAction:
         *,
         bloch_sign: int = -1,
         tolerance: float = 1.0e-8,
+        interpolator=None,
     ):
         if bloch_sign not in {-1, 1}:
             raise ValueError("Bloch sign must be -1 or 1.")
@@ -255,8 +346,12 @@ class BlochSymmetryAction:
         self.real_lattice_vectors = np.asarray(real_lattice_vectors, dtype=float)
         self.bloch_sign = int(bloch_sign)
         self.tolerance = float(tolerance)
-        self.interpolator = PeriodicTriangleInterpolator(
-            self.fractional_vertices, elements, tolerance=tolerance
+        self.interpolator = (
+            PeriodicTriangleInterpolator(
+                self.fractional_vertices, elements, tolerance=tolerance
+            )
+            if interpolator is None
+            else interpolator
         )
         self._stencils: dict[tuple[bytes, bytes], BarycentricStencil] = {}
 
@@ -343,6 +438,31 @@ class BlochSymmetryAction:
         return stencil
 
 
+def build_bloch_symmetry_action(
+    mesh,
+    fractional_vertices,
+    real_lattice_vectors,
+    *,
+    bloch_sign: int,
+    tolerance: float,
+) -> BlochSymmetryAction:
+    family = getattr(mesh, "integration_family", "finite_element")
+    if family == "uniform_grid":
+        interpolator = PeriodicGridInterpolator(mesh, tolerance=tolerance)
+    elif family == "finite_element":
+        interpolator = None
+    else:
+        raise ValueError(f"Unknown spatial integration family {family!r}.")
+    return BlochSymmetryAction(
+        fractional_vertices,
+        mesh.elements,
+        real_lattice_vectors,
+        bloch_sign=bloch_sign,
+        tolerance=tolerance,
+        interpolator=interpolator,
+    )
+
+
 def coefficient_metric_overlap(left, right, metric) -> np.ndarray:
     """Return C_left^dagger S C_right for coefficient-space states."""
     left_array = np.asarray(left, dtype=np.complex128)
@@ -409,9 +529,9 @@ class StateBlochSymmetryProvider:
             state.mesh, state.config.real_lattice_vectors, state.config.lattice_const
         )
         self.fractional_vertices = fractional
-        self.action = BlochSymmetryAction(
+        self.action = build_bloch_symmetry_action(
+            state.mesh,
             fractional,
-            state.mesh.elements,
             state.config.real_lattice_vectors,
             bloch_sign=self.bloch_sign,
             tolerance=context.model.tolerance,
@@ -962,8 +1082,13 @@ class StateBlochSymmetryProvider:
         if maxwell is not None:
             digest.update(maxwell.field_components.value.encode("utf-8"))
             digest.update(maxwell.metric_material.value.encode("utf-8"))
-        digest.update(self.state.inner_product.mode.value.encode("utf-8"))
+        mode = self.state.inner_product.mode
+        digest.update(str(getattr(mode, "value", mode)).encode("utf-8"))
         digest.update(self.state.inner_product.IMPLEMENTATION_VERSION.encode("utf-8"))
+        fingerprint_items = getattr(self.state.mesh, "fingerprint_items", None)
+        if callable(fingerprint_items):
+            for label, value in fingerprint_items():
+                _update_array_digest(digest, label, value)
         digest.update(self.state.bloch_convention.name.encode("utf-8"))
         bias = self.context.model.magnetic_bias_direction
         if bias is not None:

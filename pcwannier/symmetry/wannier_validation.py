@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import product
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -125,6 +126,78 @@ class _TriangleInterpolator:
         return best
 
 
+class _RegularGridInterpolator:
+    """Partial multilinear interpolation on an extended non-periodic grid."""
+
+    def __init__(self, grid, tolerance: float):
+        self.shape = tuple(int(value) for value in grid.shape)
+        self.dimension = len(self.shape)
+        self.tolerance = float(tolerance)
+        fractional = np.asarray(grid.fractional_vertices, dtype=float).reshape(
+            self.shape + (self.dimension,)
+        )
+        self.start = fractional[(0,) * self.dimension]
+        self.step = np.asarray(
+            [
+                1.0 / int(grid.base_shape[axis])
+                for axis in range(self.dimension)
+            ],
+            dtype=float,
+        )
+
+    def stencil(self, points) -> _PartialStencil:
+        query = np.asarray(points, dtype=float)
+        if query.ndim != 2 or query.shape[1] != self.dimension:
+            raise ValueError(
+                f"Interpolation points must have shape (N, {self.dimension})."
+            )
+        scaled = (query - self.start) / self.step
+        rounded = np.rint(scaled)
+        scaled = np.where(
+            np.abs(scaled - rounded) <= self.tolerance / self.step,
+            rounded,
+            scaled,
+        )
+        upper_bound = np.asarray(self.shape, dtype=float) - 1.0
+        valid = np.all(
+            (scaled >= -self.tolerance / self.step)
+            & (scaled <= upper_bound + self.tolerance / self.step),
+            axis=1,
+        )
+        scaled = np.clip(scaled, 0.0, upper_bound)
+        lower = np.floor(scaled).astype(np.int64)
+        fraction = scaled - lower
+        for axis, size in enumerate(self.shape):
+            if size == 1:
+                lower[:, axis] = 0
+                fraction[:, axis] = 0.0
+            else:
+                at_upper = lower[:, axis] >= size - 1
+                lower[at_upper, axis] = size - 2
+                fraction[at_upper, axis] = 1.0
+
+        corners = tuple(product((0, 1), repeat=self.dimension))
+        indices = np.zeros((len(query), len(corners)), dtype=np.intp)
+        weights = np.zeros((len(query), len(corners)), dtype=float)
+        for corner_index, corner in enumerate(corners):
+            corner_array = np.asarray(corner, dtype=np.int64)
+            multi = lower + corner_array
+            for axis, size in enumerate(self.shape):
+                if size == 1:
+                    multi[:, axis] = 0
+            indices[:, corner_index] = np.ravel_multi_index(
+                tuple(multi[:, axis] for axis in range(self.dimension)),
+                self.shape,
+            )
+            component_weights = np.where(
+                corner_array[None, :] == 0,
+                1.0 - fraction,
+                fraction,
+            )
+            weights[:, corner_index] = np.prod(component_weights, axis=1)
+        return _PartialStencil(indices, weights, valid)
+
+
 def validate_wannier_symmetry(
     ctx,
     targets,
@@ -175,18 +248,49 @@ def validate_wannier_symmetry(
         group.tolerance * float(ctx.config.lattice_const),
         np.finfo(float).eps * max(float(np.max(np.abs(mesh.vertices))), 1.0) * 128.0,
     )
-    interpolator = _TriangleInterpolator(mesh.vertices, mesh.elements, physical_tolerance)
+    integration_family = getattr(mesh, "integration_family", "finite_element")
+    if integration_family == "uniform_grid":
+        interpolator = _RegularGridInterpolator(mesh, group.tolerance)
+    elif integration_family == "finite_element":
+        interpolator = _TriangleInterpolator(
+            mesh.vertices,
+            mesh.elements,
+            physical_tolerance,
+        )
+    else:
+        raise ValueError(f"Unknown spatial integration family {integration_family!r}.")
     if state.extended_inner_product is None:
         raise RuntimeError("Extended metric inner product has not been initialized.")
     operation_data = {}
     for operation_index, operation in enumerate(group.operations):
         preimage_fractional = (fractional - operation.translation) @ np.linalg.inv(operation.rotation).T
-        preimage_cartesian = preimage_fractional @ lattice * float(ctx.config.lattice_const)
-        stencil = interpolator.stencil(preimage_cartesian)
-        valid_elements = np.all(stencil.valid_vertices[mesh.elements], axis=1)
-        if not np.any(valid_elements):
-            raise RuntimeError(f"No common interior triangles remain for operation {operation.name}.")
-        inner_product = state.extended_inner_product.restrict_elements(valid_elements)
+        if integration_family == "uniform_grid":
+            stencil = interpolator.stencil(preimage_fractional)
+            if not np.any(stencil.valid_vertices):
+                raise RuntimeError(
+                    f"No common interior grid points remain for operation {operation.name}."
+                )
+            inner_product = state.extended_inner_product.restrict_points(
+                stencil.valid_vertices
+            )
+        else:
+            preimage_cartesian = (
+                preimage_fractional
+                @ lattice
+                * float(ctx.config.lattice_const)
+            )
+            stencil = interpolator.stencil(preimage_cartesian)
+            valid_elements = np.all(
+                stencil.valid_vertices[mesh.elements],
+                axis=1,
+            )
+            if not np.any(valid_elements):
+                raise RuntimeError(
+                    f"No common interior triangles remain for operation {operation.name}."
+                )
+            inner_product = state.extended_inner_product.restrict_elements(
+                valid_elements
+            )
         field_matrix = cartesian_field_matrix(
             operation,
             lattice,

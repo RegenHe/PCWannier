@@ -8,7 +8,7 @@ import re
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ..conventions import BlochConvention
+from ..conventions import BlochConvention, BlochFieldRepresentation
 from ..config import EnergyWindow, IncarConfig
 from ..data import InputBundle, Mesh, RawData
 from ..maxwell import FieldComponents
@@ -315,6 +315,7 @@ def load_comsol_input(config: IncarConfig) -> InputBundle:
         band_indices=band_indices,
         inner_band_indices=inner_band_indices,
         energy_matrix=energy_matrix,
+        field_representation=BlochFieldRepresentation.FULL_BLOCH,
         symmetry=config.symmetry_context,
     )
 

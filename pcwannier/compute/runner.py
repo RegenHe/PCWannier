@@ -136,11 +136,23 @@ def _prepare_state(
 def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
     config = bundle.config
     resolved_backend = resolve_backend(backend or config.compute_backend)
+    integration_family = getattr(
+        bundle.mesh,
+        "integration_family",
+        "finite_element",
+    )
+    integration_name = (
+        "uniform"
+        if integration_family == "uniform_grid"
+        else config.integration_mode
+    )
     LOGGER.info(
-        "Calculation setup: threads=%s backend=%s integration=%s blas=%s k_shape=%s mesh_vertices=%s mesh_triangles=%s",
+        "Calculation setup: threads=%s backend=%s integration=%s discretization=%s "
+        "blas=%s k_shape=%s spatial_points=%s spatial_elements=%s",
         threads,
         resolved_backend,
-        config.integration_mode,
+        integration_name,
+        integration_family,
         threadpool_summary(),
         bundle.fields.shape,
         bundle.mesh.vertices.shape[0],

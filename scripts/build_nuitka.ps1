@@ -46,6 +46,7 @@ $nuitkaOptions = @(
     "--include-package=spglib",
     "--include-package-data=spglib",
     "--include-package=spgrep",
+    "--include-package=h5py",
     "--output-dir=$OutDir",
     "--output-filename=$Name.exe"
 )

@@ -155,6 +155,25 @@ class MetricInnerProduct:
         )
 
 
+def create_metric_inner_product(
+    domain,
+    metric: np.ndarray,
+    *,
+    mode: str | IntegrationMode = IntegrationMode.NODAL,
+    backend: str | None = None,
+):
+    """Create the metric inner product selected by the spatial discretization."""
+
+    family = getattr(domain, "integration_family", "finite_element")
+    if family == "uniform_grid":
+        from .uniform_grid import UniformGridInnerProduct
+
+        return UniformGridInnerProduct(domain, metric, backend=backend)
+    if family != "finite_element":
+        raise ValueError(f"Unknown spatial integration family {family!r}.")
+    return MetricInnerProduct(domain, metric, mode=mode, backend=backend)
+
+
 @contextmanager
 def numba_parallel_policy(enabled: bool):
     token = _NUMBA_PARALLEL_ALLOWED.set(bool(enabled))

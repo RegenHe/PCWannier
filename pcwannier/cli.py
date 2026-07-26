@@ -32,6 +32,7 @@ def parse_args(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("-i", "--input", help="Input incar file path")
     mode.add_argument(
+        "-g",
         "--group",
         metavar="NAME",
         help="Print a finite-group character table and exit, for example: --group c4v",
@@ -52,6 +53,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--out", default=None, help="Output directory override")
     parser.add_argument(
+        "-s",
         "--analyze-symmetry",
         action="store_true",
         help="Analyze outer-window Bloch symmetry, write S/D caches, and exit",

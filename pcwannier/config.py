@@ -31,9 +31,20 @@ class IncarConfig:
     dataset_file: str | bool | None = None
     dataset_order: list[str] = field(default_factory=lambda: ["k1", "k2", "E"])
     field_components: str = "Ez"
+    primary_field: str | None = None
     metric_file: str | bool | None = None
     mesh_file: str | bool | None = None
     E_file: str | bool = "./E.txt"
+    longitudinal_field_file: str | bool = False
+    longitudinal_energy_file: str | bool = False
+    pseudoscalar_file: str | bool = False
+    pseudoscalar_metric_file: str | bool = False
+    longitudinal_S_file: str = "./S_L.txt"
+    longitudinal_D_file: str = "./D_L.txt"
+    pseudoscalar_S_file: str = "./S_phi.txt"
+    pseudoscalar_D_file: str = "./D_phi.txt"
+    gamma_zero_regularization: bool = False
+    gamma_zero_mode_tolerance: float = 1.0e-10
     E_is_real: bool = True
     compute_backend: str = "python"
     integration_mode: str = "nodal"
@@ -55,6 +66,7 @@ class IncarConfig:
     wannier_targets: list[dict[str, Any]] | None = None
     representation_analysis: list[dict[str, Any]] | None = None
     symmetry_resolved_path: Path | None = field(default=None, init=False)
+    symmetry_resolved_reference: str | None = field(default=None, init=False)
     disentangle_max_iter: int | None = None
     disentangle_err_diff: float | None = None
     disentangle_projector_tolerance: float | None = None
@@ -188,6 +200,7 @@ _INTERNAL_CONFIG_FIELDS = {
     "wb",
     "band_calc_num",
     "symmetry_resolved_path",
+    "symmetry_resolved_reference",
     "symmetry_context",
     "maxwell_problem",
     "_preprocessed",
@@ -367,6 +380,11 @@ class IncarParser:
 
         source = resolve_source(cfg.dataset_type)
         source.validate_field_components(cfg.field_components)
+        if cfg.field_components == "full_vector" and self.mode != "bloch_symmetry":
+            raise NotImplementedError(
+                "full_vector fields currently support --analyze-symmetry only; "
+                "3D Wannier construction is not implemented."
+            )
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
             from .symmetry import (
@@ -382,19 +400,29 @@ class IncarParser:
                 cartesian_field_matrix,
                 compose_symmetry_model,
                 load_symmetry,
+                load_symmetry_from_spglib,
                 resolve_symmetry_file,
             )
 
             requested_symmetry_path = cfg.input_path(cfg.symmetry_file)
             if requested_symmetry_path is None:
                 raise ValueError("symmetry_file is enabled but no path was supplied.")
-            symmetry_path = resolve_symmetry_file(str(cfg.symmetry_file), cfg.base_dir)
-            cfg.symmetry_resolved_path = symmetry_path
-            model = load_symmetry(
-                symmetry_path,
-                tolerance=cfg.symmetry_tolerance,
-                algebra_tolerance=cfg.symmetry_algebra_tolerance,
-            )
+            try:
+                symmetry_path = resolve_symmetry_file(str(cfg.symmetry_file), cfg.base_dir)
+            except FileNotFoundError:
+                model = load_symmetry_from_spglib(
+                    str(cfg.symmetry_file),
+                    tolerance=cfg.symmetry_tolerance,
+                    algebra_tolerance=cfg.symmetry_algebra_tolerance,
+                )
+                cfg.symmetry_resolved_reference = f"spglib:{model.group_definition.name}"
+            else:
+                cfg.symmetry_resolved_path = symmetry_path
+                model = load_symmetry(
+                    symmetry_path,
+                    tolerance=cfg.symmetry_tolerance,
+                    algebra_tolerance=cfg.symmetry_algebra_tolerance,
+                )
             if cfg.magnetic_bias_direction is not None:
                 model = apply_magnetic_bias_to_model(
                     model,
@@ -502,12 +530,21 @@ class IncarParser:
             "dataset_type",
             "compute_backend",
             "integration_mode",
-                "field_components",
+            "field_components",
+            "primary_field",
             "symmetry_file",
             "symmetry_output_basis",
             "dataset_file",
             "left_dataset_file",
-                "metric_file",
+            "metric_file",
+            "longitudinal_field_file",
+            "longitudinal_energy_file",
+            "pseudoscalar_file",
+            "pseudoscalar_metric_file",
+            "longitudinal_S_file",
+            "longitudinal_D_file",
+            "pseudoscalar_S_file",
+            "pseudoscalar_D_file",
             "S_file",
             "D_file",
             "U_file",
@@ -552,6 +589,7 @@ class IncarParser:
             "representation_degeneracy_relative",
             "representation_leakage_tolerance",
             "projection_rank_tolerance",
+            "gamma_zero_mode_tolerance",
         }:
             return float(evaluate_math_expression(value))
         if key in {
@@ -627,6 +665,7 @@ class IncarParser:
             "E_is_real",
             "symmetry_constrained",
             "symmetry_validate_wannier",
+            "gamma_zero_regularization",
         }:
             normalized = value.strip().lower()
             if normalized not in {"true", "false"}:
@@ -1023,6 +1062,8 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         or cfg.representation_leakage_tolerance <= 0.0
     ):
         raise ValueError("representation_leakage_tolerance must be positive and finite.")
+    if not np.isfinite(cfg.gamma_zero_mode_tolerance) or cfg.gamma_zero_mode_tolerance < 0.0:
+        raise ValueError("gamma_zero_mode_tolerance must be finite and non-negative.")
     if cfg.symmetry_max_iter <= 0:
         raise ValueError("symmetry_max_iter must be positive.")
     if not np.isfinite(cfg.symmetry_svd_tolerance) or cfg.symmetry_svd_tolerance <= 0.0:
@@ -1041,8 +1082,8 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
 
     components = FieldComponents.parse(cfg.field_components)
     cfg.field_components = components.value
-    if components != FieldComponents.FULL_VECTOR:
-        cfg.maxwell_problem = MaxwellProblem.for_components(components)
+    cfg.maxwell_problem = MaxwellProblem.for_components(components, cfg.primary_field)
+    cfg.primary_field = cfg.maxwell_problem.primary_field.value
     if cfg.real_lattice_vectors is None:
         return cfg
     cfg.kdim = len(cfg.real_lattice_vectors)

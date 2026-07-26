@@ -29,6 +29,19 @@ class PrimaryField(str, Enum):
     ELECTRIC = "electric"
     MAGNETIC = "magnetic"
 
+    @classmethod
+    def parse(cls, value: str | PrimaryField) -> PrimaryField:
+        if isinstance(value, cls):
+            return value
+        normalized = str(value).strip().lower()
+        try:
+            return cls(normalized)
+        except ValueError as exc:
+            allowed = ", ".join(item.value for item in cls)
+            raise ValueError(
+                f"primary_field must be one of {allowed}; got {value!r}."
+            ) from exc
+
 
 class MaterialKind(str, Enum):
     EPSILON = "epsilon"
@@ -37,6 +50,7 @@ class MaterialKind(str, Enum):
 
 class FieldKind(str, Enum):
     SCALAR = "scalar"
+    PSEUDOSCALAR = "pseudoscalar"
     ELECTRIC_Z = "electric_z"
     MAGNETIC_AXIAL_Z = "magnetic_axial_z"
     ELECTRIC_POLAR_VECTOR = "electric_polar_vector"
@@ -52,9 +66,15 @@ class MaxwellProblem:
     symmetry_field_kind: FieldKind
 
     @classmethod
-    def for_components(cls, value: str | FieldComponents) -> MaxwellProblem:
+    def for_components(
+        cls,
+        value: str | FieldComponents,
+        primary_field: str | PrimaryField | None = None,
+    ) -> MaxwellProblem:
         components = FieldComponents.parse(value)
         if components == FieldComponents.EZ:
+            if primary_field is not None and PrimaryField.parse(primary_field) is not PrimaryField.ELECTRIC:
+                raise ValueError("field_components=Ez requires primary_field=electric.")
             return cls(
                 components,
                 PrimaryField.ELECTRIC,
@@ -63,6 +83,8 @@ class MaxwellProblem:
                 FieldKind.ELECTRIC_Z,
             )
         if components == FieldComponents.HZ:
+            if primary_field is not None and PrimaryField.parse(primary_field) is not PrimaryField.MAGNETIC:
+                raise ValueError("field_components=Hz requires primary_field=magnetic.")
             return cls(
                 components,
                 PrimaryField.MAGNETIC,
@@ -70,18 +92,31 @@ class MaxwellProblem:
                 MaterialKind.EPSILON,
                 FieldKind.MAGNETIC_AXIAL_Z,
             )
-        raise NotImplementedError(
-            "field_components=full_vector is not implemented by the current scalar field pipeline."
+        if primary_field is None:
+            raise ValueError("field_components=full_vector requires primary_field=electric or magnetic.")
+        primary = PrimaryField.parse(primary_field)
+        if primary is PrimaryField.ELECTRIC:
+            return cls(
+                components,
+                primary,
+                MaterialKind.EPSILON,
+                MaterialKind.MU,
+                FieldKind.ELECTRIC_POLAR_VECTOR,
+            )
+        return cls(
+            components,
+            primary,
+            MaterialKind.MU,
+            MaterialKind.EPSILON,
+            FieldKind.MAGNETIC_AXIAL_VECTOR,
         )
 
     def apply_time_reversal(self, values):
         """Apply spinless Maxwell time reversal to the configured primary field."""
 
         array = np.asarray(values)
-        if self.field_components == FieldComponents.EZ:
+        if self.primary_field is PrimaryField.ELECTRIC:
             return np.conj(array)
-        if self.field_components == FieldComponents.HZ:
+        if self.primary_field is PrimaryField.MAGNETIC:
             return -np.conj(array)
-        raise NotImplementedError(
-            "Time reversal for field_components=full_vector is not implemented."
-        )
+        raise RuntimeError("Unknown Maxwell primary field.")

@@ -9,6 +9,8 @@ from .backend import resolve_backend
 if TYPE_CHECKING:
     from ..data import PeriodicGrid
 
+from ..data import periodic_axis_coordinates
+
 
 def _cell_volume(
     *,
@@ -106,10 +108,7 @@ def periodic_grid_coordinates(
         )
     if abs(float(np.linalg.det(lattice))) <= np.finfo(float).tiny:
         raise ValueError("lattice_vectors must define a positive cell volume.")
-    axes = [
-        np.arange(size, dtype=np.float64) / size - 0.5
-        for size in grid_shape
-    ]
+    axes = [periodic_axis_coordinates(size) for size in grid_shape]
     fractional = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
     return fractional @ lattice
 
@@ -175,9 +174,11 @@ class UniformGridInnerProduct:
         del chunk_size
         left_matrix = _to_field_rows(left, self.grid.point_count, "left")
         right_matrix = _to_field_rows(right, self.grid.point_count, "right")
+        if left_matrix.shape[2] != right_matrix.shape[2]:
+            raise ValueError("left and right fields have different component counts.")
         indices = self._point_indices
-        left_selected = left_matrix[:, indices]
-        right_selected = right_matrix[:, indices]
+        left_selected = left_matrix[:, indices, :]
+        right_selected = right_matrix[:, indices, :]
         if phase_wavevector is not None:
             wavevector = np.asarray(
                 phase_wavevector, dtype=np.float64
@@ -190,12 +191,15 @@ class UniformGridInnerProduct:
                     f"phase_wavevector must contain {self.grid.dimension} finite components."
                 )
             phase = np.exp(1j * (self.grid.vertices[indices] @ wavevector))
-            right_selected = right_selected * phase[None, :]
-        weighted_right = right_selected * self.metric[indices][None, :]
-        if conjugate_left:
-            result = left_selected.conj() @ weighted_right.T
-        else:
-            result = left_selected @ weighted_right.T
+            right_selected = right_selected * phase[None, :, None]
+        weighted_right = right_selected * self.metric[indices][None, :, None]
+        left_values = left_selected.conj() if conjugate_left else left_selected
+        result = np.einsum(
+            "mpc,npc->mn",
+            left_values,
+            weighted_right,
+            optimize=True,
+        )
         return np.asarray(result * self.point_weight, dtype=np.complex128)
 
     def norms(
@@ -217,9 +221,9 @@ class UniformGridInnerProduct:
             raise FloatingPointError(
                 f"{name} requires a real metric; imaginary residual={imag_residual:.6g}."
             )
-        integrand = metric.real[:, None] * np.abs(matrix[indices]) ** 2
+        integrand = metric.real[:, None, None] * np.abs(matrix[indices]) ** 2
         result = (
-            np.sum(integrand, axis=0, dtype=np.float64) * self.point_weight
+            np.sum(integrand, axis=(0, 1), dtype=np.float64) * self.point_weight
         )
         if not np.all(np.isfinite(result)):
             raise FloatingPointError(f"{name} contains non-finite values.")
@@ -231,9 +235,16 @@ class UniformGridInnerProduct:
         *,
         name: str = "metric field norm",
     ) -> float:
-        return float(
-            self.norms(np.asarray(field).reshape(-1, 1), name=name)[0]
-        )
+        array = np.asarray(field)
+        if array.ndim == 1:
+            values = array.reshape(self.grid.point_count, 1, 1)
+        elif array.ndim == 2 and array.shape[0] == self.grid.point_count:
+            values = array[:, :, None]
+        else:
+            raise ValueError(
+                "field must have shape (points,) or (points, components)."
+            )
+        return float(self.norms(values, name=name)[0])
 
     def restrict_points(self, selector) -> UniformGridInnerProduct:
         local = np.asarray(selector)
@@ -267,9 +278,12 @@ class UniformGridInnerProduct:
 def _to_field_rows(values, point_count: int, name: str) -> np.ndarray:
     array = np.asarray(values)
     if array.ndim == 1:
-        result = array.reshape(1, -1)
+        result = array.reshape(1, -1, 1)
     elif array.ndim == 2:
-        result = array if array.shape[1] == point_count else array.T
+        scalar = array if array.shape[1] == point_count else array.T
+        result = scalar[:, :, None]
+    elif array.ndim == 3:
+        result = array if array.shape[1] == point_count else np.swapaxes(array, 0, 1)
     else:
         raise ValueError(f"{name} has invalid shape {array.shape}.")
     if result.shape[1] != point_count or not np.all(np.isfinite(result)):
@@ -282,9 +296,12 @@ def _to_field_rows(values, point_count: int, name: str) -> np.ndarray:
 def _to_field_columns(values, point_count: int, name: str) -> np.ndarray:
     array = np.asarray(values)
     if array.ndim == 1:
-        result = array.reshape(-1, 1)
+        result = array.reshape(-1, 1, 1)
     elif array.ndim == 2:
-        result = array if array.shape[0] == point_count else array.T
+        scalar = array if array.shape[0] == point_count else array.T
+        result = scalar[:, None, :]
+    elif array.ndim == 3:
+        result = array if array.shape[0] == point_count else np.swapaxes(array, 0, 1)
     else:
         raise ValueError(f"{name} has invalid shape {array.shape}.")
     if result.shape[0] != point_count or not np.all(np.isfinite(result)):

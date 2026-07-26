@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .group import LittleGroupElement, SpaceGroup, SpaceGroupOperation, little_group
+from .field_action import cartesian_field_matrix
+from .group import (
+    LittleGroupElement,
+    SpaceGroup,
+    SpaceGroupOperation,
+    little_group,
+    periodic_difference,
+)
 from .specs import (
     DegeneracyTolerance,
+    FieldKind,
     RepresentationPointSpec,
 )
 from .twisted import TwistedRepresentation, build_twisted_representation
@@ -170,6 +178,143 @@ class SymmetryAnalysisResult:
         if len(matches) != 1:
             raise RuntimeError(f"Target compatibility point name {point_name!r} is ambiguous.")
         return matches[0]
+
+
+@dataclass(frozen=True)
+class GammaZeroRegularizationAnalysis:
+    point_name: str
+    transverse_band_indices: tuple[int, ...]
+    scalar_zero_band_indices: tuple[int, ...]
+    sewing_matrices: dict[str, np.ndarray]
+    unitary_characters: dict[str, complex]
+    decomposition: IrrepDecomposition | None
+    unitarity_error: float
+    twisted_composition_residual: float
+    note: str
+
+
+def regularize_gamma_zero_modes(
+    physical: BlochSymmetryAnalysisResult,
+    context: SymmetryContext,
+    scalar_zero_band_indices,
+    real_lattice_vectors,
+    *,
+    energy_tolerance: float,
+) -> tuple[BlochSymmetryAnalysisResult, GammaZeroRegularizationAnalysis]:
+    """Replace the singular transverse Gamma label by the constant axial T+L space."""
+
+    if not np.isfinite(energy_tolerance) or energy_tolerance < 0.0:
+        raise ValueError("Gamma zero-mode tolerance must be finite and non-negative.")
+    gamma_points = tuple(
+        point
+        for point in physical.points
+        if np.max(
+            np.abs(periodic_difference(point.requested_k_fractional, np.zeros(context.model.dimension)))
+        ) <= context.model.tolerance
+    )
+    if len(gamma_points) != 1:
+        raise ValueError(
+            "gamma_zero_regularization requires exactly one Gamma representation-analysis point."
+        )
+    gamma = gamma_points[0]
+    zero_blocks = tuple(
+        block
+        for block in gamma.degenerate_blocks
+        if block.energies
+        and max(abs(complex(value)) for value in block.energies) <= energy_tolerance
+    )
+    transverse_bands = tuple(
+        band for block in zero_blocks for band in block.band_indices
+    )
+    scalar_bands = tuple(int(value) for value in scalar_zero_band_indices)
+    if len(transverse_bands) != 2:
+        raise ValueError(
+            "Gamma zero regularization requires exactly two physical transverse zero modes; "
+            f"found bands {tuple(value + 1 for value in transverse_bands)}."
+        )
+    if len(scalar_bands) != 1:
+        raise ValueError(
+            "Gamma zero regularization requires exactly one auxiliary scalar zero mode; "
+            f"found bands {tuple(value + 1 for value in scalar_bands)}."
+        )
+    resolved = gamma.resolved_little_group
+    if resolved is None:
+        raise ValueError("Gamma zero regularization requires a resolved little group.")
+    operation_indices = gamma.little_group_operation_indices
+    group = context.model.group
+    lattice = np.asarray(real_lattice_vectors, dtype=float)
+    matrices_by_operation = {}
+    matrices = {}
+    for operation_index in operation_indices:
+        operation = group.operations[operation_index]
+        matrix = cartesian_field_matrix(
+            operation,
+            lattice,
+            FieldKind.MAGNETIC_AXIAL_VECTOR,
+            context.model.tolerance,
+        )
+        if operation.antiunitary:
+            matrix = -matrix
+        matrix = np.asarray(matrix, dtype=np.complex128)
+        matrices_by_operation[operation_index] = matrix
+        matrices[_operation_name(group, operation_index)] = matrix
+    twisted = build_twisted_representation(
+        resolved,
+        operation_indices,
+        tuple(matrices_by_operation[index] for index in operation_indices),
+    )
+    unitary_characters = {
+        _operation_name(group, index): complex(np.trace(matrices_by_operation[index]))
+        for index in operation_indices
+        if not group.operations[index].antiunitary
+    }
+    decomposition = (
+        None
+        if any(resolved.factor_system.antiunitary_flags)
+        else decompose_little_group_characters(resolved, unitary_characters)
+    )
+    identity = np.eye(3, dtype=np.complex128)
+    unitarity = max(
+        float(np.linalg.norm(matrix.conj().T @ matrix - identity, ord="fro"))
+        for matrix in matrices.values()
+    )
+    reason = (
+        "Gamma zero-frequency transverse subspace is direction dependent; "
+        "the ordinary irrep label is intentionally suppressed."
+    )
+    zero_band_blocks = {block.band_indices for block in zero_blocks}
+    replaced_blocks = tuple(
+        replace(block, decomposition=None, irrep_unavailable_reason=reason)
+        if block.band_indices in zero_band_blocks
+        else block
+        for block in gamma.degenerate_blocks
+    )
+    replaced_gamma = replace(
+        gamma,
+        degenerate_blocks=replaced_blocks,
+        physical_decomposition=None,
+    )
+    replaced_points = tuple(
+        replaced_gamma if point is gamma else point for point in physical.points
+    )
+    note = (
+        "The reported representation belongs to the three-dimensional constant axial "
+        "T+L space, not to the two physical transverse bands alone."
+    )
+    return (
+        BlochSymmetryAnalysisResult(replaced_points),
+        GammaZeroRegularizationAnalysis(
+            gamma.name,
+            transverse_bands,
+            scalar_bands,
+            matrices,
+            unitary_characters,
+            decomposition,
+            unitarity,
+            twisted.product_residual,
+            note,
+        ),
+    )
 
 
 def group_degenerate_bands(
@@ -658,16 +803,22 @@ def _analyze_bloch_point(
     outer_candidates = _candidate_excluded_bands(
         energy_line, available, bands, point.degeneracy_tolerance
     )
-    if diagnostics.leakage > leakage_tolerance or outer_unitarity > leakage_tolerance:
+    if diagnostics.leakage > leakage_tolerance:
         LOGGER.warning(
-            "Bloch symmetry subspace at %s is not closed: bands(1-based)=%s leakage=%.6g "
-            "outer_unitarity=%.6g coupled_outer_bands(1-based)=%s "
-            "candidate_excluded_bands(1-based)=%s",
+            "Selected Bloch symmetry subspace at %s is not closed: "
+            "bands(1-based)=%s leakage=%.6g coupled_outer_bands(1-based)=%s",
             point.name,
             tuple(band + 1 for band in bands),
             diagnostics.leakage,
-            outer_unitarity,
             tuple(band + 1 for block in block_results for band in block.coupled_outer_bands),
+        )
+    if outer_unitarity > leakage_tolerance:
+        LOGGER.warning(
+            "Outer Bloch window at %s is not closed: outer_bands(1-based)=%s "
+            "unitarity=%.6g candidate_excluded_bands(1-based)=%s",
+            point.name,
+            tuple(band + 1 for band in available),
+            outer_unitarity,
             tuple(band + 1 for band in outer_candidates),
         )
     return BlochSymmetryPointAnalysis(

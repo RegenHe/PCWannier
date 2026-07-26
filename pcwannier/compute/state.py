@@ -76,6 +76,11 @@ class StateCollection:
             block = np.asarray(self.fields[idx], dtype=np.complex128)
             if block.ndim == 1:
                 block = block.reshape(1, -1)
+            if block.ndim not in {2, 3}:
+                raise ValueError(
+                    f"Field block at k={idx} must have shape (bands, points[, components]); "
+                    f"got {block.shape}."
+                )
             self.fields[idx] = block
 
     def k_indices(self):
@@ -119,7 +124,7 @@ class StateCollection:
             block = block.reshape(1, -1)
         nv = self.mesh.vertices.shape[0]
         if block.shape[1] != nv and block.shape[0] == nv:
-            block = block.T
+            block = block.T if block.ndim == 2 else np.swapaxes(block, 0, 1)
         if block.shape[1] != nv:
             raise ValueError(f"Field block at k=({i}, {j}, {k}) has invalid shape {block.shape}.")
         self.fields[i, j, k] = block
@@ -283,7 +288,11 @@ class StateCollection:
             return
         for i, j, k in self.k_indices():
             phase = self.get_phase(i, j, k)
-            self.fields[i, j, k] = self.get_block(i, j, k) * np.conj(phase)[None, :]
+            block = self.get_block(i, j, k)
+            multiplier = np.conj(phase)[None, :]
+            if block.ndim == 3:
+                multiplier = multiplier[:, :, None]
+            self.fields[i, j, k] = block * multiplier
         self.is_bloch = True
 
     @property
@@ -319,7 +328,10 @@ class StateCollection:
         block = self.get_block(i, j, k)
         if not self.is_bloch:
             return block
-        return block * self.get_phase(i, j, k)[None, :]
+        phase = self.get_phase(i, j, k)[None, :]
+        if block.ndim == 3:
+            phase = phase[:, :, None]
+        return block * phase
 
     def get_extention_phase(self, i: int, j: int, k: int) -> np.ndarray:
         if self.extention_mesh is None:

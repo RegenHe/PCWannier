@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import spglib
 import yaml
 
 from .definition import (
@@ -70,6 +71,124 @@ def resolve_symmetry_file(path: str | Path, base_dir: str | Path) -> Path:
     raise FileNotFoundError(
         f"Space-group file {explicit} does not exist, and {requested.name!r} was not found "
         "in the built-in space_groups library."
+    )
+
+
+@lru_cache(maxsize=None)
+def _hall_number_for_symbol(symbol: str) -> int:
+    requested = str(symbol).strip()
+    if requested.lower().startswith("hall:"):
+        try:
+            hall_number = int(requested.split(":", 1)[1])
+        except ValueError as exc:
+            raise ValueError(f"Invalid spglib Hall reference {requested!r}.") from exc
+        if spglib.get_spacegroup_type(hall_number) is None:
+            raise ValueError(f"Unknown spglib Hall number {hall_number}.")
+        return hall_number
+
+    normalized = requested.replace(" ", "").lower()
+    matches = []
+    for hall_number in range(1, 531):
+        group_type = spglib.get_spacegroup_type(hall_number)
+        if group_type is None:
+            continue
+        names = {
+            str(group_type.international_short).replace(" ", "").lower(),
+            str(group_type.international).replace(" ", "").lower(),
+            str(group_type.hall_symbol).replace(" ", "").lower(),
+        }
+        if normalized in names:
+            matches.append(hall_number)
+    if not matches:
+        raise FileNotFoundError(
+            f"{requested!r} is neither a symmetry YAML file nor a recognized spglib space-group symbol."
+        )
+    settings = {
+        spglib.get_spacegroup_type(value).international_short for value in matches
+    }
+    if len(matches) != 1 and len(settings) != 1:
+        raise ValueError(
+            f"Space-group symbol {requested!r} is setting-dependent; use hall:<number>."
+        )
+    # Prefer the first standard Hall setting. Pm-3m resolves uniquely to Hall 517.
+    return int(matches[0])
+
+
+def load_space_group_from_spglib(
+    symbol: str,
+    *,
+    tolerance: float = 1.0e-8,
+    algebra_tolerance: float = 1.0e-10,
+    finite_groups: FiniteGroupLibrary | None = None,
+) -> SpaceGroupDefinition:
+    """Load a finite set of Seitz representatives from spglib's database."""
+
+    hall_number = _hall_number_for_symbol(symbol)
+    group_type = spglib.get_spacegroup_type(hall_number)
+    symmetry = spglib.get_symmetry_from_database(hall_number)
+    if group_type is None or symmetry is None:
+        raise ValueError(f"spglib could not load Hall number {hall_number}.")
+    rotations = np.asarray(symmetry["rotations"], dtype=np.int64)
+    translations = np.mod(np.asarray(symmetry["translations"], dtype=float), 1.0)
+    translations[np.abs(translations - 1.0) <= tolerance] = 0.0
+    if rotations.ndim != 3 or rotations.shape[1:] != (3, 3):
+        raise ValueError("spglib returned invalid space-group rotations.")
+    if translations.shape != (rotations.shape[0], 3):
+        raise ValueError("spglib returned invalid space-group translations.")
+
+    order = sorted(
+        range(len(rotations)),
+        key=lambda index: (
+            0 if np.array_equal(rotations[index], np.eye(3, dtype=np.int64))
+            and np.allclose(translations[index], 0.0, rtol=0.0, atol=tolerance) else 1,
+            tuple(int(value) for value in rotations[index].reshape(-1)),
+            tuple(float(value) for value in np.round(translations[index], 12)),
+        ),
+    )
+    operations = []
+    for output_index, source_index in enumerate(order):
+        identity = (
+            np.array_equal(rotations[source_index], np.eye(3, dtype=np.int64))
+            and np.allclose(translations[source_index], 0.0, rtol=0.0, atol=tolerance)
+        )
+        operations.append(
+            SpaceGroupOperation(
+                rotations[source_index],
+                translations[source_index],
+                "E" if identity else f"g{output_index:02d}",
+            )
+        )
+    group = SpaceGroup(tuple(operations), tolerance)
+    return SpaceGroupDefinition(
+        str(group_type.international_short),
+        3,
+        float(tolerance),
+        group,
+        finite_groups or load_builtin_finite_groups(),
+        float(algebra_tolerance),
+    )
+
+
+def load_symmetry_from_spglib(
+    symbol: str,
+    *,
+    tolerance: float = 1.0e-8,
+    algebra_tolerance: float = 1.0e-10,
+) -> SymmetryModel:
+    definition = load_space_group_from_spglib(
+        symbol,
+        tolerance=tolerance,
+        algebra_tolerance=algebra_tolerance,
+    )
+    return SymmetryModel(
+        definition.dimension,
+        definition.tolerance,
+        definition.group,
+        (),
+        None,
+        None,
+        definition,
+        algebra_tolerance=definition.algebra_tolerance,
     )
 
 

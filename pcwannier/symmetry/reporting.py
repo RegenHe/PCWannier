@@ -6,11 +6,31 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .analysis import (
         BlochSymmetryAnalysisResult,
+        GammaZeroRegularizationAnalysis,
         SymmetryAnalysisResult,
         TargetCompatibilityAnalysis,
     )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def log_gamma_zero_regularization(result: GammaZeroRegularizationAnalysis) -> None:
+    LOGGER.info(
+        "Gamma T+L regularization %s: physical_T_bands(1-based)=%s "
+        "scalar_zero_bands(1-based)=%s irrep=%s unitarity=%.6g "
+        "twisted_composition=%.6g note=%s",
+        result.point_name,
+        tuple(value + 1 for value in result.transverse_band_indices),
+        tuple(value + 1 for value in result.scalar_zero_band_indices),
+        (
+            "unavailable"
+            if result.decomposition is None
+            else _format_irrep_decomposition(result.decomposition)
+        ),
+        result.unitarity_error,
+        result.twisted_composition_residual,
+        result.note,
+    )
 
 
 def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:

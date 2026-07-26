@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 import copy
 from itertools import product
 
@@ -10,7 +10,7 @@ from scipy.spatial import cKDTree
 
 from .config import IncarConfig
 from .conventions import BlochConvention, BlochFieldRepresentation
-from .maxwell import MaxwellProblem
+from .maxwell import FieldKind, MaxwellProblem
 
 if TYPE_CHECKING:
     from .symmetry import (
@@ -19,9 +19,32 @@ if TYPE_CHECKING:
         SymmetryContext,
         SymmetryDisentanglementResult,
         SymmetryGaugeResult,
+        GammaZeroRegularizationAnalysis,
         SymmetryLocalizationResult,
         SewingMatrixCacheEntry,
     )
+
+
+def periodic_axis_coordinates(
+    size: int,
+    *,
+    sample_offset: float = 0.0,
+) -> np.ndarray:
+    """Return one half-open periodic fractional grid axis.
+
+    A single-sample direction is geometrically degenerate and is represented
+    at the cell center rather than at the otherwise equivalent ``-1/2`` edge.
+    """
+
+    count = int(size)
+    offset = float(sample_offset)
+    if count <= 0:
+        raise ValueError("Periodic grid axis size must be positive.")
+    if not np.isfinite(offset):
+        raise ValueError("Periodic grid sample offset must be finite.")
+    if count == 1:
+        return np.zeros(1, dtype=float)
+    return (np.arange(count, dtype=float) + offset) / count - 0.5
 
 
 class Mesh:
@@ -267,7 +290,10 @@ class PeriodicGrid:
 
     def _base_fractional_vertices(self) -> np.ndarray:
         axes = [
-            (np.arange(size, dtype=float) + self.sample_offset[axis]) / size - 0.5
+            periodic_axis_coordinates(
+                size,
+                sample_offset=self.sample_offset[axis],
+            )
             for axis, size in enumerate(self.base_shape)
         ]
         return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, self.dimension)
@@ -363,11 +389,14 @@ class PeriodicGrid:
             base_size = base_shape[axis]
             tile = np.arange(size, dtype=np.int64) // base_size
             local = np.arange(size, dtype=np.int64) % base_size
+            base_axis = periodic_axis_coordinates(
+                base_size,
+                sample_offset=self.sample_offset[axis],
+            )
             axes.append(
                 tile
                 - center_tiles[axis]
-                + (local + self.sample_offset[axis]) / base_size
-                - 0.5
+                + base_axis[local]
             )
         fractional = np.stack(
             np.meshgrid(*axes, indexing="ij"), axis=-1
@@ -430,6 +459,11 @@ class InputBundle:
     energy_matrix: np.ndarray
     field_representation: BlochFieldRepresentation = BlochFieldRepresentation.FULL_BLOCH
     symmetry: SymmetryContext | None = None
+    analysis_field_kind: FieldKind | None = None
+    zero_modes: np.ndarray | None = None
+    auxiliary_bundle_loaders: dict[str, Callable[[], "InputBundle"]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -521,3 +555,17 @@ class BlochSymmetryRunResult:
     analysis: BlochSymmetryAnalysisResult
     sewing_matrices: tuple[SewingMatrixCacheEntry, ...]
     sewing_calculation_fingerprint: str
+    auxiliary_channels: dict[str, "BlochSymmetryChannelResult"] = field(default_factory=dict)
+    gamma_zero_regularization: "GammaZeroRegularizationAnalysis | None" = None
+    differential_diagnostics: "VectorFieldDifferentialDiagnostics | None" = None
+
+
+@dataclass
+class BlochSymmetryChannelResult:
+    field_kind: FieldKind
+    orthogonality_report: np.ndarray
+    S: np.ndarray
+    analysis: BlochSymmetryAnalysisResult
+    sewing_matrices: tuple[SewingMatrixCacheEntry, ...]
+    sewing_calculation_fingerprint: str
+    differential_diagnostics: "VectorFieldDifferentialDiagnostics | None" = None

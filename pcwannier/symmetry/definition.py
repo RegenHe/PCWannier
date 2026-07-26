@@ -9,6 +9,7 @@ import numpy as np
 from .group import SpaceGroup, little_group, reduce_fractional
 from ..conventions import BlochConvention
 from .crystallography import (
+    CrystallographicEmbedding,
     PointGroupIdentification,
     enumerate_little_group_representations,
     identify_point_group,
@@ -197,10 +198,7 @@ class FiniteGroupLibrary:
             if definition.point_group_symbol == point_group.symbol
         )
         if not definitions:
-            raise ValueError(
-                f"spglib identified point group {point_group.symbol!r}, but no matching "
-                "finite-group label catalog is installed."
-            )
+            return _generated_identification(concrete, point_group)
         matches = []
         for definition in definitions:
             if definition.table.order != concrete.table.order:
@@ -245,15 +243,7 @@ class FiniteGroupLibrary:
                 )
             )
         if not matches:
-            signature = (
-                concrete.table.order,
-                tuple(sorted(concrete.table.element_orders)),
-                tuple(sorted(len(value.element_indices) for value in concrete.table.conjugacy_classes)),
-            )
-            raise ValueError(
-                f"No canonical finite group matches spglib point group "
-                f"{point_group.symbol!r} with actual signature {signature}."
-            )
+            return _generated_identification(concrete, point_group)
         exact = [match for match in matches if match.mapping_method == "point_action"]
         if len(exact) == 1:
             return exact[0]
@@ -896,13 +886,173 @@ def _element_conjugacy_class_sizes(table: FiniteGroupTable) -> tuple[int, ...]:
     return tuple(sizes)
 
 
+def _generated_identification(
+    concrete: ConcreteFiniteGroup,
+    point_group: PointGroupIdentification,
+) -> FiniteGroupIdentification:
+    """Build a run-local spgrep catalog when no packaged label table matches."""
+
+    unit_factor = FactorSystem(
+        np.zeros(
+            (concrete.order, concrete.order, concrete.group.dimension),
+            dtype=np.int64,
+        ),
+        np.ones((concrete.order, concrete.order), dtype=np.complex128),
+        0.0,
+        np.ones(concrete.order, dtype=np.complex128),
+        1,
+        1.0e-10,
+        concrete.antiunitary_flags,
+    )
+    if any(concrete.antiunitary_flags):
+        raise ValueError(
+            "A magnetic finite group must be identified through its unitary subgroup first."
+        )
+    generated = enumerate_little_group_representations(
+        concrete,
+        unit_factor,
+        1.0e-10,
+    )
+    labels = _generated_irrep_labels(point_group.symbol, concrete, generated)
+    irreps = []
+    for name, matrices in zip(labels, generated):
+        characters = tuple(complex(np.trace(matrix)) for matrix in matrices)
+        irreps.append(
+            GroupIrrep(
+                name,
+                int(matrices[0].shape[0]),
+                concrete.table,
+                matrices,
+                characters,
+            )
+        )
+    canonical_name = {
+        "m-3m": "O_h",
+        "4/mmm": "D4h",
+    }.get(point_group.symbol, point_group.symbol)
+    definition = FiniteGroupDefinition(
+        canonical_name,
+        concrete.group.dimension,
+        point_group.symbol,
+        concrete.table,
+        concrete.rotations,
+        tuple(irreps),
+    )
+    identity = tuple(range(concrete.order))
+    return FiniteGroupIdentification(
+        concrete,
+        definition,
+        identity,
+        identity,
+        "spgrep_generated",
+        1,
+        point_group.symbol,
+        point_group.number,
+    )
+
+
+def _generated_irrep_labels(
+    symbol: str,
+    concrete: ConcreteFiniteGroup,
+    representations: tuple[tuple[np.ndarray, ...], ...],
+) -> tuple[str, ...]:
+    if symbol not in {"m-3m", "4/mmm"}:
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+
+    rotations = concrete.rotations
+    inversion = next(
+        (
+            index
+            for index, rotation in enumerate(rotations)
+            if np.array_equal(rotation, -np.eye(3, dtype=np.int64))
+        ),
+        None,
+    )
+    c4_candidates = [
+        index
+        for index, rotation in enumerate(rotations)
+        if concrete.table.element_orders[index] == 4
+        and int(round(np.linalg.det(rotation))) == 1
+    ]
+    if inversion is None or not c4_candidates:
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+    c4 = min(c4_candidates, key=lambda index: tuple(int(v) for v in rotations[index].reshape(-1)))
+    c2_prime = _perpendicular_twofold(concrete, c4) if symbol == "4/mmm" else None
+
+    labels = []
+    used: set[str] = set()
+    for generated_index, matrices in enumerate(representations, start=1):
+        dimension = int(matrices[0].shape[0])
+        parity_value = complex(np.trace(matrices[inversion])) / dimension
+        parity = "g" if parity_value.real >= 0.0 else "u"
+        c4_character = complex(np.trace(matrices[c4])).real
+        if symbol == "m-3m":
+            if dimension == 1:
+                base = "A1" if c4_character > 0.0 else "A2"
+            elif dimension == 2:
+                base = "E"
+            elif dimension == 3:
+                base = "T1" if c4_character > 0.0 else "T2"
+            else:
+                base = f"U{generated_index}"
+        elif dimension == 2:
+            base = "E"
+        elif dimension == 1 and c2_prime is not None:
+            family = "A" if c4_character > 0.0 else "B"
+            branch = "1" if complex(np.trace(matrices[c2_prime])).real > 0.0 else "2"
+            base = family + branch
+        else:
+            base = f"U{generated_index}"
+        label = base + parity if not base.startswith("U") else base
+        if label in used:
+            label = f"U{generated_index}"
+        labels.append(label)
+        used.add(label)
+    return tuple(labels)
+
+
+def _perpendicular_twofold(concrete: ConcreteFiniteGroup, c4_index: int) -> int | None:
+    principal = np.asarray(concrete.rotations[c4_index], dtype=float)
+    _, _, vectors = np.linalg.svd(principal - np.eye(3))
+    axis = vectors[-1]
+    axis /= np.linalg.norm(axis)
+    candidates = []
+    for index, rotation in enumerate(concrete.rotations):
+        if concrete.table.element_orders[index] != 2 or int(round(np.linalg.det(rotation))) != 1:
+            continue
+        _, _, local_vectors = np.linalg.svd(np.asarray(rotation, dtype=float) - np.eye(3))
+        local_axis = local_vectors[-1]
+        local_axis /= np.linalg.norm(local_axis)
+        if abs(float(np.dot(axis, local_axis))) > 1.0e-7:
+            continue
+        off_diagonal = int(np.count_nonzero(rotation - np.diag(np.diag(rotation))))
+        candidates.append((off_diagonal, tuple(int(v) for v in rotation.reshape(-1)), index))
+    return None if not candidates else min(candidates)[2]
+
+
+def _embedded_definition_action(
+    concrete: ConcreteFiniteGroup,
+    definition: FiniteGroupDefinition,
+    canonical_index: int,
+) -> np.ndarray:
+    action = definition.point_actions[canonical_index]
+    if action.shape == concrete.rotations[0].shape:
+        return action
+    if concrete.group.dimension == 3 and definition.dimension == 2:
+        return CrystallographicEmbedding(2).rotation(action)
+    return action
+
+
 def _point_actions_match(
     concrete: ConcreteFiniteGroup,
     definition: FiniteGroupDefinition,
     mapping,
 ) -> bool:
     return all(
-        np.array_equal(concrete.rotations[actual], definition.point_actions[canonical])
+        np.array_equal(
+            concrete.rotations[actual],
+            _embedded_definition_action(concrete, definition, canonical),
+        )
         for actual, canonical in enumerate(mapping)
     )
 
@@ -914,7 +1064,9 @@ def _point_action_invariants_match(
 ) -> bool:
     return all(
         _linear_action_signature(concrete.rotations[actual])
-        == _linear_action_signature(definition.point_actions[canonical])
+        == _linear_action_signature(
+            _embedded_definition_action(concrete, definition, canonical)
+        )
         for actual, canonical in enumerate(mapping)
     )
 

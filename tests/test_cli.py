@@ -8,6 +8,28 @@ from pcwannier.cli import main, parse_args
 from pcwannier.maxwell import MaxwellProblem
 
 
+def test_analysis_cache_paths_include_auxiliary_channels(tmp_path):
+    config = SimpleNamespace(
+        base_dir=tmp_path / "input",
+        S_file="raw-S.txt",
+        D_file="raw-D.txt",
+        longitudinal_S_file="long-S.txt",
+        longitudinal_D_file="long-D.txt",
+        pseudoscalar_S_file=False,
+        pseudoscalar_D_file=False,
+    )
+
+    cli_module._configure_analysis_cache_paths(config, tmp_path / "output")
+
+    output = (tmp_path / "output").resolve()
+    assert Path(config.S_file) == output / "raw-S.txt"
+    assert Path(config.D_file) == output / "raw-D.txt"
+    assert Path(config.longitudinal_S_file) == output / "long-S.txt"
+    assert Path(config.longitudinal_D_file) == output / "long-D.txt"
+    assert Path(config.pseudoscalar_S_file) == output / "S_phi.txt"
+    assert Path(config.pseudoscalar_D_file) == output / "D_phi.txt"
+
+
 def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path, monkeypatch):
     config = _config(tmp_path)
     bundle = object()

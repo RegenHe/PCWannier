@@ -4,14 +4,21 @@ import logging
 import numpy as np
 from dataclasses import replace
 
-from ..data import BlochSymmetryRunResult, InputBundle, RunResult
+from ..data import (
+    BlochSymmetryChannelResult,
+    BlochSymmetryRunResult,
+    InputBundle,
+    RunResult,
+)
 from ..symmetry import (
     StateBlochSymmetryProvider,
+    build_symmetry_context,
     construct_symmetry_gauge,
     disentangle_symmetry_constrained,
     evaluate_symmetry_gauge,
     localize_symmetry_constrained,
     outer_band_grid,
+    regularize_gamma_zero_modes,
     run_bloch_symmetry_analysis,
     run_symmetry_analysis,
     validate_frozen_window_covariance,
@@ -19,7 +26,11 @@ from ..symmetry import (
     validate_wannier_symmetry,
 )
 from ..timing import timed_step
-from ..symmetry.reporting import log_bloch_symmetry_analysis, log_symmetry_analysis
+from ..symmetry.reporting import (
+    log_bloch_symmetry_analysis,
+    log_gamma_zero_regularization,
+    log_symmetry_analysis,
+)
 from .backend import resolve_backend
 from .context import CalculationContext
 from .gradient import Gradient
@@ -31,6 +42,7 @@ from .state import StateCollection
 from .tba import TBAModel
 from .threading import blas_thread_limit, threadpool_summary
 from .topology import calculate_topology
+from .vector_diagnostics import diagnose_bundle_vector_fields
 from .wannier import generate_wannier
 
 LOGGER = logging.getLogger(__name__)
@@ -57,30 +69,139 @@ def run_bloch_symmetry_preanalysis(
     with blas_thread_limit(threads):
         with numba_parallel_policy(max(1, int(threads)) <= 1), ParallelExecutor(threads):
             resolved_backend = resolve_backend(backend or bundle.config.compute_backend)
-            state, report = _prepare_state(
-                bundle, threads=threads, resolved_backend=resolved_backend
+            physical = _analyze_bundle_channel(
+                bundle,
+                threads=threads,
+                resolved_backend=resolved_backend,
+                channel_name="physical",
             )
-            provider = StateBlochSymmetryProvider(
-                state,
-                bundle.symmetry,
-                field_kind=bundle.maxwell.symmetry_field_kind,
-            )
-            with timed_step("analyze outer-window Bloch symmetry", LOGGER):
-                analysis = run_bloch_symmetry_analysis(
-                    state, bundle.symmetry, provider=provider
+            auxiliary_channels = {}
+            pseudoscalar_zero_modes = None
+            pseudoscalar_band_indices = None
+            for channel_name, load_auxiliary in bundle.auxiliary_bundle_loaders.items():
+                auxiliary = load_auxiliary()
+                auxiliary_channels[channel_name] = _analyze_bundle_channel(
+                    auxiliary,
+                    threads=threads,
+                    resolved_backend=resolved_backend,
+                    channel_name=channel_name,
                 )
-            log_bloch_symmetry_analysis(analysis)
-            if state.S is None:
-                raise RuntimeError("Raw S overlap cache was not initialized during preanalysis.")
+                if channel_name == "pseudoscalar":
+                    pseudoscalar_zero_modes = auxiliary.zero_modes
+                    pseudoscalar_band_indices = auxiliary.band_indices
+                del auxiliary
+            gamma_regularization = None
+            if bundle.config.gamma_zero_regularization:
+                if pseudoscalar_zero_modes is None or pseudoscalar_band_indices is None:
+                    raise ValueError(
+                        "Gamma zero regularization requires the pseudoscalar zero-mode metadata."
+                    )
+                gamma_point = physical.analysis.point("Gamma")
+                storage_index = tuple(gamma_point.k_index) + (0,) * (
+                    3 - len(gamma_point.k_index)
+                )
+                zero_mask = np.asarray(
+                    pseudoscalar_zero_modes[storage_index], dtype=bool
+                )
+                scalar_bands = np.asarray(
+                    pseudoscalar_band_indices[storage_index], dtype=int
+                )
+                physical.analysis, gamma_regularization = regularize_gamma_zero_modes(
+                    physical.analysis,
+                    bundle.symmetry,
+                    tuple(int(value) for value in scalar_bands[zero_mask]),
+                    bundle.config.real_lattice_vectors,
+                    energy_tolerance=bundle.config.gamma_zero_mode_tolerance,
+                )
+                log_gamma_zero_regularization(gamma_regularization)
             return BlochSymmetryRunResult(
                 config=bundle.config,
-                orthogonality_report=report,
-                S=state.S,
+                orthogonality_report=physical.orthogonality_report,
+                S=physical.S,
                 symmetry=bundle.symmetry,
-                analysis=analysis,
-                sewing_matrices=provider.cached_sewing_matrices,
-                sewing_calculation_fingerprint=provider.sewing_cache_fingerprint,
+                analysis=physical.analysis,
+                sewing_matrices=physical.sewing_matrices,
+                sewing_calculation_fingerprint=physical.sewing_calculation_fingerprint,
+                auxiliary_channels=auxiliary_channels,
+                gamma_zero_regularization=gamma_regularization,
+                differential_diagnostics=physical.differential_diagnostics,
             )
+
+
+def _analyze_bundle_channel(
+    bundle: InputBundle,
+    *,
+    threads: int,
+    resolved_backend: str,
+    channel_name: str,
+) -> BlochSymmetryChannelResult:
+    if bundle.symmetry is None:
+        raise ValueError("Bloch symmetry channel is missing its symmetry context.")
+    field_kind = bundle.analysis_field_kind or bundle.maxwell.symmetry_field_kind
+    analysis_context = bundle.symmetry
+    if channel_name == "longitudinal" and bundle.zero_modes is not None:
+        specification = analysis_context.model.representation_analysis
+        if specification is not None:
+            longitudinal_specification = replace(
+                specification,
+                points=tuple(
+                    replace(point, band_indices=None)
+                    for point in specification.points
+                ),
+            )
+            analysis_context = build_symmetry_context(
+                replace(
+                    analysis_context.model,
+                    representation_analysis=longitudinal_specification,
+                ),
+                analysis_context.k_points,
+            )
+    LOGGER.info("Bloch symmetry channel: name=%s field_kind=%s", channel_name, field_kind.value)
+    differential_diagnostics = None
+    if field_kind.value == "magnetic_axial_vector" and getattr(bundle.mesh, "dimension", 0) == 3:
+        quantity = "curl" if channel_name == "longitudinal" else "longitudinal"
+        differential_diagnostics = diagnose_bundle_vector_fields(
+            bundle,
+            quantity=quantity,
+        )
+        LOGGER.info(
+            "Vector-field diagnostic: channel=%s quantity=%s max=%.6g mean=%.6g "
+            "worst_k=%s worst_band(1-based)=%s",
+            channel_name,
+            quantity,
+            differential_diagnostics.max_residual,
+            differential_diagnostics.mean_residual,
+            differential_diagnostics.worst_k_index,
+            differential_diagnostics.worst_band_index + 1,
+        )
+    state, report = _prepare_state(
+        bundle,
+        threads=threads,
+        resolved_backend=resolved_backend,
+    )
+    provider = StateBlochSymmetryProvider(
+        state,
+        analysis_context,
+        field_kind=field_kind,
+    )
+    with timed_step("analyze outer-window Bloch symmetry", LOGGER, channel=channel_name):
+        analysis = run_bloch_symmetry_analysis(
+            state,
+            analysis_context,
+            provider=provider,
+        )
+    log_bloch_symmetry_analysis(analysis)
+    if state.S is None:
+        raise RuntimeError("Raw S overlap cache was not initialized during preanalysis.")
+    return BlochSymmetryChannelResult(
+        field_kind,
+        report,
+        state.S,
+        analysis,
+        provider.cached_sewing_matrices,
+        provider.sewing_cache_fingerprint,
+        differential_diagnostics,
+    )
 
 
 def _prepare_state(

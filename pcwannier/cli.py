@@ -146,7 +146,9 @@ def main(argv=None) -> int:
             "operations=%s targets=%s target_dimensions=%s "
             "constrained_localization=%s output_basis=%s bloch_convention=%s(sign=%s) "
             "magnetic_bias=%s unitary=%s antiunitary=%s",
-            config.symmetry_resolved_path or config.input_path(config.symmetry_file),
+            config.symmetry_resolved_path
+            or config.symmetry_resolved_reference
+            or config.input_path(config.symmetry_file),
             (
                 definition.name
                 if definition is not None
@@ -240,7 +242,14 @@ def _configure_analysis_cache_paths(config, out_dir: Path | None) -> None:
     """Point analysis cache input and output at the same absolute directory."""
 
     directory = Path(out_dir or config.base_dir).expanduser().resolve()
-    for attr, default_name in (("S_file", "S.txt"), ("D_file", "D.txt")):
+    for attr, default_name in (
+        ("S_file", "S.txt"),
+        ("D_file", "D.txt"),
+        ("longitudinal_S_file", "S_L.txt"),
+        ("longitudinal_D_file", "D_L.txt"),
+        ("pseudoscalar_S_file", "S_phi.txt"),
+        ("pseudoscalar_D_file", "D_phi.txt"),
+    ):
         value = getattr(config, attr, None)
         filename = (
             default_name

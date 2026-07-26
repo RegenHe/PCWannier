@@ -258,14 +258,24 @@ def test_field_components_select_maxwell_problem(
     )
 
 
-def test_full_vector_and_invalid_field_components_are_rejected(tmp_path):
+def test_full_vector_requires_primary_field_and_analysis_scope(tmp_path):
     incar = tmp_path / "incar"
     source = _minimal_symmetry_incar()
     incar.write_text(
         source.replace("field_components = Ez", "field_components = full_vector"),
         encoding="utf-8",
     )
-    with pytest.raises(NotImplementedError, match="scalar Ez and Hz"):
+    with pytest.raises(ValueError, match="requires primary_field"):
+        load_config(incar)
+
+    incar.write_text(
+        source.replace(
+            "field_components = Ez",
+            "field_components = full_vector\nprimary_field = magnetic",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(NotImplementedError, match="full_vector"):
         load_config(incar)
 
     incar.write_text(

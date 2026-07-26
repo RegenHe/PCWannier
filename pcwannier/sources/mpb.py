@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import copy
 import logging
 
 import h5py
@@ -11,8 +12,8 @@ from ..conventions import (
     BlochConvention,
     BlochFieldRepresentation,
 )
-from ..data import InputBundle, PeriodicGrid
-from ..maxwell import FieldComponents
+from ..data import InputBundle, PeriodicGrid, periodic_axis_coordinates
+from ..maxwell import FieldComponents, FieldKind, PrimaryField
 from ..timing import timed_step
 from .base import SourceAdapter
 
@@ -82,20 +83,16 @@ def _check_exported_coordinate_axes(
     handle: h5py.File,
     grid: PeriodicGrid,
 ) -> None:
-    """Diagnose exporter metadata without overriding MPB sample indexing.
-
-    MPB arrays use the half-open sample indexing i/N-1/2 requested by the
-    adapter contract. Some exporters write cell-center helper axes while the
-    actual field arrays remain node indexed; those helper arrays are therefore
-    informative only.
-    """
+    """Validate exported axes without changing the MPB array indexing."""
 
     for axis, size in enumerate(grid.shape):
         name = f"u{axis + 1}"
         if name not in handle:
-            continue
+            raise ValueError(
+                f"MPB grid file {handle.filename!r} is missing coordinate helper /{name}."
+            )
         values = np.asarray(handle[name], dtype=float).reshape(-1)
-        expected = np.arange(size, dtype=float) / size - 0.5
+        expected = periodic_axis_coordinates(size)
         if values.shape != expected.shape:
             raise ValueError(
                 f"MPB coordinate helper /{name} has shape {values.shape}; "
@@ -110,19 +107,25 @@ def _check_exported_coordinate_axes(
         ):
             raise ValueError(f"MPB coordinate helper /{name} is not uniform.")
         if not np.allclose(values, expected, rtol=0.0, atol=1.0e-12):
-            LOGGER.warning(
-                "MPB coordinate helper /%s uses an offset different from the "
-                "field-array indexing; using the half-open i/N-1/2 convention",
-                name,
+            raise ValueError(
+                f"MPB coordinate helper /{name} does not use the required "
+                "u_i=i/N-1/2 convention (with u=0 for N=1)."
             )
 
 
 def load_mpb_input(config: IncarConfig) -> InputBundle:
     if config.maxwell_problem is None:
         raise ValueError("Maxwell field configuration has not been initialized.")
-    if config.maxwell_problem.field_components is not FieldComponents.HZ:
+    components = config.maxwell_problem.field_components
+    if components is FieldComponents.FULL_VECTOR and (
+        config.maxwell_problem.primary_field is not PrimaryField.MAGNETIC
+    ):
         raise NotImplementedError(
-            "The MPB adapter currently supports the scalar Hz component only."
+            "The MPB 3D adapter currently supports magnetic full-vector fields only."
+        )
+    if components not in {FieldComponents.HZ, FieldComponents.FULL_VECTOR}:
+        raise NotImplementedError(
+            "The MPB adapter supports scalar Hz and 3D magnetic full-vector fields."
         )
     mesh_path = config.input_path(config.mesh_file)
     field_path = config.input_path(config.dataset_file)
@@ -135,34 +138,17 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         raise ValueError(
             f"MPB grid dimension {grid.dimension} does not match incar kdim={config.kdim}."
         )
-    if grid.dimension != 2:
-        raise NotImplementedError(
-            "The MPB data model is 3D-ready, but the current Wannier pipeline "
-            "implements only 2D scalar fields."
-        )
+    if components is FieldComponents.HZ and grid.dimension != 2:
+        raise ValueError("field_components=Hz requires a two-dimensional MPB grid.")
+    if components is FieldComponents.FULL_VECTOR and grid.dimension != 3:
+        raise ValueError("field_components=full_vector requires a three-dimensional MPB grid.")
     _validate_lattice(config, grid)
 
-    with timed_step("read MPB Maxwell eigenvalues", LOGGER, file=eigenvalue_path):
-        with h5py.File(eigenvalue_path, "r") as handle:
-            eigenvalues = np.asarray(
-                _read_required_dataset(handle, "E"),
-                dtype=np.float64,
-            )
-            energy_kpoints = np.asarray(
-                _read_required_dataset(handle, "kpoints"),
-                dtype=np.float64,
-            )
-    if eigenvalues.ndim != 2:
-        raise ValueError(
-            "MPB Maxwell eigenvalues /E must have shape (Nk, bands); "
-            f"got {eigenvalues.shape}."
-        )
-    if energy_kpoints.shape[0] != eigenvalues.shape[0]:
-        raise ValueError(
-            "MPB eigenvalue and kpoint row counts differ: "
-            f"{eigenvalues.shape[0]} != {energy_kpoints.shape[0]}."
-        )
-    row_for_k = _map_kpoints(config, energy_kpoints)
+    eigenvalues, row_for_k = _read_eigenvalues(
+        eigenvalue_path,
+        config,
+        description="Maxwell",
+    )
     # /E stores the dimensionless Maxwell eigenvalue (omega*a/c)^2.
     energy_rows = eigenvalues[row_for_k] / float(config.lattice_const) ** 2
     k_shape = _configured_k_shape(config)
@@ -171,22 +157,26 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         config, energy_matrix
     )
 
-    with timed_step("read MPB periodic Hz fields", LOGGER, file=field_path):
-        fields = _read_periodic_hz_fields(
+    with timed_step("read MPB periodic magnetic fields", LOGGER, file=field_path):
+        fields = _read_periodic_fields(
             field_path,
             config,
             grid,
             band_indices,
             eigenvalues.shape[1],
+            dataset_name="H_periodic",
+            vector=components is FieldComponents.FULL_VECTOR,
         )
     metric_material = _load_metric_material(config, grid)
+    auxiliary_loaders = _build_auxiliary_channel_loaders(config, grid)
 
     band_lengths = [
         len(band_indices[index]) for index in np.ndindex(band_indices.shape)
     ]
     LOGGER.info(
-        "MPB input prepared: field=Hz representation=periodic_part k_shape=%s "
+        "MPB input prepared: field=%s representation=periodic_part k_shape=%s "
         "grid_shape=%s bands_per_k=min:%s max:%s metric=%s",
+        config.maxwell_problem.field_components.value,
         fields.shape,
         grid.shape,
         min(band_lengths) if band_lengths else 0,
@@ -206,7 +196,38 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         energy_matrix=energy_matrix,
         field_representation=BlochFieldRepresentation.PERIODIC_PART,
         symmetry=config.symmetry_context,
+        analysis_field_kind=config.maxwell_problem.symmetry_field_kind,
+        auxiliary_bundle_loaders=auxiliary_loaders,
     )
+
+
+def _read_eigenvalues(
+    path: Path,
+    config: IncarConfig,
+    *,
+    description: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    with timed_step(f"read MPB {description} eigenvalues", LOGGER, file=path):
+        with h5py.File(path, "r") as handle:
+            eigenvalues = np.asarray(
+                _read_required_dataset(handle, "E"),
+                dtype=np.float64,
+            )
+            energy_kpoints = np.asarray(
+                _read_required_dataset(handle, "kpoints"),
+                dtype=np.float64,
+            )
+    if eigenvalues.ndim != 2:
+        raise ValueError(
+            f"MPB {description} eigenvalues /E must have shape (Nk, bands); "
+            f"got {eigenvalues.shape}."
+        )
+    if energy_kpoints.shape[0] != eigenvalues.shape[0]:
+        raise ValueError(
+            f"MPB {description} eigenvalue and kpoint row counts differ: "
+            f"{eigenvalues.shape[0]} != {energy_kpoints.shape[0]}."
+        )
+    return eigenvalues, _map_kpoints(config, energy_kpoints)
 
 
 def _validate_lattice(config: IncarConfig, grid: PeriodicGrid) -> None:
@@ -329,28 +350,33 @@ def _select_bands(
     return energies, band_indices, inner_indices
 
 
-def _read_periodic_hz_fields(
+def _read_periodic_fields(
     path: Path,
     config: IncarConfig,
     grid: PeriodicGrid,
     band_indices: np.ndarray,
     band_count: int,
+    *,
+    dataset_name: str,
+    vector: bool,
 ) -> np.ndarray:
     k_shape = _configured_k_shape(config)
     fields = np.empty(k_shape, dtype=object)
     with h5py.File(path, "r") as handle:
-        if "H_periodic" not in handle:
+        if dataset_name not in handle:
             raise ValueError(
-                f"MPB field file {path} is missing dataset /H_periodic."
+                f"MPB field file {path} is missing dataset /{dataset_name}."
             )
-        dataset = handle["H_periodic"]
-        expected_tail = (
-            grid.shape + ((1,) if grid.dimension == 2 else ()) + (3,)
-        )
+        dataset = handle[dataset_name]
+        expected_tail = grid.shape
+        if vector:
+            expected_tail = expected_tail + (3,)
+        elif dataset_name == "H_periodic":
+            expected_tail = expected_tail + ((1,) if grid.dimension == 2 else ()) + (3,)
         expected_ndim = 2 + len(expected_tail)
         if dataset.ndim != expected_ndim or dataset.shape[1] != band_count:
             raise ValueError(
-                "MPB /H_periodic must have shape "
+                f"MPB /{dataset_name} must have shape "
                 f"(Nk, {band_count}, {', '.join(str(v) for v in expected_tail)}); "
                 f"got {dataset.shape}."
             )
@@ -379,28 +405,193 @@ def _read_periodic_hz_fields(
                 row_block[selected],
                 dtype=np.complex128,
             )
-            if grid.dimension == 2:
+            if dataset_name == "H_periodic" and not vector:
                 block = block[..., 0, :]
             if not np.all(np.isfinite(block)):
                 raise ValueError(
                     f"MPB Hz fields contain NaN or Inf at k={index}."
                 )
-            transverse = float(
-                np.max(np.abs(block[..., :2]), initial=0.0)
-            )
-            longitudinal = max(
-                float(np.max(np.abs(block[..., 2]), initial=0.0)),
-                np.finfo(float).tiny,
-            )
-            if transverse > 1.0e-10 * longitudinal:
-                raise ValueError(
-                    "MPB scalar Hz mode contains non-zero Hx/Hy components: "
-                    f"k={index}, relative={transverse / longitudinal:.6g}."
+            if vector:
+                fields[index] = np.ascontiguousarray(
+                    block.reshape(selected.size, grid.point_count, 3)
                 )
-            fields[index] = np.ascontiguousarray(
-                block[..., 2].reshape(selected.size, grid.point_count)
-            )
+            elif dataset_name == "H_periodic":
+                transverse = float(np.max(np.abs(block[..., :2]), initial=0.0))
+                longitudinal = max(
+                    float(np.max(np.abs(block[..., 2]), initial=0.0)),
+                    np.finfo(float).tiny,
+                )
+                if transverse > 1.0e-10 * longitudinal:
+                    raise ValueError(
+                        "MPB scalar Hz mode contains non-zero Hx/Hy components: "
+                        f"k={index}, relative={transverse / longitudinal:.6g}."
+                    )
+                fields[index] = np.ascontiguousarray(
+                    block[..., 2].reshape(selected.size, grid.point_count)
+                )
+            else:
+                fields[index] = np.ascontiguousarray(
+                    block.reshape(selected.size, grid.point_count)
+                )
     return fields
+
+
+def _build_auxiliary_channel_loaders(
+    config: IncarConfig,
+    grid: PeriodicGrid,
+):
+    values = {
+        "longitudinal_field_file": config.input_path(config.longitudinal_field_file),
+        "longitudinal_energy_file": config.input_path(config.longitudinal_energy_file),
+        "pseudoscalar_file": config.input_path(config.pseudoscalar_file),
+        "pseudoscalar_metric_file": config.input_path(config.pseudoscalar_metric_file),
+    }
+    if not any(path is not None for path in values.values()):
+        if config.gamma_zero_regularization:
+            raise ValueError(
+                "gamma_zero_regularization requires longitudinal and pseudoscalar MPB files."
+            )
+        return {}
+    missing = [name for name, path in values.items() if path is None]
+    if missing:
+        raise ValueError(
+            "MPB longitudinal analysis requires all auxiliary files; missing "
+            + ", ".join(missing)
+        )
+    if grid.dimension != 3:
+        raise NotImplementedError("MPB longitudinal auxiliary channels require a 3D grid.")
+
+    energy_path = values["longitudinal_energy_file"]
+    assert energy_path is not None
+    raw_energy, rows = _read_eigenvalues(
+        energy_path,
+        config,
+        description="longitudinal",
+    )
+    k_shape = _configured_k_shape(config)
+    energy_matrix = (
+        raw_energy[rows] / float(config.lattice_const) ** 2
+    ).reshape(k_shape + (raw_energy.shape[1],))
+    energies, bands, inner = _select_bands(config, energy_matrix)
+
+    field_path = values["longitudinal_field_file"]
+    scalar_path = values["pseudoscalar_file"]
+    metric_path = values["pseudoscalar_metric_file"]
+    assert field_path is not None and scalar_path is not None and metric_path is not None
+    zero_modes = _read_selected_zero_modes(scalar_path, config, bands, raw_energy.shape[1])
+    longitudinal_config = copy(config)
+    longitudinal_config.S_file = config.longitudinal_S_file
+    longitudinal_config.D_file = config.longitudinal_D_file
+    pseudoscalar_config = copy(config)
+    pseudoscalar_config.S_file = config.pseudoscalar_S_file
+    pseudoscalar_config.D_file = config.pseudoscalar_D_file
+
+    def load_longitudinal() -> InputBundle:
+        longitudinal_fields = _read_periodic_fields(
+            field_path,
+            config,
+            grid,
+            bands,
+            raw_energy.shape[1],
+            dataset_name="H_periodic",
+            vector=True,
+        )
+        longitudinal_energies = np.empty(energies.shape, dtype=object)
+        longitudinal_bands = np.empty(bands.shape, dtype=object)
+        longitudinal_inner = np.empty(inner.shape, dtype=object)
+        for index in np.ndindex(bands.shape):
+            mask = ~np.asarray(zero_modes[index], dtype=bool)
+            selected_bands = np.asarray(bands[index], dtype=int)
+            longitudinal_fields[index] = np.asarray(longitudinal_fields[index])[mask]
+            longitudinal_energies[index] = np.asarray(energies[index])[mask]
+            longitudinal_bands[index] = selected_bands[mask].tolist()
+            retained = set(longitudinal_bands[index])
+            longitudinal_inner[index] = [
+                int(value) for value in inner[index] if int(value) in retained
+            ]
+        return InputBundle(
+            config=longitudinal_config,
+            maxwell=config.maxwell_problem,
+            bloch_convention=MPB_BLOCH_CONVENTION,
+            mesh=grid,
+            fields=longitudinal_fields,
+            metric_material=np.ones(grid.point_count, dtype=float),
+            energies=longitudinal_energies,
+            band_indices=longitudinal_bands,
+            inner_band_indices=longitudinal_inner,
+            energy_matrix=energy_matrix,
+            field_representation=BlochFieldRepresentation.PERIODIC_PART,
+            symmetry=config.symmetry_context,
+            analysis_field_kind=FieldKind.MAGNETIC_AXIAL_VECTOR,
+            zero_modes=zero_modes,
+        )
+
+    def load_pseudoscalar() -> InputBundle:
+        scalar_fields = _read_periodic_fields(
+            scalar_path,
+            config,
+            grid,
+            bands,
+            raw_energy.shape[1],
+            dataset_name="phi_periodic",
+            vector=False,
+        )
+        scalar_metric = _load_grid_material(
+            metric_path,
+            grid,
+            candidates=("epsilon", "eta", "metric"),
+            description="pseudoscalar metric",
+        )
+        return InputBundle(
+            config=pseudoscalar_config,
+            maxwell=config.maxwell_problem,
+            bloch_convention=MPB_BLOCH_CONVENTION,
+            mesh=grid,
+            fields=scalar_fields,
+            metric_material=scalar_metric,
+            energies=energies,
+            band_indices=bands,
+            inner_band_indices=inner,
+            energy_matrix=energy_matrix,
+            field_representation=BlochFieldRepresentation.PERIODIC_PART,
+            symmetry=config.symmetry_context,
+            analysis_field_kind=FieldKind.PSEUDOSCALAR,
+            zero_modes=zero_modes,
+        )
+
+    return {
+        "longitudinal": load_longitudinal,
+        "pseudoscalar": load_pseudoscalar,
+    }
+
+
+def _read_selected_zero_modes(
+    path: Path,
+    config: IncarConfig,
+    band_indices: np.ndarray,
+    band_count: int,
+) -> np.ndarray:
+    with h5py.File(path, "r") as handle:
+        if "zero_mode" not in handle:
+            raise ValueError(f"MPB HDF5 file {str(path)!r} is missing dataset /zero_mode.")
+        stored = np.asarray(handle["zero_mode"])
+        if stored.dtype != np.bool_:
+            if not np.issubdtype(stored.dtype, np.number) or not np.all(
+                np.isin(stored, (0, 1))
+            ):
+                raise ValueError("MPB /zero_mode must contain boolean or 0/1 values.")
+        raw = np.asarray(stored, dtype=bool)
+        kpoints = np.asarray(_read_required_dataset(handle, "kpoints"), dtype=float)
+    if raw.ndim != 2 or raw.shape[1] != band_count:
+        raise ValueError(
+            f"MPB /zero_mode must have shape (Nk, {band_count}); got {raw.shape}."
+        )
+    rows = _map_kpoints(config, kpoints)
+    output = np.empty(band_indices.shape, dtype=object)
+    for flat, index in enumerate(np.ndindex(band_indices.shape)):
+        selected = np.asarray(band_indices[index], dtype=np.intp)
+        output[index] = np.asarray(raw[int(rows[flat]), selected], dtype=bool)
+    return output
 
 
 def _load_metric_material(
@@ -410,21 +601,36 @@ def _load_metric_material(
     path = config.input_path(config.metric_file)
     if path is None:
         LOGGER.info(
-            "MPB metric_file is disabled; using unit %s for scalar Hz",
+            "MPB metric_file is disabled; using unit %s",
             config.maxwell_problem.metric_material.value,
         )
         return np.ones(grid.point_count, dtype=float)
 
     expected_name = config.maxwell_problem.metric_material.value
-    with timed_step("read MPB metric material", LOGGER, file=path):
+    return _load_grid_material(
+        path,
+        grid,
+        candidates=(expected_name, "metric"),
+        description="metric material",
+    )
+
+
+def _load_grid_material(
+    path: Path,
+    grid: PeriodicGrid,
+    *,
+    candidates: tuple[str, ...],
+    description: str,
+) -> np.ndarray:
+    with timed_step(f"read MPB {description}", LOGGER, file=path):
         with h5py.File(path, "r") as handle:
-            candidates = (expected_name, "metric")
             name = next((value for value in candidates if value in handle), None)
             if name is None:
                 available = ", ".join(sorted(handle.keys()))
+                expected = ", ".join(f"/{value}" for value in candidates)
                 raise ValueError(
-                    f"MPB metric file {path} must contain /{expected_name} or "
-                    f"/metric; available datasets: {available or '<none>'}."
+                    f"MPB {description} file {path} must contain one of {expected}; "
+                    f"available datasets: {available or '<none>'}."
                 )
             values = np.asarray(_read_required_dataset(handle, name)).squeeze()
     if values.shape != grid.shape:
@@ -439,9 +645,11 @@ def _load_metric_material(
 MPB_SOURCE = SourceAdapter(
     name="mpb",
     bloch_convention=MPB_BLOCH_CONVENTION,
-    supported_field_components=frozenset({FieldComponents.HZ}),
+    supported_field_components=frozenset(
+        {FieldComponents.HZ, FieldComponents.FULL_VECTOR}
+    ),
     input_loader=load_mpb_input,
     mesh_loader=load_mpb_grid,
     required_config_fields=("mesh_file", "dataset_file", "E_file"),
-    supported_dimensions=frozenset({2}),
+    supported_dimensions=frozenset({2, 3}),
 )

@@ -374,6 +374,48 @@ def write_bloch_symmetry_outputs(
             k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
             calculation_fingerprint=result.sewing_calculation_fingerprint,
         )
+    channel_paths = {
+        "longitudinal": (
+            getattr(config, "longitudinal_S_file", "S_L.txt"),
+            getattr(config, "longitudinal_D_file", "D_L.txt"),
+        ),
+        "pseudoscalar": (
+            getattr(config, "pseudoscalar_S_file", "S_phi.txt"),
+            getattr(config, "pseudoscalar_D_file", "D_phi.txt"),
+        ),
+    }
+    for channel_name, channel in result.auxiliary_channels.items():
+        if channel_name not in channel_paths:
+            raise ValueError(f"Unknown Bloch symmetry output channel {channel_name!r}.")
+        s_value, d_value = channel_paths[channel_name]
+        channel_s_path = _resolve_output(s_value, config, out_dir)
+        channel_d_path = _resolve_output(d_value, config, out_dir)
+        if channel_s_path is None or channel_d_path is None:
+            raise RuntimeError(
+                f"Bloch symmetry cache paths are disabled for channel {channel_name!r}."
+            )
+        with timed_step(
+            "write auxiliary raw S matrix",
+            LOGGER,
+            channel=channel_name,
+            file=channel_s_path,
+        ):
+            save_cell_matrix(channel_s_path, channel.S, channel.S.shape)
+        with timed_step(
+            "write auxiliary D symmetry matrices",
+            LOGGER,
+            channel=channel_name,
+            file=channel_d_path,
+            count=len(channel.sewing_matrices),
+        ):
+            save_sewing_matrix_cache(
+                channel_d_path,
+                channel.sewing_matrices,
+                dimension=result.symmetry.model.dimension,
+                bloch_sign=result.symmetry.model.bloch_convention.sign,
+                k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
+                calculation_fingerprint=channel.sewing_calculation_fingerprint,
+            )
 
 
 def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir: str | Path | None = None) -> None:

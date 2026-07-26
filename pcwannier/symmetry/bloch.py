@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.spatial import cKDTree
 
+from ..data import periodic_axis_coordinates
 from .cache import SewingMatrixCache, SewingMatrixCacheEntry, load_sewing_matrix_cache
 from .field_action import cartesian_field_matrix
 from .group import SpaceGroupOperation, SymmetryKMapping, periodic_difference, reduce_fractional
@@ -137,7 +138,16 @@ class PeriodicGridInterpolator:
                 f"Interpolation points must have shape (N, {self.dimension})."
             )
         shape = np.asarray(self.shape, dtype=np.int64)
-        start = self.sample_offset / shape - 0.5
+        start = np.asarray(
+            [
+                periodic_axis_coordinates(
+                    int(size),
+                    sample_offset=float(self.sample_offset[axis]),
+                )[0]
+                for axis, size in enumerate(self.shape)
+            ],
+            dtype=float,
+        )
         scaled = (query - start) * shape
         nearest = np.rint(scaled)
         exact = np.abs(scaled - nearest) <= self.tolerance * shape
@@ -413,6 +423,7 @@ class BlochSymmetryAction:
         )
         if field_kind in {
             FieldKind.SCALAR,
+            FieldKind.PSEUDOSCALAR,
             FieldKind.ELECTRIC_Z,
             FieldKind.MAGNETIC_AXIAL_Z,
         }:
@@ -463,6 +474,38 @@ def build_bloch_symmetry_action(
     )
 
 
+def _multiply_point_phase(values: np.ndarray, phase: np.ndarray) -> np.ndarray:
+    """Multiply scalar or vector fields by one phase per spatial sample."""
+    array = np.asarray(values)
+    point_phase = np.asarray(phase, dtype=np.complex128).reshape(-1)
+    if array.ndim == 2:
+        if array.shape[1] != point_phase.size:
+            raise ValueError("Field samples and point phases have incompatible shapes.")
+        return array * point_phase[None, :]
+    if array.ndim == 3:
+        if array.shape[1] != point_phase.size:
+            raise ValueError("Vector-field samples and point phases have incompatible shapes.")
+        return array * point_phase[None, :, None]
+    raise ValueError("Bloch fields must have shape (bands, points[, components]).")
+
+
+def _apply_band_transform(values: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    """Apply a right coefficient transform without flattening field components."""
+    array = np.asarray(values, dtype=np.complex128)
+    coefficients = np.asarray(transform, dtype=np.complex128)
+    if coefficients.ndim != 2 or coefficients.shape[0] != coefficients.shape[1]:
+        raise ValueError("Bloch-state band transform must be a square matrix.")
+    if array.ndim == 2:
+        if array.shape[0] != coefficients.shape[0]:
+            raise ValueError("Bloch-state block and band transform have incompatible shapes.")
+        return np.einsum("np,nm->mp", array, coefficients, optimize=True)
+    if array.ndim == 3:
+        if array.shape[0] != coefficients.shape[0]:
+            raise ValueError("Vector Bloch-state block and band transform have incompatible shapes.")
+        return np.einsum("npc,nm->mpc", array, coefficients, optimize=True)
+    raise ValueError("Bloch fields must have shape (bands, points[, components]).")
+
+
 def coefficient_metric_overlap(left, right, metric) -> np.ndarray:
     """Return C_left^dagger S C_right for coefficient-space states."""
     left_array = np.asarray(left, dtype=np.complex128)
@@ -478,7 +521,7 @@ def coefficient_metric_overlap(left, right, metric) -> np.ndarray:
 
 
 class StateBlochSymmetryProvider:
-    """Metric-weighted sewing matrices for periodic scalar Bloch states."""
+    """Metric-weighted sewing matrices for periodic scalar or vector Bloch states."""
 
     def __init__(
         self,
@@ -498,11 +541,14 @@ class StateBlochSymmetryProvider:
             )
         if field_kind not in {
             FieldKind.SCALAR,
+            FieldKind.PSEUDOSCALAR,
             FieldKind.ELECTRIC_Z,
             FieldKind.MAGNETIC_AXIAL_Z,
+            FieldKind.ELECTRIC_POLAR_VECTOR,
+            FieldKind.MAGNETIC_AXIAL_VECTOR,
         }:
             raise NotImplementedError(
-                "Automatic StateCollection sewing currently supports scalar fields only."
+                "Automatic StateCollection sewing does not support the requested field kind."
             )
         self.state = state
         self.context = context
@@ -608,7 +654,7 @@ class StateBlochSymmetryProvider:
         else:
             source = self._orthonormal_block(source_index, full_source_bands)
             if np.any(source_shift):
-                source = source * self._fiber_phase(source_shift)[None, :]
+                source = _multiply_point_phase(source, self._fiber_phase(source_shift))
             transformed = self.action.apply(
                 source,
                 request.operation,
@@ -618,7 +664,7 @@ class StateBlochSymmetryProvider:
             )
             target = self._orthonormal_block(target_index, full_target_bands)
             if np.any(target_shift):
-                target = target * self._fiber_phase(target_shift)[None, :]
+                target = _multiply_point_phase(target, self._fiber_phase(target_shift))
         matrix = self.state.inner_product.overlap(
             target,
             transformed,
@@ -848,12 +894,15 @@ class StateBlochSymmetryProvider:
         correction = np.asarray(
             self.state.get_transform()[storage_index], dtype=np.complex128
         )
-        orthonormal = (block.T @ correction).T
+        orthonormal = _apply_band_transform(block, correction)
         return orthonormal[local]
 
     def _full_orthonormal_block(self, index, band_indices) -> np.ndarray:
         periodic = self._orthonormal_block(index, band_indices)
-        return periodic * self.state.get_phase(*state_index(index))[None, :]
+        return _multiply_point_phase(
+            periodic,
+            self.state.get_phase(*state_index(index)),
+        )
 
     def _actual_bands(self, index) -> tuple[int, ...]:
         storage_index = state_index(index)
@@ -882,8 +931,9 @@ class StateBlochSymmetryProvider:
         for k_index in self._k_indices:
             storage_index = state_index(k_index)
             block = self.state.get_block(*storage_index)
+            reduction_axes = tuple(range(1, block.ndim))
             scales = np.maximum(
-                np.max(np.abs(block), axis=1),
+                np.max(np.abs(block), axis=reduction_axes),
                 np.finfo(float).tiny,
             )
             actual_bands = tuple(
@@ -893,7 +943,11 @@ class StateBlochSymmetryProvider:
             for nodes in classes:
                 node_indices = np.asarray(nodes, dtype=np.intp)
                 values = block[:, node_indices]
-                residuals = np.max(np.abs(values - values[:, :1]), axis=1) / scales
+                residual_axes = tuple(range(1, values.ndim))
+                residuals = (
+                    np.max(np.abs(values - values[:, :1]), axis=residual_axes)
+                    / scales
+                )
                 worst = int(np.argmax(residuals))
                 if residuals[worst] > tolerance:
                     band = actual_bands[worst] if worst < len(actual_bands) else worst
@@ -1135,6 +1189,8 @@ def _update_array_digest(digest, label: str, value) -> None:
     digest.update(label.encode("utf-8"))
     digest.update(array.dtype.str.encode("ascii"))
     digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+    if array.size == 0:
+        return
     if array.flags.c_contiguous:
         digest.update(memoryview(array).cast("B"))
         return

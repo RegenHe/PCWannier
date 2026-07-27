@@ -44,6 +44,7 @@ from .threading import blas_thread_limit, threadpool_summary
 from .topology import calculate_topology
 from .vector_diagnostics import diagnose_bundle_vector_fields
 from .wannier import generate_wannier
+from .vector_trials import prepare_vector_trial_targets
 
 LOGGER = logging.getLogger(__name__)
 
@@ -256,6 +257,15 @@ def _prepare_state(
 
 def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
     config = bundle.config
+    if int(config.kdim) == 3:
+        if config.DOS:
+            raise NotImplementedError("Three-dimensional DOS output is not implemented.")
+        if config.Chern_number or config.hybrid_Wilson_loop:
+            raise NotImplementedError("Three-dimensional topology output is not implemented.")
+        if config.wannier_figures is not False and str(config.wannier_figures).lower() != "false":
+            raise NotImplementedError(
+                "Three-dimensional Wannier volume figures are not implemented; set wannier_figures=false."
+            )
     resolved_backend = resolve_backend(backend or config.compute_backend)
     integration_family = getattr(
         bundle.mesh,
@@ -280,6 +290,14 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         bundle.mesh.elements.shape[0],
     )
     state, report = _prepare_state(bundle, threads=threads, resolved_backend=resolved_backend)
+    trial_covariance_diagnostics = ()
+    if config.projection_target_bindings:
+        if bundle.symmetry is None:
+            raise ValueError("Three-dimensional vector projections require symmetry_file.")
+        bundle.symmetry, trial_covariance_diagnostics = prepare_vector_trial_targets(
+            state, bundle.symmetry
+        )
+        config.symmetry_context = bundle.symmetry
     symmetry_analysis = None
     symmetry_provider = None
     if bundle.symmetry is not None and (
@@ -602,6 +620,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         sewing_calculation_fingerprint=(
             None if symmetry_provider is None else symmetry_provider.sewing_cache_fingerprint
         ),
+        trial_covariance_diagnostics=trial_covariance_diagnostics,
     )
 
 

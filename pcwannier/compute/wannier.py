@@ -21,16 +21,22 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
 
     band_count = int(config.band_calc_num)
     nv = state.extention_mesh.vertices.shape[0]
-    wsum = np.zeros((nv, band_count), dtype=np.complex128)
+    vector_field = state.get_extention_block(0, 0, 0).ndim == 3
+    wsum_shape = (nv, band_count, 3) if vector_field else (nv, band_count)
+    wsum = np.zeros(wsum_shape, dtype=np.complex128)
     sign = state.bloch_sign
     for i, j, k in state.k_indices():
         phase_vec = state.get_extention_phase(i, j, k)
         k_vec = get_kxyz(config, [i, j, k])[:dim]
         phase_scalar = np.exp(1j * (-(sign) * np.dot(k_vec, r_cart)))
         pvec = phase_vec * phase_scalar
-        emat = state.get_extention_block(i, j, k).T
+        block = state.get_extention_block(i, j, k)
         coeff = ctx.output_state_coefficients_at(i, j, k)
-        wsum += (emat @ coeff) * pvec[:, None]
+        if vector_field:
+            mixed = np.einsum("npc,ni->pic", block, coeff, optimize=True)
+            wsum += mixed * pvec[:, None, None]
+        else:
+            wsum += (block.T @ coeff) * pvec[:, None]
     wsum /= np.sqrt(float(state.get_k_num()))
     if state.extended_inner_product is None:
         raise RuntimeError("Extended metric inner product has not been initialized.")

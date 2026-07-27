@@ -9,6 +9,13 @@ from .outputs import (
     write_interpolation_outputs,
     write_outputs,
 )
+from .projections import (
+    LocalFrame3D,
+    ProjectionRecord3D,
+    TrialLinearCombination,
+    VectorHydrogenicOrbital,
+    real_spherical_harmonic,
+)
 from .sources import load_input
 from .symmetry import (
     FiniteGroupDefinition,
@@ -33,6 +40,11 @@ __all__ = [
     "MaterialKind",
     "MaxwellProblem",
     "PrimaryField",
+    "LocalFrame3D",
+    "ProjectionRecord3D",
+    "TrialLinearCombination",
+    "VectorHydrogenicOrbital",
+    "real_spherical_harmonic",
     "SpaceGroupDefinition",
     "SymmetryContext",
     "SymmetryModel",

@@ -166,6 +166,7 @@ def load_space_group_from_spglib(
         group,
         finite_groups or load_builtin_finite_groups(),
         float(algebra_tolerance),
+        hall_number=hall_number,
     )
 
 

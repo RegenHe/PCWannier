@@ -458,6 +458,7 @@ class SpaceGroupDefinition:
     group: SpaceGroup
     finite_groups: FiniteGroupLibrary
     algebra_tolerance: float = 1.0e-10
+    hall_number: int | None = None
     point_group: PointGroupIdentification = field(init=False)
     _identification_cache: dict[tuple[int, ...], FiniteGroupIdentification] = field(
         default_factory=dict, init=False, repr=False, compare=False
@@ -471,6 +472,8 @@ class SpaceGroupDefinition:
             raise ValueError("Space-group definition dimension does not match its operations.")
         if not np.isfinite(self.algebra_tolerance) or self.algebra_tolerance <= 0.0:
             raise ValueError("Symmetry algebra tolerance must be positive and finite.")
+        if self.hall_number is not None and not 1 <= int(self.hall_number) <= 530:
+            raise ValueError("spglib Hall number must lie between 1 and 530.")
         object.__setattr__(
             self,
             "point_group",
@@ -511,6 +514,64 @@ class SpaceGroupDefinition:
                 identification,
                 unitary_irrep,
                 self.algebra_tolerance,
+            )
+
+    def identify_wyckoff(self, center, lattice_vectors) -> tuple[int, str]:
+        """Return multiplicity and Wyckoff letter in the selected Hall setting."""
+
+        if self.dimension != 3:
+            raise ValueError("Wyckoff identification is currently defined for 3D space groups.")
+        if self.hall_number is None:
+            raise ValueError(
+                "This custom 3D space group has no unique Hall setting; use symmetry_file=hall:<number>."
+            )
+        import spglib
+
+        symmetry = spglib.get_symmetry_from_database(int(self.hall_number))
+        if symmetry is None:
+            raise ValueError(f"spglib could not load Hall number {self.hall_number}.")
+        point = np.asarray(center, dtype=float)
+        lattice = np.asarray(lattice_vectors, dtype=float)
+        if point.shape != (3,) or lattice.shape != (3, 3):
+            raise ValueError("Wyckoff identification requires a 3D center and 3x3 lattice.")
+        candidates = []
+        for rotation, translation in zip(symmetry["rotations"], symmetry["translations"]):
+            transformed = np.mod(np.asarray(rotation, dtype=int) @ point + translation, 1.0)
+            if not any(
+                np.allclose(
+                    transformed - previous - np.rint(transformed - previous),
+                    0.0,
+                    rtol=0.0,
+                    atol=self.tolerance,
+                )
+                for previous in candidates
+            ):
+                candidates.append(transformed)
+        positions = np.asarray(candidates, dtype=float)
+        dataset = spglib.get_symmetry_dataset(
+            (lattice, positions, np.ones(len(positions), dtype=int)),
+            symprec=max(self.tolerance, 1.0e-7),
+            hall_number=int(self.hall_number),
+        )
+        if dataset is None:
+            raise ValueError(
+                f"spglib could not identify the Wyckoff orbit at {point.tolist()} "
+                f"for Hall {self.hall_number}."
+            )
+        letters = tuple(str(value) for value in dataset.wyckoffs)
+        if not letters or len(set(letters)) != 1:
+            raise ValueError(
+                f"The generated orbit has inconsistent Wyckoff letters: {letters}."
+            )
+        return len(candidates), letters[0]
+
+    def validate_wyckoff(self, label: str, center, lattice_vectors) -> None:
+        multiplicity, letter = self.identify_wyckoff(center, lattice_vectors)
+        expected = f"{multiplicity}{letter}".lower()
+        if str(label).strip().lower() != expected:
+            raise ValueError(
+                f"Center {np.asarray(center, dtype=float).tolist()} belongs to Wyckoff "
+                f"position {expected}, not {label!r}, in Hall setting {self.hall_number}."
             )
 
     def resolve_little_group(

@@ -85,7 +85,7 @@ def test_three_dimensional_axial_vector_inversion_and_mirror():
     )
 
 
-def test_gamma_constant_axial_t_plus_l_is_t1g():
+def test_gamma_constant_axial_transverse_plus_longitudinal_is_t1g():
     model = load_symmetry_from_spglib("Pm-3m")
     context = build_symmetry_context(
         model,

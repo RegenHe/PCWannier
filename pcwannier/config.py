@@ -4,6 +4,8 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 import math
+import cmath
+import re
 
 import numpy as np
 
@@ -37,6 +39,9 @@ class IncarConfig:
     E_file: str | bool = "./E.txt"
     longitudinal_field_file: str | bool = False
     longitudinal_energy_file: str | bool = False
+    wannier_subspace: str = "T"
+    longitudinal_band_window: np.ndarray | EnergyWindow | None = None
+    longitudinal_inner_window: np.ndarray | EnergyWindow | bool = False
     pseudoscalar_file: str | bool = False
     pseudoscalar_metric_file: str | bool = False
     longitudinal_S_file: str = "./S_L.txt"
@@ -65,6 +70,7 @@ class IncarConfig:
     representation_leakage_tolerance: float | None = None
     wannier_targets: list[dict[str, Any]] | None = None
     representation_analysis: list[dict[str, Any]] | None = None
+    projection_target_bindings: tuple[Any, ...] = field(default=(), init=False, repr=False)
     symmetry_resolved_path: Path | None = field(default=None, init=False)
     symmetry_resolved_reference: str | None = field(default=None, init=False)
     disentangle_max_iter: int | None = None
@@ -101,7 +107,7 @@ class IncarConfig:
     origin: list[float] = field(default_factory=lambda: [0.0, 0.0])
     band_window: np.ndarray | EnergyWindow | None = None
     inner_window: np.ndarray | EnergyWindow | bool = False
-    projections: list[dict[str, Any]] | None = None
+    projections: list[Any] | None = None
     projection_rank_tolerance: float = 1.0e-10
     proj_iter: bool = True
     proj_binarize: bool = False
@@ -203,6 +209,7 @@ _INTERNAL_CONFIG_FIELDS = {
     "symmetry_resolved_reference",
     "symmetry_context",
     "maxwell_problem",
+    "projection_target_bindings",
     "_preprocessed",
 }
 
@@ -254,6 +261,23 @@ def evaluate_math_expression(expr: str) -> float:
         return float(eval(expr, {"__builtins__": {}}, _MATH_NAMES))
     except Exception as exc:
         raise ValueError(f"Invalid numeric expression: {expr!r}") from exc
+
+
+def evaluate_complex_expression(expr: str) -> complex:
+    """Evaluate a restricted complex coefficient expression with i or j."""
+
+    text = str(expr).strip()
+    lowered = text.lower()
+    if any(token in lowered for token in _BLOCKED_EXPR_TOKENS):
+        raise ValueError(f"Invalid complex expression: {text!r}")
+    names = {
+        name: value for name, value in vars(cmath).items() if not name.startswith("_")
+    }
+    names.update({"i": 1j, "j": 1j, "abs": abs, "pow": pow, "cmath": cmath})
+    try:
+        return complex(eval(text, {"__builtins__": {}}, names))
+    except Exception as exc:
+        raise ValueError(f"Invalid complex expression: {text!r}") from exc
 
 
 class IncarParser:
@@ -376,15 +400,28 @@ class IncarParser:
 
         cfg.validate_required(mode=self.mode)
         preprocess_config(cfg)
+        if self.mode != "bloch_symmetry" and cfg.projections is not None:
+            from .projections import ProjectionRecord3D
+
+            has_vector_projections = any(
+                isinstance(projection, ProjectionRecord3D)
+                for projection in cfg.projections
+            )
+            if has_vector_projections:
+                if cfg.symmetry_file in {None, False}:
+                    raise ValueError(
+                        "Three-dimensional vector projections require symmetry_file "
+                        "so their Wyckoff orbits can be generated."
+                    )
+                if cfg.wannier_targets is None:
+                    raise ValueError(
+                        "Three-dimensional vector projections require a matching "
+                        "wannier_targets block."
+                    )
         from .sources import resolve_source
 
         source = resolve_source(cfg.dataset_type)
         source.validate_field_components(cfg.field_components)
-        if cfg.field_components == "full_vector" and self.mode != "bloch_symmetry":
-            raise NotImplementedError(
-                "full_vector fields currently support --analyze-symmetry only; "
-                "3D Wannier construction is not implemented."
-            )
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
             from .symmetry import (
@@ -432,10 +469,50 @@ class IncarParser:
             analysis_only = self.mode == "bloch_symmetry"
             target_specs = None
             if not analysis_only and cfg.wannier_targets is not None:
-                target_specs = tuple(
-                    WannierTargetSpec(item["name"], item["center"], item["site_irrep"])
-                    for item in cfg.wannier_targets
+                from .projections import ProjectionRecord3D, ProjectionTargetBinding
+
+                has_vector_records = bool(cfg.projections) and any(
+                    isinstance(item, ProjectionRecord3D) for item in cfg.projections
                 )
+                if has_vector_records:
+                    if not all(
+                        isinstance(item, ProjectionRecord3D) for item in cfg.projections
+                    ):
+                        raise ValueError("Two-dimensional and three-dimensional projection records cannot be mixed.")
+                    if len(cfg.projections) != len(cfg.wannier_targets):
+                        raise ValueError(
+                            "Three-dimensional projections and wannier_targets must contain the same number of records."
+                        )
+                    bindings = []
+                    specs = []
+                    for projection, item in zip(cfg.projections, cfg.wannier_targets):
+                        wyckoff = item.get("wyckoff")
+                        if not wyckoff:
+                            raise ValueError(
+                                "Three-dimensional wannier_targets must use name; wyckoff; site_irrep syntax."
+                            )
+                        if str(wyckoff).strip().lower() != projection.wyckoff.lower():
+                            raise ValueError(
+                                f"Projection Wyckoff label {projection.wyckoff!r} does not match "
+                                f"target {item['name']!r} label {wyckoff!r}."
+                            )
+                        specs.append(
+                            WannierTargetSpec(
+                                item["name"], projection.frac_position, item["site_irrep"], projection.wyckoff
+                            )
+                        )
+                        bindings.append(
+                            ProjectionTargetBinding(
+                                projection, item["name"], item["site_irrep"]
+                            )
+                        )
+                    target_specs = tuple(specs)
+                    cfg.projection_target_bindings = tuple(bindings)
+                else:
+                    target_specs = tuple(
+                        WannierTargetSpec(item["name"], item["center"], item["site_irrep"])
+                        for item in cfg.wannier_targets
+                    )
             analysis = None
             if cfg.representation_analysis is not None:
                 degeneracy = DegeneracyTolerance(
@@ -495,6 +572,25 @@ class IncarParser:
                     model.tolerance,
                 )
             target_dimension = sum(target.wannier_dimension for target in model.targets)
+            if cfg.projection_target_bindings:
+                for binding, target in zip(cfg.projection_target_bindings, model.targets):
+                    function_count = len(binding.projection.states)
+                    if function_count != target.site_irrep.dimension:
+                        raise ValueError(
+                            f"Projection record {binding.projection.wyckoff!r} defines {function_count} "
+                            f"functions, but target irrep {target.site_irrep.name!r} has dimension "
+                            f"{target.site_irrep.dimension}."
+                        )
+                    if model.group_definition is None:
+                        raise ValueError("3D Wyckoff projections require a resolved space-group definition.")
+                    model.group_definition.validate_wyckoff(
+                        binding.projection.wyckoff,
+                        binding.projection.frac_position,
+                        np.asarray(cfg.real_lattice_vectors, dtype=float),
+                    )
+                # A 3D record defines one representative site basis.  The
+                # crystallographic orbit supplies the remaining trial columns.
+                cfg.band_calc_num = target_dimension
             if model.targets and target_dimension != cfg.band_calc_num:
                 raise ValueError(
                     f"Symmetry Wannier targets define {target_dimension} functions, but incar projections "
@@ -532,6 +628,7 @@ class IncarParser:
             "integration_mode",
             "field_components",
             "primary_field",
+            "wannier_subspace",
             "symmetry_file",
             "symmetry_output_basis",
             "dataset_file",
@@ -636,7 +733,13 @@ class IncarParser:
                     raise ValueError(f"Invalid hopping_state range: {part!r}")
                 ranges.append(np.arange(tokens[0], tokens[1]))
             return ranges
-        if key in {"band_window", "band_calc", "inner_window"}:
+        if key in {
+            "band_window",
+            "band_calc",
+            "inner_window",
+            "longitudinal_band_window",
+            "longitudinal_inner_window",
+        }:
             if value.lower() == "false":
                 return False
             if ":" in value:
@@ -692,6 +795,14 @@ class IncarParser:
         return value
 
     def _parse_projections(self, value: str) -> list[dict[str, Any]]:
+        from .projections import (
+            LocalFrame3D,
+            ProjectionRecord3D,
+            TrialLinearCombination,
+            VectorHydrogenicOrbital,
+            split_top_level,
+        )
+
         def extract_bracket_groups(text: str) -> list[str]:
             groups = []
             depth = 0
@@ -733,7 +844,76 @@ class IncarParser:
             try:
                 return complex(normalized)
             except ValueError:
-                return complex(evaluate_math_expression(text))
+                return evaluate_complex_expression(text)
+
+        def parse_vector(text: str, *, name: str) -> list[float]:
+            stripped = text.strip()
+            if not stripped.startswith("[") or not stripped.endswith("]"):
+                raise ValueError(f"{name} must use [x,y,z] syntax; got {text!r}.")
+            values = [
+                float(evaluate_math_expression(part.strip()))
+                for part in split_top_level(stripped[1:-1])
+            ]
+            if len(values) != 3:
+                raise ValueError(f"{name} must contain three components.")
+            return values
+
+        def parse_frame(text: str) -> LocalFrame3D:
+            match = re.fullmatch(
+                r"\(\s*z\s*=\s*(\[[^]]+\])\s*,\s*x\s*=\s*(\[[^]]+\])\s*\)",
+                text.strip(),
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                raise ValueError(
+                    "A 3D projection frame must use (z=[zx,zy,zz], x=[xx,xy,xz])."
+                )
+            return LocalFrame3D.from_xz(
+                parse_vector(match.group(2), name="local frame x"),
+                parse_vector(match.group(1), name="local frame z"),
+            )
+
+        def parse_vector_orbital(text: str) -> VectorHydrogenicOrbital:
+            pieces = text.strip().split("@")
+            if len(pieces) != 2:
+                raise ValueError(
+                    f"A 3D vector orbital must use [n,l,m,zeta]@[vx,vy,vz]; got {text!r}."
+                )
+            orbital_values = parse_vector_orbital_parameters(pieces[0])
+            direction = parse_vector(pieces[1], name="orbital vector direction")
+            return VectorHydrogenicOrbital(*orbital_values, direction)
+
+        def parse_vector_orbital_parameters(text: str) -> tuple[int, int, int, float]:
+            stripped = text.strip()
+            if not stripped.startswith("[") or not stripped.endswith("]"):
+                raise ValueError(f"Invalid 3D orbital parameters: {text!r}.")
+            values = split_top_level(stripped[1:-1])
+            if len(values) != 4:
+                raise ValueError(
+                    f"A 3D vector orbital requires [n,l,m,zeta]; got {text!r}."
+                )
+            return (
+                int(evaluate_math_expression(values[0])),
+                int(evaluate_math_expression(values[1])),
+                int(evaluate_math_expression(values[2])),
+                float(evaluate_math_expression(values[3])),
+            )
+
+        def parse_vector_state(token: str) -> TrialLinearCombination:
+            stripped = token.strip()
+            if not stripped.startswith("{"):
+                return TrialLinearCombination.primitive(parse_vector_orbital(stripped))
+            blocks = extract_brace_blocks(stripped)
+            if len(blocks) != 2:
+                raise ValueError(f"Invalid 3D linear-combo projection: {token!r}")
+            orbitals = tuple(
+                parse_vector_orbital(part)
+                for part in split_top_level(blocks[0])
+            )
+            coefficients = tuple(
+                parse_complex(part) for part in split_top_level(blocks[1])
+            )
+            return TrialLinearCombination(orbitals, coefficients)
 
         def parse_linear_combo(token: str) -> dict[str, Any]:
             blocks = extract_brace_blocks(token)
@@ -748,7 +928,7 @@ class IncarParser:
                 raise ValueError("Projection linear-combo state and coefficient counts differ.")
             return {"lc_states": states, "lc_coeffs": coeffs}
 
-        projections = []
+        projections: list[Any] = []
         for line in value.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -759,9 +939,25 @@ class IncarParser:
             groups = extract_bracket_groups(parts[1])
             if len(groups) != 1:
                 raise ValueError(f"Invalid projection position: {parts[1]!r}")
+            position = [
+                float(evaluate_math_expression(v.strip()))
+                for v in groups[0].split(",")
+            ]
+            if len(position) == 3 or parts[2].lstrip().startswith("("):
+                if len(position) != 3:
+                    raise ValueError("A 3D projection center must have three components.")
+                projections.append(
+                    ProjectionRecord3D(
+                        parts[0],
+                        np.asarray(position, dtype=float),
+                        parse_frame(parts[2]),
+                        tuple(parse_vector_state(token) for token in parts[3:]),
+                    )
+                )
+                continue
             entry: dict[str, Any] = {
                 "atom": parts[0],
-                "frac_position": [float(evaluate_math_expression(v.strip())) for v in groups[0].split(",")],
+                "frac_position": position,
                 "xaxis_angluar": float(evaluate_math_expression(parts[2])),
                 "states": [],
             }
@@ -804,15 +1000,26 @@ class IncarParser:
             parts = [part.strip() for part in line.split(";")]
             if len(parts) != 3 or not all(parts):
                 raise ValueError(f"Invalid wannier_targets line: {line!r}")
-            name, center_text, site_irrep = parts
+            name, center_or_wyckoff, site_irrep = parts
             if name in names:
                 raise ValueError(f"Duplicate Wannier target name: {name!r}.")
             names.add(name)
-            center = [
-                float(evaluate_math_expression(value.strip()))
-                for value in center_text.strip("[] ").split(",")
-            ]
-            output.append({"name": name, "center": center, "site_irrep": site_irrep})
+            if center_or_wyckoff.lstrip().startswith("[") or "," in center_or_wyckoff:
+                center = [
+                    float(evaluate_math_expression(value.strip()))
+                    for value in center_or_wyckoff.strip("[] ").split(",")
+                ]
+                output.append(
+                    {"name": name, "center": center, "site_irrep": site_irrep}
+                )
+            else:
+                output.append(
+                    {
+                        "name": name,
+                        "wyckoff": center_or_wyckoff,
+                        "site_irrep": site_irrep,
+                    }
+                )
         return output
 
     def _parse_representation_analysis(self, lines: list[str]) -> list[dict[str, Any]]:
@@ -832,13 +1039,43 @@ class IncarParser:
                 float(evaluate_math_expression(value.strip()))
                 for value in parts[1].strip("[] ").split(",")
             ]
-            bands = self._parse_analysis_bands(parts[2])
+            channel_bands = self._parse_channel_analysis_bands(parts[2])
+            bands = None if channel_bands is not None else self._parse_analysis_bands(parts[2])
             targets = None
             if len(parts) == 4 and parts[3]:
                 targets = tuple(value.strip() for value in parts[3].split(",") if value.strip())
                 if not targets or len(targets) != len(set(targets)):
                     raise ValueError(f"Invalid target list in representation-analysis line: {line!r}")
-            output.append({"name": name, "k": kpoint, "bands": bands, "targets": targets})
+            output.append(
+                {
+                    "name": name,
+                    "k": kpoint,
+                    "bands": bands,
+                    "channel_bands": channel_bands,
+                    "targets": targets,
+                }
+            )
+        return output
+
+    @classmethod
+    def _parse_channel_analysis_bands(
+        cls, value: str
+    ) -> dict[str, tuple[int, ...]] | None:
+        text = value.strip()
+        if not re.search(r"\b[HL]\s*\[", text, flags=re.IGNORECASE):
+            return None
+        output: dict[str, tuple[int, ...]] = {}
+        for token in re.findall(r"([HLhl])\s*\[([^]]+)\]", text):
+            channel = token[0].upper()
+            if channel in output:
+                raise ValueError(f"Duplicate {channel} selector in {value!r}.")
+            selected = cls._parse_analysis_bands(token[1])
+            if selected is None:
+                raise ValueError("Channel-qualified analysis selectors cannot use '*'.")
+            output[channel] = selected
+        remainder = re.sub(r"([HLhl])\s*\[([^]]+)\]", "", text).replace(",", "").strip()
+        if remainder or not output:
+            raise ValueError(f"Invalid channel-qualified band selector: {value!r}.")
         return output
 
     @staticmethod
@@ -921,6 +1158,10 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         if np.linalg.matrix_rank(lattice) != lattice.shape[0]:
             raise ValueError("real_lattice_vectors must be invertible.")
         dimension = int(lattice.shape[0])
+        if dimension == 3 and np.asarray(cfg.origin).shape == (2,) and np.allclose(
+            cfg.origin, 0.0
+        ):
+            cfg.origin = [0.0, 0.0, 0.0]
         origin = np.asarray(cfg.origin, dtype=float)
         if origin.shape != (dimension,) or not np.all(np.isfinite(origin)):
             raise ValueError(f"origin must be a finite vector of dimension {dimension}.")
@@ -951,6 +1192,12 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
 
     _validate_band_window("band_window", cfg.band_window, allow_false=False)
     _validate_band_window("inner_window", cfg.inner_window, allow_false=True)
+    _validate_band_window(
+        "longitudinal_band_window", cfg.longitudinal_band_window, allow_false=False
+    )
+    _validate_band_window(
+        "longitudinal_inner_window", cfg.longitudinal_inner_window, allow_false=True
+    )
     if (
         isinstance(cfg.band_window, np.ndarray)
         and isinstance(cfg.inner_window, np.ndarray)
@@ -1003,9 +1250,15 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
                     raise ValueError(f"k_path point {index} must have a positive integer segment count.")
 
         if cfg.projections is not None:
+            from .projections import ProjectionRecord3D
+
             if not cfg.projections:
                 raise ValueError("projections must not be empty.")
             for projection_index, projection in enumerate(cfg.projections):
+                if isinstance(projection, ProjectionRecord3D):
+                    if dimension != 3:
+                        raise ValueError("Three-dimensional projection records require a 3D lattice.")
+                    continue
                 center = np.asarray(projection.get("frac_position", ()), dtype=float)
                 if center.shape != (dimension,) or not np.all(np.isfinite(center)):
                     raise ValueError(
@@ -1033,6 +1286,21 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
 
     if cfg.integration_mode not in {"nodal", "quadratic"}:
         raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
+    cfg.wannier_subspace = re.sub(r"\s+", "", str(cfg.wannier_subspace)).upper()
+    if cfg.wannier_subspace not in {"T", "T+L"}:
+        raise ValueError("wannier_subspace must be 'T' or 'T + L'.")
+    if cfg.wannier_subspace == "T+L":
+        if cfg.longitudinal_band_window is None:
+            raise ValueError("wannier_subspace=T + L requires longitudinal_band_window.")
+        if str(cfg.field_components).strip().lower() != "full_vector" or str(cfg.primary_field).lower() != "magnetic":
+            raise ValueError("wannier_subspace=T + L requires full_vector magnetic fields.")
+    elif any(
+        item.get("channel_bands")
+        for item in (cfg.representation_analysis or ())
+    ):
+        raise ValueError(
+            "H[...] and L[...] representation-analysis selectors require wannier_subspace=T + L."
+        )
     cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
     if cfg.symmetry_output_basis not in {"strict", "fem"}:
         raise ValueError("symmetry_output_basis must be 'strict' or 'fem'.")
@@ -1121,7 +1389,7 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
         cfg.b_vectors = np.array(b_vectors, dtype=float) * float(cfg.lattice_const)
 
         mat_a = np.eye(cfg.kdim).reshape(-1, 1)
-        mat_b = np.zeros((cfg.kdim**cfg.kdim, len(cfg.composition_of_b)))
+        mat_b = np.zeros((cfg.kdim * cfg.kdim, len(cfg.composition_of_b)))
         for i in range(cfg.kdim):
             for j in range(cfg.kdim):
                 for k, bvec in enumerate(cfg.b_vectors):
@@ -1137,7 +1405,12 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
             )
 
     if cfg.projections is not None:
-        cfg.band_calc_num = sum(len(p["states"]) for p in cfg.projections)
+        from .projections import ProjectionRecord3D
+
+        cfg.band_calc_num = sum(
+            len(p.states) if isinstance(p, ProjectionRecord3D) else len(p["states"])
+            for p in cfg.projections
+        )
     cfg._preprocessed = True
     return cfg
 

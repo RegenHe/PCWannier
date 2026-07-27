@@ -186,6 +186,29 @@ def test_twisted_intertwiner_requires_the_same_factor_system():
         solve_intertwiner_space(positive, negative)
 
 
+def test_twisted_intertwiner_accepts_explicit_numerical_sewing_tolerance():
+    concrete = ConcreteFiniteGroup.from_space_group(_glide_group())
+    factor = build_factor_system(concrete, [0.5, 0.0], 1.0e-10)
+    target = _projective_regular_representation(concrete, factor)
+    physical = TwistedRepresentation(
+        tuple(0.99999 * matrix for matrix in target.matrices),
+        target.product_table,
+        target.factor_system,
+    )
+
+    with pytest.raises(ValueError, match="not unitary"):
+        solve_intertwiner_space(physical, target)
+
+    space = solve_intertwiner_space(
+        physical,
+        target,
+        absolute_tolerance=1.0e-4,
+        representation_tolerance=1.0e-4,
+    )
+
+    assert space.dimension > 0
+
+
 def test_coboundary_factor_trivializes_but_projective_factor_does_not():
     definition = load_space_group(P4GM)
     coboundary = resolve_little_group(definition, [0.5, 0.5])

@@ -28,6 +28,7 @@ class WannierTargetSpec:
     name: str
     center: np.ndarray
     site_irrep: str
+    wyckoff: str | None = None
 
     def __post_init__(self) -> None:
         center = np.asarray(self.center, dtype=float)
@@ -38,6 +39,11 @@ class WannierTargetSpec:
         center = center.copy()
         center.setflags(write=False)
         object.__setattr__(self, "center", center)
+        if self.wyckoff is not None:
+            label = str(self.wyckoff).strip()
+            if not label:
+                raise ValueError("Wannier target Wyckoff label must not be empty.")
+            object.__setattr__(self, "wyckoff", label)
 
 
 @dataclass(frozen=True)

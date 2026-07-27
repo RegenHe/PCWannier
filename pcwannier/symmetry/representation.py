@@ -312,6 +312,7 @@ def apply_magnetic_bias_to_model(
             group,
             definition.finite_groups,
             definition.algebra_tolerance,
+            definition.hall_number,
         )
     return SymmetryModel(
         model.dimension,

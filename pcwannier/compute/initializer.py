@@ -205,6 +205,9 @@ class StateInitializer:
             LOGGER.info("V-only cache: projection-gauge alignment skipped because A is unavailable")
 
     def projection(self) -> None:
+        if getattr(self.config, "projection_target_bindings", ()):
+            self._projection_vector_3d()
+            return
         if self.state.extention_mesh is None or self.state.extended_metric_material is None:
             raise ValueError("StateCollection must be extended before projection.")
         band_count = int(self.config.band_calc_num)
@@ -284,6 +287,47 @@ class StateInitializer:
             self.matC[idx] = cmat
 
         if self.config.inner_window is not False:
+            self.inner_projection()
+        else:
+            self.set_window_indices()
+
+    def _projection_vector_3d(self) -> None:
+        from .vector_trials import build_vector_bloch_trials
+
+        band_count = int(self.config.band_calc_num)
+        min_len, _ = self.get_min_max_len_idx(self.state.E_idx)
+        if band_count > min_len:
+            raise ValueError(
+                f"Calculated bands exceed band window: {band_count} > {min_len}."
+            )
+
+        def calc_idx(idx):
+            gmat = build_vector_bloch_trials(self.state, idx)
+            if gmat.shape != (
+                self.state.mesh.vertices.shape[0],
+                band_count,
+                3,
+            ):
+                raise ValueError(
+                    f"3D trial basis at k={idx} has shape {gmat.shape}; expected "
+                    f"{(self.state.mesh.vertices.shape[0], band_count, 3)}."
+                )
+            fields = self.state.get_full_bloch_block(*idx)
+            amat = self.state.inner_product.overlap(
+                fields,
+                np.swapaxes(gmat, 0, 1),
+                chunk_size=64,
+            )
+            if self.config.proj_binarize:
+                amat = self.binarize(amat)
+            return idx, amat, self._projection_frame_from_a(amat, idx)
+
+        for idx, amat, cmat in parallel_map(
+            self.state.k_indices(), calc_idx, self.threads
+        ):
+            self.matA[idx] = amat
+            self.matC[idx] = cmat
+        if self.config.inner_window is not False or self.config.longitudinal_inner_window is not False:
             self.inner_projection()
         else:
             self.set_window_indices()

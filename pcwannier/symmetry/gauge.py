@@ -85,10 +85,13 @@ def solve_intertwiner_space(
     *,
     relative_tolerance: float = 1.0e-10,
     absolute_tolerance: float = 1.0e-12,
+    representation_tolerance: float | None = None,
 ) -> IntertwinerSpace:
     """Solve d_g U = U D_g as a common column-major null space."""
     physical, target, antiunitary = _paired_representations(
-        physical_matrices, target_matrices
+        physical_matrices,
+        target_matrices,
+        validation_tolerance=representation_tolerance,
     )
     m = physical[0].shape[0]
     n = target[0].shape[0]
@@ -156,7 +159,9 @@ def project_intertwiner(
 ) -> ProjectedIntertwiner:
     """Alternate finite-group projection and polar semiunitarization."""
     physical, target, antiunitary = _paired_representations(
-        physical_matrices, target_matrices
+        physical_matrices,
+        target_matrices,
+        validation_tolerance=tolerance,
     )
     matrix = np.asarray(initial, dtype=np.complex128)
     m = physical[0].shape[0]
@@ -344,6 +349,8 @@ def construct_symmetry_gauge(
             physical_representation,
             target_representation,
             relative_tolerance=svd_relative_tolerance,
+            absolute_tolerance=tolerance,
+            representation_tolerance=tolerance,
         )
         if hom.dimension == 0:
             raise RuntimeError(
@@ -354,6 +361,8 @@ def construct_symmetry_gauge(
             target_representation,
             target_representation,
             relative_tolerance=svd_relative_tolerance,
+            absolute_tolerance=tolerance,
+            representation_tolerance=tolerance,
         )
         try:
             projected = project_intertwiner(
@@ -519,7 +528,12 @@ def evaluate_symmetry_gauge(
     )
 
 
-def _paired_representations(physical_matrices, target_matrices):
+def _paired_representations(
+    physical_matrices,
+    target_matrices,
+    *,
+    validation_tolerance: float | None = None,
+):
     if isinstance(physical_matrices, TwistedRepresentation) or isinstance(
         target_matrices, TwistedRepresentation
     ):
@@ -530,8 +544,8 @@ def _paired_representations(physical_matrices, target_matrices):
                 "Physical and target representations must both be TwistedRepresentation objects."
             )
         physical_matrices.assert_compatible(target_matrices)
-        physical_matrices.require_valid()
-        target_matrices.require_valid()
+        physical_matrices.require_valid(tolerance=validation_tolerance)
+        target_matrices.require_valid(tolerance=validation_tolerance)
         physical = physical_matrices.matrices
         target = target_matrices.matrices
         antiunitary = physical_matrices.antiunitary_flags

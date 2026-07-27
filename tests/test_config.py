@@ -31,6 +31,7 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert len(cfg.projections[0]["states"]) == 3
     assert cfg.compute_backend == "python"
     assert cfg.integration_mode == "nodal"
+    assert cfg.wannier_subspace == "T"
     assert cfg.field_components == FieldComponents.EZ.value
     assert cfg.maxwell_problem.primary_field == PrimaryField.ELECTRIC
     assert cfg.maxwell_problem.metric_material == MaterialKind.EPSILON

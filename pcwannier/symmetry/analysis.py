@@ -930,9 +930,23 @@ def _analyze_target_compatibility(
     if physical_twisted is not None and target_twisted is not None:
         from .gauge import solve_intertwiner_space
 
+        gauge_spec = context.model.symmetry_gauge
+        numerical_tolerance = (
+            analysis_spec.leakage_tolerance
+            if gauge_spec is None
+            else gauge_spec.tolerance
+        )
+        svd_tolerance = (
+            context.model.algebra_tolerance
+            if gauge_spec is None
+            else gauge_spec.svd_relative_tolerance
+        )
         intertwiner_dimension = solve_intertwiner_space(
             physical_twisted,
             target_twisted,
+            relative_tolerance=svd_tolerance,
+            absolute_tolerance=numerical_tolerance,
+            representation_tolerance=numerical_tolerance,
         ).dimension
     return TargetCompatibilityAnalysis(
         point.name,

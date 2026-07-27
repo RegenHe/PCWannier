@@ -254,6 +254,86 @@ def test_mpb_source_loads_three_dimensional_vector_fields_without_reordering(tmp
     assert np.array_equal(pseudoscalar.zero_modes[0, 0, 0], [True, False])
 
 
+def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regularizes_gamma(tmp_path):
+    shape = (2, 2, 2)
+    kpoints = np.zeros((1, 3), dtype=float)
+    with h5py.File(tmp_path / "grid.h5", "w") as handle:
+        handle.attrs["dimension"] = 3
+        handle.create_dataset("shape", data=np.asarray(shape, dtype=np.int64))
+        handle.create_dataset("basis", data=np.eye(3))
+        for axis in range(3):
+            handle.create_dataset(f"u{axis + 1}", data=np.array([-0.5, 0.0]))
+    with h5py.File(tmp_path / "E.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("E", data=np.array([[0.0, 0.0, 2.0]]))
+    physical = np.ones((1, 3) + shape + (3,), dtype=np.complex128)
+    with h5py.File(tmp_path / "H.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("H_periodic", data=physical)
+    with h5py.File(tmp_path / "EL.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("E", data=np.array([[0.0, 3.0]]))
+    longitudinal = np.full((1, 2) + shape + (3,), 2.0, dtype=np.complex128)
+    with h5py.File(tmp_path / "HL.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("H_periodic", data=longitudinal)
+    scalar = np.ones((1, 2) + shape, dtype=np.complex128)
+    with h5py.File(tmp_path / "phi.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("phi_periodic", data=scalar)
+        handle.create_dataset("zero_mode", data=np.array([[True, False]]))
+    with h5py.File(tmp_path / "epsilon.h5", "w") as handle:
+        handle.create_dataset("epsilon", data=np.ones(shape))
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "dataset_type = mpb",
+                "field_components = full_vector",
+                "primary_field = magnetic",
+                "wannier_subspace = T + L",
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
+                "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+                "k_points = 0:1:1, 0:1:1, 0:1:1",
+                "band_window = 0:3",
+                "inner_window = false",
+                "longitudinal_band_window = 0:2",
+                "longitudinal_inner_window = false",
+                "dataset_file = ./H.h5",
+                "mesh_file = ./grid.h5",
+                "metric_file = false",
+                "E_file = ./E.h5",
+                "longitudinal_field_file = ./HL.h5",
+                "longitudinal_energy_file = ./EL.h5",
+                "pseudoscalar_file = ./phi.h5",
+                "pseudoscalar_metric_file = ./epsilon.h5",
+                "symmetry_file = Pm-3m",
+                "representation_analysis",
+                "Gamma; 0,0,0; H[0:3],L[0:2]",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(incar, mode="bloch_symmetry")
+    assert config.wannier_subspace == "T+L"
+    bundle = load_input(config)
+
+    assert bundle.fields[0, 0, 0].shape == (5, 8, 3)
+    assert bundle.band_indices[0, 0, 0] == [0, 1, 2, 3, 4]
+    assert bundle.band_channels[0].label == "H:0"
+    assert bundle.band_channels[3].label == "L:0"
+    selected = bundle.symmetry.model.representation_analysis.points[0].band_indices
+    assert selected == (0, 1, 2, 3, 4)
+    zero_fields = bundle.fields[0, 0, 0][[0, 1, 3]]
+    gram = UniformGridInnerProduct(bundle.mesh, bundle.metric_material).overlap(
+        zero_fields, zero_fields
+    )
+    assert np.allclose(gram, np.eye(3), atol=1.0e-14)
+
+
 def test_periodic_grid_quasiperiodic_stencil_tracks_each_corner_shift():
     grid = PeriodicGrid((2, 2), np.eye(2))
     stencil = PeriodicGridInterpolator(grid).stencil(

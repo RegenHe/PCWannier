@@ -81,6 +81,41 @@ def save_dict(filename: str | Path, data: dict) -> None:
             handle.write("\n")
 
 
+def save_vector_wanniers(filename: str | Path, result: RunResult) -> None:
+    """Write 3D vector Wannier fields as coordinates and complex components."""
+
+    path = Path(filename)
+    _ensure_parent(path)
+    coordinates = np.asarray(result.extended_mesh.vertices, dtype=float)
+    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
+        raise ValueError("Vector Wannier text output requires 3D mesh coordinates.")
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("# 3D vector Wannier fields\n")
+        handle.write("# columns: x y z, then Re(Hx) Im(Hx) Re(Hy) Im(Hy) Re(Hz) Im(Hz) per Wannier\n")
+        for cell, values in result.wanniers.items():
+            array = np.asarray(values, dtype=np.complex128)
+            if array.ndim != 3 or array.shape[0] != coordinates.shape[0] or array.shape[2] != 3:
+                raise ValueError(
+                    f"Vector Wannier cell {cell} has invalid shape {array.shape}."
+                )
+            handle.write(
+                f"CELL({', '.join(str(value) for value in cell)}) "
+                f"shape={array.shape}:\n"
+            )
+            columns = [coordinates]
+            for index in range(array.shape[1]):
+                for component in range(3):
+                    columns.extend(
+                        (
+                            array[:, index, component].real,
+                            array[:, index, component].imag,
+                        )
+                    )
+            matrix = np.column_stack(columns)
+            np.savetxt(handle, matrix, fmt="%.12e")
+            handle.write("\n")
+
+
 def save_band(filename: str | Path, energies: np.ndarray, k_path: np.ndarray | None, other_info: dict | None = None) -> None:
     path = Path(filename)
     _ensure_parent(path)
@@ -470,7 +505,11 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
     wannier_path = _resolve_output(config.wannier_file, config, out_dir)
     if wannier_path is not None:
         with timed_step("write Wannier data", LOGGER, file=wannier_path, count=len(result.wanniers)):
-            save_dict(wannier_path, result.wanniers)
+            first_wannier = np.asarray(next(iter(result.wanniers.values())))
+            if first_wannier.ndim == 3:
+                save_vector_wanniers(wannier_path, result)
+            else:
+                save_dict(wannier_path, result.wanniers)
 
     if result.band is not None:
         band_path = _resolve_output(config.band_file, config, out_dir)
@@ -497,6 +536,8 @@ def write_wannier_figures(directory: str | Path, result: RunResult) -> None:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     mesh = result.extended_mesh
+    if np.asarray(mesh.vertices).shape[1] != 2:
+        raise NotImplementedError("Three-dimensional Wannier volume figures are not implemented.")
     triang = Triangulation(mesh.vertices[:, 0], mesh.vertices[:, 1], mesh.elements)
     for r_key, wmat in result.wanniers.items():
         suffix = "-".join(str(x) for x in r_key)

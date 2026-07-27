@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from copy import copy
+from dataclasses import replace
 import logging
 
 import h5py
@@ -12,7 +13,12 @@ from ..conventions import (
     BlochConvention,
     BlochFieldRepresentation,
 )
-from ..data import InputBundle, PeriodicGrid, periodic_axis_coordinates
+from ..data import (
+    BandChannelReference,
+    InputBundle,
+    PeriodicGrid,
+    periodic_axis_coordinates,
+)
 from ..maxwell import FieldComponents, FieldKind, PrimaryField
 from ..timing import timed_step
 from .base import SourceAdapter
@@ -153,9 +159,7 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
     energy_rows = eigenvalues[row_for_k] / float(config.lattice_const) ** 2
     k_shape = _configured_k_shape(config)
     energy_matrix = energy_rows.reshape(k_shape + (eigenvalues.shape[1],))
-    energies, band_indices, inner_band_indices = _select_bands(
-        config, energy_matrix
-    )
+    energies, band_indices, inner_band_indices = _select_bands(config, energy_matrix)
 
     with timed_step("read MPB periodic magnetic fields", LOGGER, file=field_path):
         fields = _read_periodic_fields(
@@ -169,6 +173,20 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         )
     metric_material = _load_metric_material(config, grid)
     auxiliary_loaders = _build_auxiliary_channel_loaders(config, grid)
+
+    if config.wannier_subspace == "T+L":
+        return _combine_transverse_longitudinal(
+            config,
+            grid,
+            fields,
+            metric_material,
+            energy_matrix,
+            energies,
+            band_indices,
+            inner_band_indices,
+            eigenvalues.shape[1],
+            auxiliary_loaders,
+        )
 
     band_lengths = [
         len(band_indices[index]) for index in np.ndindex(band_indices.shape)
@@ -310,7 +328,15 @@ def _map_kpoints(config: IncarConfig, file_kpoints: np.ndarray) -> np.ndarray:
 def _select_bands(
     config: IncarConfig,
     energy_matrix: np.ndarray,
+    *,
+    outer_window=None,
+    inner_window=None,
+    description: str = "MPB",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if outer_window is None:
+        outer_window = config.band_window
+    if inner_window is None:
+        inner_window = config.inner_window
     k_shape = energy_matrix.shape[:3]
     energies = np.empty(k_shape, dtype=object)
     band_indices = np.empty(k_shape, dtype=object)
@@ -318,36 +344,214 @@ def _select_bands(
 
     for index in np.ndindex(k_shape):
         line = np.asarray(energy_matrix[index], dtype=float)
-        if isinstance(config.band_window, EnergyWindow):
+        if isinstance(outer_window, EnergyWindow):
             outer = np.flatnonzero(
-                (line >= config.band_window.emin)
-                & (line <= config.band_window.emax)
+                (line >= outer_window.emin)
+                & (line <= outer_window.emax)
             )
         else:
-            outer = np.asarray(config.band_window, dtype=int)
+            outer = np.asarray(outer_window, dtype=int)
         if outer.size == 0 or np.any(outer < 0) or np.any(outer >= line.size):
             raise ValueError(
-                f"MPB outer band window is empty or out of range at k={index}."
+                f"{description} outer band window is empty or out of range at k={index}."
             )
         band_indices[index] = outer.tolist()
         energies[index] = line[outer]
 
-        if config.inner_window is False:
+        if inner_window is False:
             inner = np.empty(0, dtype=int)
-        elif isinstance(config.inner_window, EnergyWindow):
+        elif isinstance(inner_window, EnergyWindow):
             inner = np.flatnonzero(
-                (line >= config.inner_window.emin)
-                & (line <= config.inner_window.emax)
+                (line >= inner_window.emin)
+                & (line <= inner_window.emax)
             )
         else:
-            inner = np.asarray(config.inner_window, dtype=int)
+            inner = np.asarray(inner_window, dtype=int)
         missing = sorted(set(int(value) for value in inner) - set(outer.tolist()))
         if missing:
             raise ValueError(
-                f"MPB frozen bands {missing} are outside the outer window at k={index}."
+                f"{description} frozen bands {missing} are outside the outer window at k={index}."
             )
         inner_indices[index] = inner.tolist()
     return energies, band_indices, inner_indices
+
+
+def _combine_transverse_longitudinal(
+    config: IncarConfig,
+    grid: PeriodicGrid,
+    physical_fields: np.ndarray,
+    metric_material: np.ndarray,
+    physical_energy_matrix: np.ndarray,
+    physical_energies: np.ndarray,
+    physical_bands: np.ndarray,
+    physical_inner: np.ndarray,
+    physical_band_count: int,
+    auxiliary_loaders,
+) -> InputBundle:
+    if grid.dimension != 3 or config.maxwell_problem.field_components is not FieldComponents.FULL_VECTOR:
+        raise NotImplementedError("wannier_subspace=T + L requires a 3D full-vector MPB calculation.")
+    field_path = config.input_path(config.longitudinal_field_file)
+    energy_path = config.input_path(config.longitudinal_energy_file)
+    scalar_path = config.input_path(config.pseudoscalar_file)
+    if field_path is None or energy_path is None or scalar_path is None:
+        raise ValueError(
+            "wannier_subspace=T + L requires longitudinal_field_file, "
+            "longitudinal_energy_file, and pseudoscalar_file."
+        )
+    raw_energy, rows = _read_eigenvalues(energy_path, config, description="longitudinal")
+    k_shape = _configured_k_shape(config)
+    longitudinal_energy_matrix = (
+        raw_energy[rows] / float(config.lattice_const) ** 2
+    ).reshape(k_shape + (raw_energy.shape[1],))
+    longitudinal_energies, longitudinal_bands, longitudinal_inner = _select_bands(
+        config,
+        longitudinal_energy_matrix,
+        outer_window=config.longitudinal_band_window,
+        inner_window=config.longitudinal_inner_window,
+        description="MPB longitudinal",
+    )
+    longitudinal_fields = _read_periodic_fields(
+        field_path,
+        config,
+        grid,
+        longitudinal_bands,
+        raw_energy.shape[1],
+        dataset_name="H_periodic",
+        vector=True,
+    )
+    longitudinal_zero = _read_selected_zero_modes(
+        scalar_path, config, longitudinal_bands, raw_energy.shape[1]
+    )
+
+    combined_fields = np.empty(k_shape, dtype=object)
+    combined_energies = np.empty(k_shape, dtype=object)
+    combined_bands = np.empty(k_shape, dtype=object)
+    combined_inner = np.empty(k_shape, dtype=object)
+    combined_zero = np.empty(k_shape, dtype=object)
+    l_offset = int(physical_band_count)
+    for index in np.ndindex(k_shape):
+        h_fields = np.asarray(physical_fields[index], dtype=np.complex128)
+        l_fields = np.asarray(longitudinal_fields[index], dtype=np.complex128)
+        h_energy = np.asarray(physical_energies[index], dtype=float)
+        l_energy = np.asarray(longitudinal_energies[index], dtype=float)
+        h_zero = h_energy <= config.gamma_zero_mode_tolerance
+        l_zero = np.asarray(longitudinal_zero[index], dtype=bool)
+
+        k_fractional = np.asarray(
+            [config.k_points[axis][index[axis]] for axis in range(3)], dtype=float
+        )
+        at_gamma = np.allclose(
+            k_fractional - np.rint(k_fractional),
+            0.0,
+            rtol=0.0,
+            atol=max(config.symmetry_tolerance, 1.0e-12),
+        )
+        if at_gamma and (np.any(h_zero) or np.any(l_zero)):
+            h_positions = np.flatnonzero(h_zero)
+            l_positions = np.flatnonzero(l_zero)
+            if h_positions.size != 2 or l_positions.size != 1:
+                raise ValueError(
+                    "The Gamma T+L zero-frequency regularization requires exactly two selected "
+                    f"physical T modes and one selected L mode; got T={h_positions.size}, L={l_positions.size}."
+                )
+            metric_integral = grid.cell_volume * float(np.mean(metric_material, dtype=np.float64))
+            if not np.isfinite(metric_integral) or metric_integral <= 0.0:
+                raise ValueError("The magnetic metric gives a non-positive constant-field norm.")
+            constants = np.zeros((3, grid.point_count, 3), dtype=np.complex128)
+            constants[:, :, :] = np.eye(3, dtype=np.complex128)[:, None, :] / np.sqrt(metric_integral)
+            h_fields = h_fields.copy()
+            l_fields = l_fields.copy()
+            h_fields[h_positions[0]] = constants[0]
+            h_fields[h_positions[1]] = constants[1]
+            l_fields[l_positions[0]] = constants[2]
+
+        selected_h = np.asarray(physical_bands[index], dtype=int)
+        selected_l = np.asarray(longitudinal_bands[index], dtype=int)
+        combined_fields[index] = np.ascontiguousarray(
+            np.concatenate((h_fields, l_fields), axis=0)
+        )
+        combined_energies[index] = np.concatenate((h_energy, l_energy))
+        combined_bands[index] = np.concatenate((selected_h, l_offset + selected_l)).tolist()
+        combined_inner[index] = (
+            list(int(value) for value in physical_inner[index])
+            + [l_offset + int(value) for value in longitudinal_inner[index]]
+        )
+        combined_zero[index] = np.concatenate((h_zero, l_zero))
+
+    combined_energy_matrix = np.concatenate(
+        (physical_energy_matrix, longitudinal_energy_matrix), axis=-1
+    )
+    channels = {
+        int(index): BandChannelReference("H", int(index))
+        for index in range(physical_band_count)
+    }
+    channels.update(
+        {
+            l_offset + int(index): BandChannelReference("L", int(index))
+            for index in range(raw_energy.shape[1])
+        }
+    )
+    LOGGER.info(
+        "MPB T+L outer space prepared: H bands retain ids [0,%s), L offset=%s",
+        physical_band_count,
+        l_offset,
+    )
+    symmetry_context = _resolve_channel_analysis_context(
+        config, l_offset=l_offset
+    )
+    return InputBundle(
+        config=config,
+        maxwell=config.maxwell_problem,
+        bloch_convention=MPB_BLOCH_CONVENTION,
+        mesh=grid,
+        fields=combined_fields,
+        metric_material=metric_material,
+        energies=combined_energies,
+        band_indices=combined_bands,
+        inner_band_indices=combined_inner,
+        energy_matrix=combined_energy_matrix,
+        field_representation=BlochFieldRepresentation.PERIODIC_PART,
+        symmetry=symmetry_context,
+        analysis_field_kind=FieldKind.MAGNETIC_AXIAL_VECTOR,
+        zero_modes=combined_zero,
+        band_channels=channels,
+        auxiliary_bundle_loaders=auxiliary_loaders,
+    )
+
+
+def _resolve_channel_analysis_context(config: IncarConfig, *, l_offset: int):
+    context = config.symmetry_context
+    if context is None or context.model.representation_analysis is None:
+        return context
+    raw_points = config.representation_analysis or ()
+    specification = context.model.representation_analysis
+    if len(raw_points) != len(specification.points):
+        raise RuntimeError("Representation-analysis config and symmetry model are inconsistent.")
+    changed = False
+    resolved_points = []
+    for raw, point in zip(raw_points, specification.points):
+        selectors = raw.get("channel_bands")
+        if not selectors:
+            resolved_points.append(point)
+            continue
+        bands = []
+        bands.extend(int(value) for value in selectors.get("H", ()))
+        bands.extend(l_offset + int(value) for value in selectors.get("L", ()))
+        if not bands or len(set(bands)) != len(bands):
+            raise ValueError(
+                f"Representation point {point.name!r} has an empty or duplicate H/L selector."
+            )
+        resolved_points.append(replace(point, band_indices=tuple(bands)))
+        changed = True
+    if not changed:
+        return context
+    from ..symmetry import build_symmetry_context
+
+    analysis = replace(specification, points=tuple(resolved_points))
+    model = replace(context.model, representation_analysis=analysis)
+    resolved = build_symmetry_context(model, context.k_points)
+    config.symmetry_context = resolved
+    return resolved
 
 
 def _read_periodic_fields(
@@ -472,7 +676,17 @@ def _build_auxiliary_channel_loaders(
     energy_matrix = (
         raw_energy[rows] / float(config.lattice_const) ** 2
     ).reshape(k_shape + (raw_energy.shape[1],))
-    energies, bands, inner = _select_bands(config, energy_matrix)
+    energies, bands, inner = _select_bands(
+        config,
+        energy_matrix,
+        outer_window=(
+            config.band_window
+            if config.longitudinal_band_window is None
+            else config.longitudinal_band_window
+        ),
+        inner_window=config.longitudinal_inner_window,
+        description="MPB longitudinal",
+    )
 
     field_path = values["longitudinal_field_file"]
     scalar_path = values["pseudoscalar_file"]

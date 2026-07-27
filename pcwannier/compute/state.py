@@ -52,6 +52,7 @@ class StateCollection:
         self.E_idx = bundle.band_indices
         self.inner_E_idx = bundle.inner_band_indices
         self.energy_matrix = bundle.energy_matrix
+        self.band_channels = dict(bundle.band_channels)
         self.kdim = int(self.config.kdim)
         self.k_shape = self.fields.shape
 
@@ -70,6 +71,10 @@ class StateCollection:
         self.extended_metric_material: np.ndarray | None = None
         self._identity_transform: np.ndarray | None = None
         self._phase_cache: dict[tuple[int, int, int], np.ndarray] = {}
+
+    def band_label(self, actual_band_index: int) -> str:
+        reference = self.band_channels.get(int(actual_band_index))
+        return str(int(actual_band_index) + 1) if reference is None else reference.label
 
     def _normalize_field_blocks(self) -> None:
         for idx in np.ndindex(self.fields.shape):

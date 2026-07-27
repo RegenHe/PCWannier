@@ -69,7 +69,10 @@ class MSet:
                 elif k_raw is not None:
                     phase1 = self.state.get_phase(*ik)
                     phase2 = self.state.get_phase(*k_raw)
-                    right = right * (phase1 * np.conj(phase2))[None, :]
+                    phase = (phase1 * np.conj(phase2))[None, :]
+                    if right.ndim == 3:
+                        phase = phase[:, :, None]
+                    right = right * phase
                 result.append(
                     self.state.inner_product.overlap(
                         left,

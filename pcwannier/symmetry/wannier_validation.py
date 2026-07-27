@@ -39,7 +39,11 @@ class _PartialStencil:
 
     def apply(self, values: np.ndarray) -> np.ndarray:
         array = np.asarray(values)
-        output = np.zeros(array.shape[:-1] + (self.vertex_indices.shape[0],), dtype=array.dtype)
+        if array.ndim < 1 or array.shape[0] <= np.max(self.vertex_indices, initial=-1):
+            raise ValueError("Localized Wannier values must use the mesh-point axis first.")
+        output = np.zeros(
+            (self.vertex_indices.shape[0],) + array.shape[1:], dtype=array.dtype
+        )
         valid = self.valid_vertices
         if array.ndim == 1:
             output[valid] = np.einsum(
@@ -49,7 +53,13 @@ class _PartialStencil:
                 optimize=True,
             )
             return output
-        raise ValueError("Localized Wannier interpolation currently expects one scalar field.")
+        output[valid] = np.einsum(
+            "vc,vc...->v...",
+            self.weights[valid],
+            array[self.vertex_indices[valid]],
+            optimize=True,
+        )
+        return output
 
 
 class _TriangleInterpolator:
@@ -207,7 +217,7 @@ def validate_wannier_symmetry(
     minimum_retained_norm: float = 0.99,
     enforce_residual: bool = True,
 ) -> WannierSymmetryValidation:
-    """Validate the induced real-space Wannier transformation on a 2D scalar FEM mesh."""
+    """Validate induced real-space Wannier transformations on supported meshes."""
     if ctx.symmetry_gauge is None:
         raise ValueError("Real-space symmetry validation requires a symmetry-adapted Bloch gauge.")
     state = ctx.state
@@ -222,10 +232,13 @@ def validate_wannier_symmetry(
         _, zero_cell_wanniers, _ = generate_wannier(ctx)
     zero_cell = np.asarray(zero_cell_wanniers, dtype=np.complex128)
     expected_dimension = sum(target.wannier_dimension for target in target_items)
-    if zero_cell.shape != (mesh.vertices.shape[0], expected_dimension):
+    expected_shape = (mesh.vertices.shape[0], expected_dimension)
+    if state.get_extention_block(0, 0, 0).ndim == 3:
+        expected_shape += (state.get_extention_block(0, 0, 0).shape[-1],)
+    if zero_cell.shape != expected_shape:
         raise ValueError(
             f"Zero-cell Wannier array has shape {zero_cell.shape}; "
-            f"expected {(mesh.vertices.shape[0], expected_dimension)}."
+            f"expected {expected_shape}."
         )
 
     needed_shifts = {
@@ -297,14 +310,10 @@ def validate_wannier_symmetry(
             state.maxwell.symmetry_field_kind,
             group.tolerance,
         )
-        if field_matrix.shape != (1, 1):
-            raise NotImplementedError(
-                "Real-space Wannier symmetry validation currently supports scalar Ez/Hz fields only."
-            )
         operation_data[operation_index] = (
             stencil,
             inner_product,
-            complex(field_matrix[0, 0]),
+            np.asarray(field_matrix, dtype=np.complex128),
         )
 
     full_inner_product = state.extended_inner_product
@@ -313,18 +322,20 @@ def validate_wannier_symmetry(
     for target in target_items:
         irrep_dimension = target.site_irrep.dimension
         for operation_index, operation in enumerate(group.operations):
-            stencil, valid_inner_product, component_factor = operation_data[operation_index]
+            stencil, valid_inner_product, component_matrix = operation_data[operation_index]
             for orbit_index in range(target.multiplicity):
                 action = target.orbit.action(operation_index, orbit_index)
                 shift = tuple(int(value) for value in action.lattice_shift)
                 site_matrix = target.site_irrep.matrix(action.site_element_index)
                 for irrep_index in range(irrep_dimension):
                     source_index = offset + target.wannier_index(irrep_index, orbit_index)
-                    transformed = component_factor * stencil.apply(
-                        zero_cell[:, source_index]
-                    )
+                    transformed = stencil.apply(zero_cell[:, source_index])
                     if operation.antiunitary:
                         transformed = state.maxwell.apply_time_reversal(transformed)
+                    if transformed.ndim == 1:
+                        transformed = complex(component_matrix[0, 0]) * transformed
+                    else:
+                        transformed = transformed @ component_matrix.T
                     target_indices = tuple(
                         offset + target.wannier_index(row, action.target_index)
                         for row in range(irrep_dimension)

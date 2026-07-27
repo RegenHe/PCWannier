@@ -445,6 +445,16 @@ class RawData:
     column_parameters: dict[str, np.ndarray] | None = None
 
 
+@dataclass(frozen=True)
+class BandChannelReference:
+    channel: str
+    source_band_index: int
+
+    @property
+    def label(self) -> str:
+        return f"{self.channel}:{self.source_band_index}"
+
+
 @dataclass
 class InputBundle:
     config: IncarConfig
@@ -461,6 +471,7 @@ class InputBundle:
     symmetry: SymmetryContext | None = None
     analysis_field_kind: FieldKind | None = None
     zero_modes: np.ndarray | None = None
+    band_channels: dict[int, BandChannelReference] = field(default_factory=dict)
     auxiliary_bundle_loaders: dict[str, Callable[[], "InputBundle"]] = field(
         default_factory=dict
     )
@@ -544,6 +555,7 @@ class RunResult:
     hopping_reconstruction_diagnostics: HoppingReconstructionDiagnostics | None = None
     sewing_matrices: tuple[SewingMatrixCacheEntry, ...] | None = None
     sewing_calculation_fingerprint: str | None = None
+    trial_covariance_diagnostics: tuple[Any, ...] = ()
 
 
 @dataclass

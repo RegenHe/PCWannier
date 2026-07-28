@@ -9,7 +9,7 @@ from pcwannier.compute.initializer import StateInitializer
 from pcwannier.compute.matrix import MSet
 from pcwannier.compute.parallel import parallel_map
 from pcwannier.compute.state import StateCollection
-from pcwannier.data import InputBundle, Mesh
+from pcwannier.data import BandChannelReference, InputBundle, Mesh
 from pcwannier.matrix_io import save_cell_matrix
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.compute.tba import TBAModel
@@ -79,6 +79,55 @@ def test_output_spectrum_diagnostics_distinguish_strict_and_fem_bases():
     fem_splitting = fem_diagnostics.degeneracy_splittings[0]
     assert fem_diagnostics.max_eigenvalue_drift == 0.0
     assert fem_splitting.output_gap == 0.0
+
+
+def test_tba_inverts_only_longitudinal_energies_before_output_gauge():
+    energies = _object_grid(np.array([4.0, 6.0, 9.0]))
+    band_indices = _object_grid([0, 1, 10])
+    config = SimpleNamespace(
+        band_calc_num=3,
+        kdim=3,
+        real_lattice_vectors=np.eye(3),
+        reciprocal_lattice_vectors=np.eye(3),
+        lattice_const=1.0,
+        k_points=[np.array([0.0]), np.array([0.0]), np.array([0.0])],
+        invert_longitudinal_energies=True,
+    )
+    state = SimpleNamespace(
+        E=energies,
+        E_idx=band_indices,
+        band_channels={
+            0: BandChannelReference("H", 0),
+            1: BandChannelReference("H", 1),
+            10: BandChannelReference("L", 0),
+        },
+        k_shape=(1, 1, 1),
+        k_indices=lambda: iter(((0, 0, 0),)),
+        get_k_num=lambda: 1,
+        bloch_sign=1,
+    )
+    unitary = np.array(
+        [
+            [1.0 / np.sqrt(2.0), 0.0, 1.0 / np.sqrt(2.0)],
+            [0.0, 1.0, 0.0],
+            [-1.0 / np.sqrt(2.0), 0.0, 1.0 / np.sqrt(2.0)],
+        ],
+        dtype=np.complex128,
+    )
+    ctx = SimpleNamespace(
+        config=config,
+        state=state,
+        output_state_coefficients_at=lambda *_: unitary,
+    )
+    model = TBAModel(ctx)
+
+    _, projected = model._projected_k_hamiltonians()
+    expected = unitary.conj().T @ np.diag([4.0, 6.0, -9.0]) @ unitary
+
+    assert np.allclose(projected[0], expected)
+    assert np.allclose(model.gen_hopping((0, 0, 0)), expected)
+    assert np.allclose(np.linalg.eigvalsh(projected[0]), [-9.0, 4.0, 6.0])
+    assert np.array_equal(energies[0, 0, 0], [4.0, 6.0, 9.0])
 
 
 def test_parallel_map_preserves_deterministic_input_order():

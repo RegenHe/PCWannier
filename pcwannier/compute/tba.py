@@ -60,7 +60,7 @@ class TBAModel:
         projected = np.empty((k_count, band_count, band_count), dtype=np.complex128)
         for pos, (i, j, k) in enumerate(state.k_indices()):
             umat = self.ctx.output_state_coefficients_at(i, j, k)
-            energy = np.asarray(state.E[i, j, k], dtype=np.complex128)
+            energy = self._output_energies_at((i, j, k))
             projected[pos] = np.conj(umat).T @ (energy[:, None] * umat)
             k_cart[pos] = get_kxyz(config, [i, j, k])[:dim]
         self._projected_k_cart = k_cart
@@ -76,7 +76,7 @@ class TBAModel:
             return None
 
         raw = np.asarray(
-            [np.sort(np.real(np.asarray(self.state.E[index], dtype=np.complex128))) for index in indices]
+            [np.sort(np.real(self._output_energies_at(index))) for index in indices]
         )
         output = np.linalg.eigvalsh(self._hermitian_batch(projected))
         errors = np.max(np.abs(output - raw), axis=1)
@@ -137,7 +137,7 @@ class TBAModel:
             actual_bands = tuple(int(value) for value in np.asarray(self.state.E_idx[state_index]).reshape(-1))
             if len(actual_bands) != band_count:
                 continue
-            raw_energies = np.real(np.asarray(self.state.E[state_index], dtype=np.complex128))
+            raw_energies = np.real(self._output_energies_at(state_index))
             sorted_local = np.argsort(raw_energies)
             rank_by_band = {actual_bands[local]: rank for rank, local in enumerate(sorted_local)}
             flat = int(np.ravel_multi_index(state_index, self.state.k_shape))
@@ -169,6 +169,32 @@ class TBAModel:
                     )
                 )
         return tuple(output)
+
+    def _output_energies_at(self, index: tuple[int, int, int]) -> np.ndarray:
+        """Return energies used only by final hopping and band construction."""
+
+        energies = np.asarray(self.state.E[index], dtype=np.complex128).reshape(-1)
+        if not bool(getattr(self.config, "invert_longitudinal_energies", False)):
+            return energies
+        actual_bands = np.asarray(self.state.E_idx[index], dtype=int).reshape(-1)
+        if actual_bands.size != energies.size:
+            raise ValueError(
+                f"Band channel metadata at k={index} does not match the energy window."
+            )
+        channels = getattr(self.state, "band_channels", {})
+        signs = np.ones(energies.size, dtype=float)
+        longitudinal = 0
+        for position, actual_band in enumerate(actual_bands):
+            reference = channels.get(int(actual_band))
+            if reference is not None and str(reference.channel).upper() == "L":
+                signs[position] = -1.0
+                longitudinal += 1
+        if longitudinal == 0:
+            raise ValueError(
+                "invert_longitudinal_energies=true was requested, but the output window "
+                f"contains no L-channel bands at k={index}."
+            )
+        return energies * signs
 
     @staticmethod
     def _hermitian_batch(matrices: np.ndarray) -> np.ndarray:

@@ -157,6 +157,114 @@ def log_symmetry_analysis(result: SymmetryAnalysisResult) -> None:
     log_target_compatibilities(result.target_compatibilities)
 
 
+def format_bloch_symmetry_report(
+    result: BlochSymmetryAnalysisResult,
+    *,
+    title: str = "physical",
+) -> str:
+    """Return a compact, human-readable summary without matrix-level diagnostics."""
+
+    lines = [f"[{title}]"]
+    for point in result.points:
+        factor = point.factor_system
+        if factor is None:
+            factor_kind = "ordinary"
+        elif any(factor.antiunitary_flags):
+            factor_kind = "antiunitary"
+        elif factor.cohomologically_trivial:
+            factor_kind = "ordinary"
+        else:
+            factor_kind = "projective"
+        lines.extend(
+            (
+                f"{point.name}: k={_format_vector(point.sampled_k_fractional)}",
+                "  group="
+                f"{point.little_group_name or 'unresolved'}; "
+                f"unitary_subgroup={point.unitary_subgroup_name or point.little_group_name or 'unresolved'}; "
+                f"factor={factor_kind}",
+                f"  analyzed_bands={_format_bands(point.band_indices)}; "
+                f"outer_bands={_format_bands(point.outer_band_indices)}",
+            )
+        )
+        if point.antiunitary_operation_names:
+            lines.append(
+                "  antiunitary_operations=" + ", ".join(point.antiunitary_operation_names)
+            )
+        for block in point.degenerate_blocks:
+            irrep = (
+                _format_irrep_decomposition(block.decomposition)
+                if block.decomposition is not None
+                else "unavailable"
+            )
+            lines.append(
+                f"  bands {_format_bands(block.band_indices)}: "
+                f"eigenvalues={_format_values(block.energies)}; "
+                f"dimension={len(block.band_indices)}; irrep={irrep}"
+            )
+            for operation, eigenvalues in block.generator_eigenvalues.items():
+                lines.append(
+                    f"    {operation} eigenvalues={_format_values(eigenvalues)}"
+                )
+            if block.irrep_unavailable_reason:
+                lines.append(f"    note={block.irrep_unavailable_reason}")
+        lines.append(
+            "  residuals: "
+            f"unitarity={point.diagnostics.unitarity_error:.6g}; "
+            f"leakage={point.diagnostics.leakage:.6g}; "
+            f"composition={point.diagnostics.selected_twisted_composition_residual:.6g}"
+        )
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def format_target_compatibility_report(
+    results: tuple[TargetCompatibilityAnalysis, ...],
+) -> str:
+    if not results:
+        return ""
+    lines = ["[target compatibility]"]
+    for result in results:
+        compatibility = result.compatibility
+        compatible = "unavailable" if compatibility is None else str(compatibility.compatible).lower()
+        target_irreps = (
+            "unavailable"
+            if result.target_decomposition is None
+            else _format_irrep_decomposition(result.target_decomposition)
+        )
+        lines.append(
+            f"{result.point_name}: targets={', '.join(result.target_names)}; "
+            f"irreps={target_irreps}; compatible={compatible}; "
+            f"intertwiner_dimension={result.intertwiner_dimension}"
+        )
+    return "\n".join(lines)
+
+
+def format_symmetry_analysis_report(result: SymmetryAnalysisResult) -> str:
+    sections = [format_bloch_symmetry_report(result.physical)]
+    target = format_target_compatibility_report(result.target_compatibilities)
+    if target:
+        sections.append(target)
+    return "# PCWannier symmetry analysis\n\n" + "\n\n".join(sections) + "\n"
+
+
+def format_gamma_zero_regularization_report(
+    result: GammaZeroRegularizationAnalysis,
+) -> str:
+    irrep = (
+        "unavailable"
+        if result.decomposition is None
+        else _format_irrep_decomposition(result.decomposition)
+    )
+    return "\n".join(
+        (
+            "[Gamma T+L regularization]",
+            f"{result.point_name}: transverse_bands={_format_bands(result.transverse_band_indices)}; "
+            f"longitudinal_bands={_format_bands(result.scalar_zero_band_indices)}; irrep={irrep}",
+            f"note={result.note}",
+        )
+    )
+
+
 def _format_irrep_decomposition(decomposition) -> str:
     terms = []
     for name, multiplicity in decomposition.multiplicities.items():
@@ -164,3 +272,22 @@ def _format_irrep_decomposition(decomposition) -> str:
             continue
         terms.append(name if multiplicity == 1 else f"{multiplicity}{name}")
     return " + ".join(terms) or "none"
+
+
+def _format_bands(indices) -> str:
+    values = tuple(int(value) + 1 for value in indices)
+    return ",".join(str(value) for value in values) or "none"
+
+
+def _format_vector(values) -> str:
+    return "(" + ", ".join(f"{float(value):.8g}" for value in values) + ")"
+
+
+def _format_values(values) -> str:
+    def one(value) -> str:
+        number = complex(value)
+        if abs(number.imag) <= 1.0e-12:
+            return f"{number.real:.10g}"
+        return f"{number.real:.10g}{number.imag:+.10g}j"
+
+    return "(" + ", ".join(one(value) for value in values) + ")"

@@ -15,6 +15,7 @@ from pcwannier.data import BlochSymmetryRunResult, InputBundle, Mesh
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.matrix_io import load_cell_matrix
 from pcwannier.outputs import write_bloch_symmetry_outputs
+from pcwannier.symmetry.reporting import format_symmetry_analysis_report
 from pcwannier.symmetry import (
     BlochSymmetryAction,
     DegeneracyTolerance,
@@ -721,6 +722,11 @@ def test_magnetic_target_compatibility_excludes_antiunitary_traces():
     assert not set(compatibility.target_unitary_characters) & set(
         point.antiunitary_operation_names
     )
+    report = format_symmetry_analysis_report(result)
+    assert "[target compatibility]" in report
+    assert "Gamma: targets=" in report
+    assert "compatible=unavailable" in report
+    assert "intertwiner_dimension=3" in report
 
 
 def test_bloch_analysis_reuses_one_full_outer_sewing_per_operation():
@@ -820,8 +826,13 @@ def test_bloch_preanalysis_writes_reusable_s_and_d_text_caches(tmp_path):
 
     loaded_s = load_cell_matrix(tmp_path / "S.txt", (1, 1, 1))
     loaded_d = load_sewing_matrix_cache(tmp_path / "D.txt")
+    report = (tmp_path / "sym.txt").read_text(encoding="utf-8")
     assert np.allclose(loaded_s[0, 0, 0], np.eye(2))
     assert len(loaded_d.entries) == len(model.group.operations)
+    assert "[physical]" in report
+    assert "Gamma: k=(0, 0)" in report
+    assert "bands 1,2:" in report
+    assert "irrep=E" in report
 
 
 def test_target_2c_a1_has_expected_gamma_x_m_content():

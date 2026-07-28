@@ -16,6 +16,11 @@ from .config import EnergyWindow, IncarConfig
 from .data import BandResult, BlochSymmetryRunResult, Mesh, RunResult, TopologyResult
 from .matrix_io import save_cell_matrix
 from .symmetry.cache import save_sewing_matrix_cache
+from .symmetry.reporting import (
+    format_bloch_symmetry_report,
+    format_gamma_zero_regularization_report,
+    format_symmetry_analysis_report,
+)
 from .timing import timed_step
 
 LOGGER = logging.getLogger(__name__)
@@ -38,6 +43,12 @@ def _resolve_output(path_value, config: IncarConfig, out_dir: str | Path | None 
 def _ensure_parent(path: Path) -> None:
     if path.parent:
         path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _save_text(path: str | Path, text: str) -> None:
+    output = Path(path)
+    _ensure_parent(output)
+    output.write_text(text, encoding="utf-8")
 
 
 def _fmt_c(value, tol=1e-12, prec=8, force_complex=False, spaced=True, zero_small_imag=True):
@@ -452,6 +463,27 @@ def write_bloch_symmetry_outputs(
                 calculation_fingerprint=channel.sewing_calculation_fingerprint,
             )
 
+    report_path = _resolve_output(
+        getattr(config, "symmetry_report_file", "./sym.txt"), config, out_dir
+    )
+    if report_path is not None:
+        sections = [
+            "# PCWannier symmetry analysis",
+            format_bloch_symmetry_report(result.analysis, title="physical"),
+        ]
+        if result.gamma_zero_regularization is not None:
+            sections.append(
+                format_gamma_zero_regularization_report(
+                    result.gamma_zero_regularization
+                )
+            )
+        sections.extend(
+            format_bloch_symmetry_report(channel.analysis, title=channel_name)
+            for channel_name, channel in result.auxiliary_channels.items()
+        )
+        with timed_step("write symmetry report", LOGGER, file=report_path):
+            _save_text(report_path, "\n\n".join(sections) + "\n")
+
 
 def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir: str | Path | None = None) -> None:
     config = config or result.config
@@ -495,6 +527,17 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
                 bloch_sign=result.symmetry.model.bloch_convention.sign,
                 k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
                 calculation_fingerprint=result.sewing_calculation_fingerprint,
+            )
+
+    report_path = _resolve_output(
+        getattr(config, "symmetry_report_file", "./sym.txt"), config, out_dir
+    )
+    symmetry_analysis = getattr(result, "symmetry_analysis", None)
+    if report_path is not None and symmetry_analysis is not None:
+        with timed_step("write symmetry report", LOGGER, file=report_path):
+            _save_text(
+                report_path,
+                format_symmetry_analysis_report(symmetry_analysis),
             )
 
     hopping_path = _resolve_output(config.hopping_file, config, out_dir)

@@ -292,6 +292,7 @@ def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regul
                 "field_components = full_vector",
                 "primary_field = magnetic",
                 "wannier_subspace = T + L",
+                "invert_longitudinal_energies = true",
                 "lattice_const = 1",
                 "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
                 "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
@@ -319,6 +320,7 @@ def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regul
 
     config = load_config(incar, mode="bloch_symmetry")
     assert config.wannier_subspace == "T+L"
+    assert config.invert_longitudinal_energies is True
     bundle = load_input(config)
 
     assert bundle.fields[0, 0, 0].shape == (5, 8, 3)

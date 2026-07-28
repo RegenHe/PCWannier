@@ -567,6 +567,11 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             " (diagnostic only for FEM output)" if not enforce_wannier_residual else "",
         )
     tba = TBAModel(ctx, threads=threads)
+    if config.invert_longitudinal_energies:
+        LOGGER.info(
+            "Final TBA spectrum: L-channel Maxwell eigenvalues are multiplied by -1 "
+            "before the output gauge transformation"
+        )
     physical_analysis = None if symmetry_analysis is None else symmetry_analysis.physical
     output_spectrum_diagnostics = tba.output_spectrum_diagnostics(physical_analysis)
     _log_output_spectrum_diagnostics(output_spectrum_diagnostics, config)

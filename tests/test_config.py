@@ -32,6 +32,8 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.compute_backend == "python"
     assert cfg.integration_mode == "nodal"
     assert cfg.wannier_subspace == "T"
+    assert cfg.invert_longitudinal_energies is False
+    assert cfg.symmetry_report_file == "./sym.txt"
     assert cfg.field_components == FieldComponents.EZ.value
     assert cfg.maxwell_problem.primary_field == PrimaryField.ELECTRIC
     assert cfg.maxwell_problem.metric_material == MaterialKind.EPSILON
@@ -82,6 +84,17 @@ def test_bloch_symmetry_config_mode_does_not_require_wannier_inputs(tmp_path):
     assert cfg.symmetry_context.model.symmetry_gauge is None
     point = cfg.symmetry_context.model.representation_analysis.points[0]
     assert point.target_names is None
+
+
+def test_longitudinal_energy_inversion_requires_t_plus_l(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        _minimal_symmetry_incar() + "\ninvert_longitudinal_energies = true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"requires wannier_subspace=T \+ L"):
+        load_config(incar)
 
 
 def test_energy_window_parser(tmp_path):

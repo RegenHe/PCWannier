@@ -40,6 +40,7 @@ class IncarConfig:
     longitudinal_field_file: str | bool = False
     longitudinal_energy_file: str | bool = False
     wannier_subspace: str = "T"
+    invert_longitudinal_energies: bool = False
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None
     longitudinal_inner_window: np.ndarray | EnergyWindow | bool = False
     pseudoscalar_file: str | bool = False
@@ -87,6 +88,7 @@ class IncarConfig:
     A_file: str = "./A.txt"
     S_file: str = "./S.txt"
     D_file: str = "./D.txt"
+    symmetry_report_file: str | bool = "./sym.txt"
     band_file: str = "./band.txt"
     hopping_file: str = "./hopping.txt"
     wannier_file: str = "./wannier.txt"
@@ -644,6 +646,7 @@ class IncarParser:
             "pseudoscalar_D_file",
             "S_file",
             "D_file",
+            "symmetry_report_file",
             "U_file",
             "V_file",
             "A_file",
@@ -769,6 +772,7 @@ class IncarParser:
             "symmetry_constrained",
             "symmetry_validate_wannier",
             "gamma_zero_regularization",
+            "invert_longitudinal_energies",
         }:
             normalized = value.strip().lower()
             if normalized not in {"true", "false"}:
@@ -1300,6 +1304,10 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
     ):
         raise ValueError(
             "H[...] and L[...] representation-analysis selectors require wannier_subspace=T + L."
+        )
+    if cfg.invert_longitudinal_energies and cfg.wannier_subspace != "T+L":
+        raise ValueError(
+            "invert_longitudinal_energies=true requires wannier_subspace=T + L."
         )
     cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
     if cfg.symmetry_output_basis not in {"strict", "fem"}:

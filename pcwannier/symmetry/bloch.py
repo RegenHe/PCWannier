@@ -1135,6 +1135,7 @@ class StateBlochSymmetryProvider:
         maxwell = getattr(self.state, "maxwell", None)
         if maxwell is not None:
             digest.update(maxwell.field_components.value.encode("utf-8"))
+            digest.update(maxwell.primary_field.value.encode("utf-8"))
             digest.update(maxwell.metric_material.value.encode("utf-8"))
         mode = self.state.inner_product.mode
         digest.update(str(getattr(mode, "value", mode)).encode("utf-8"))

@@ -77,8 +77,6 @@ def run_bloch_symmetry_preanalysis(
                 channel_name="physical",
             )
             auxiliary_channels = {}
-            pseudoscalar_zero_modes = None
-            pseudoscalar_band_indices = None
             for channel_name, load_auxiliary in bundle.auxiliary_bundle_loaders.items():
                 auxiliary = load_auxiliary()
                 auxiliary_channels[channel_name] = _analyze_bundle_channel(
@@ -87,30 +85,27 @@ def run_bloch_symmetry_preanalysis(
                     resolved_backend=resolved_backend,
                     channel_name=channel_name,
                 )
-                if channel_name == "pseudoscalar":
-                    pseudoscalar_zero_modes = auxiliary.zero_modes
-                    pseudoscalar_band_indices = auxiliary.band_indices
                 del auxiliary
             gamma_regularization = None
             if bundle.config.gamma_zero_regularization:
-                if pseudoscalar_zero_modes is None or pseudoscalar_band_indices is None:
+                longitudinal_zero_bands = bundle.auxiliary_zero_mode_bands.get(
+                    "longitudinal"
+                )
+                if longitudinal_zero_bands is None:
                     raise ValueError(
-                        "Gamma zero regularization requires the pseudoscalar zero-mode metadata."
+                        "Gamma zero regularization requires longitudinal zero-mode metadata."
                     )
                 gamma_point = physical.analysis.point("Gamma")
                 storage_index = tuple(gamma_point.k_index) + (0,) * (
                     3 - len(gamma_point.k_index)
                 )
-                zero_mask = np.asarray(
-                    pseudoscalar_zero_modes[storage_index], dtype=bool
-                )
-                scalar_bands = np.asarray(
-                    pseudoscalar_band_indices[storage_index], dtype=int
+                longitudinal_bands = np.asarray(
+                    longitudinal_zero_bands[storage_index], dtype=int
                 )
                 physical.analysis, gamma_regularization = regularize_gamma_zero_modes(
                     physical.analysis,
                     bundle.symmetry,
-                    tuple(int(value) for value in scalar_bands[zero_mask]),
+                    tuple(int(value) for value in longitudinal_bands),
                     bundle.config.real_lattice_vectors,
                     energy_tolerance=bundle.config.gamma_zero_mode_tolerance,
                 )
@@ -159,17 +154,22 @@ def _analyze_bundle_channel(
             )
     LOGGER.info("Bloch symmetry channel: name=%s field_kind=%s", channel_name, field_kind.value)
     differential_diagnostics = None
-    if field_kind.value == "magnetic_axial_vector" and getattr(bundle.mesh, "dimension", 0) == 3:
+    if field_kind.value in {
+        "electric_polar_vector",
+        "magnetic_axial_vector",
+    } and getattr(bundle.mesh, "dimension", 0) == 3:
+        is_electric = field_kind.value == "electric_polar_vector"
         quantity = "curl" if channel_name == "longitudinal" else "longitudinal"
         differential_diagnostics = diagnose_bundle_vector_fields(
             bundle,
             quantity=quantity,
+            apply_metric=is_electric and quantity == "longitudinal",
         )
         LOGGER.info(
             "Vector-field diagnostic: channel=%s quantity=%s max=%.6g mean=%.6g "
             "worst_k=%s worst_band(1-based)=%s",
             channel_name,
-            quantity,
+            differential_diagnostics.quantity,
             differential_diagnostics.max_residual,
             differential_diagnostics.mean_residual,
             differential_diagnostics.worst_k_index,

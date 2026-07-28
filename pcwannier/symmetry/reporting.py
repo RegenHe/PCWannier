@@ -17,11 +17,11 @@ LOGGER = logging.getLogger(__name__)
 def log_gamma_zero_regularization(result: GammaZeroRegularizationAnalysis) -> None:
     LOGGER.info(
         "Gamma T+L regularization %s: physical_T_bands(1-based)=%s "
-        "scalar_zero_bands(1-based)=%s irrep=%s unitarity=%.6g "
+        "longitudinal_zero_bands(1-based)=%s irrep=%s unitarity=%.6g "
         "twisted_composition=%.6g note=%s",
         result.point_name,
         tuple(value + 1 for value in result.transverse_band_indices),
-        tuple(value + 1 for value in result.scalar_zero_band_indices),
+        tuple(value + 1 for value in result.longitudinal_zero_band_indices),
         (
             "unavailable"
             if result.decomposition is None
@@ -259,7 +259,7 @@ def format_gamma_zero_regularization_report(
         (
             "[Gamma T+L regularization]",
             f"{result.point_name}: transverse_bands={_format_bands(result.transverse_band_indices)}; "
-            f"longitudinal_bands={_format_bands(result.scalar_zero_band_indices)}; irrep={irrep}",
+            f"longitudinal_bands={_format_bands(result.longitudinal_zero_band_indices)}; irrep={irrep}",
             f"note={result.note}",
         )
     )

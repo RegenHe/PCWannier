@@ -184,7 +184,7 @@ class SymmetryAnalysisResult:
 class GammaZeroRegularizationAnalysis:
     point_name: str
     transverse_band_indices: tuple[int, ...]
-    scalar_zero_band_indices: tuple[int, ...]
+    longitudinal_zero_band_indices: tuple[int, ...]
     sewing_matrices: dict[str, np.ndarray]
     unitary_characters: dict[str, complex]
     decomposition: IrrepDecomposition | None
@@ -196,7 +196,7 @@ class GammaZeroRegularizationAnalysis:
 def regularize_gamma_zero_modes(
     physical: BlochSymmetryAnalysisResult,
     context: SymmetryContext,
-    scalar_zero_band_indices,
+    longitudinal_zero_band_indices,
     real_lattice_vectors,
     *,
     energy_tolerance: float,
@@ -226,16 +226,18 @@ def regularize_gamma_zero_modes(
     transverse_bands = tuple(
         band for block in zero_blocks for band in block.band_indices
     )
-    scalar_bands = tuple(int(value) for value in scalar_zero_band_indices)
+    longitudinal_bands = tuple(
+        int(value) for value in longitudinal_zero_band_indices
+    )
     if len(transverse_bands) != 2:
         raise ValueError(
             "Gamma zero regularization requires exactly two physical transverse zero modes; "
             f"found bands {tuple(value + 1 for value in transverse_bands)}."
         )
-    if len(scalar_bands) != 1:
+    if len(longitudinal_bands) != 1:
         raise ValueError(
-            "Gamma zero regularization requires exactly one auxiliary scalar zero mode; "
-            f"found bands {tuple(value + 1 for value in scalar_bands)}."
+            "Gamma zero regularization requires exactly one auxiliary longitudinal zero mode; "
+            f"found bands {tuple(value + 1 for value in longitudinal_bands)}."
         )
     resolved = gamma.resolved_little_group
     if resolved is None:
@@ -306,7 +308,7 @@ def regularize_gamma_zero_modes(
         GammaZeroRegularizationAnalysis(
             gamma.name,
             transverse_bands,
-            scalar_bands,
+            longitudinal_bands,
             matrices,
             unitary_characters,
             decomposition,

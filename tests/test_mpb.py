@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import h5py
 import numpy as np
 import pytest
@@ -10,10 +12,14 @@ from pcwannier.compute import (
     integrate_scalar,
     periodic_grid_coordinates,
 )
-from pcwannier.compute.vector_diagnostics import periodic_vector_field_residuals
+from pcwannier.compute.vector_diagnostics import (
+    diagnose_bundle_vector_fields,
+    periodic_vector_field_residuals,
+)
 from pcwannier.config import load_config
 from pcwannier.conventions import BlochConvention, BlochFieldRepresentation
 from pcwannier.data import PeriodicGrid
+from pcwannier.maxwell import FieldKind, MaterialKind, PrimaryField
 from pcwannier.sources import load_input
 from pcwannier.sources.mpb import load_mpb_grid
 from pcwannier.symmetry.bloch import PeriodicGridInterpolator
@@ -98,6 +104,56 @@ def test_periodic_vector_differential_diagnostics():
     assert curl[1] < 1.0e-12
     assert divergence[1] == pytest.approx(1.0)
     assert curl[0] == pytest.approx(1.0)
+
+
+def test_electric_vector_diagnostic_uses_metric_weighted_field(tmp_path):
+    shape = (4, 4, 4)
+    grid = PeriodicGrid(shape, np.eye(3))
+    axes = [np.arange(size, dtype=float) / size for size in shape]
+    x, _y, _z = np.meshgrid(*axes, indexing="ij")
+    epsilon = (2.0 + 0.25 * np.cos(2.0 * np.pi * x)).reshape(-1)
+    displacement = np.zeros((1, grid.point_count, 3), dtype=np.complex128)
+    displacement[0, :, 0] = 1.0
+    electric = displacement / epsilon[None, :, None]
+
+    direct_divergence, _ = periodic_vector_field_residuals(
+        displacement,
+        shape,
+        np.eye(3),
+        np.zeros(3),
+        bloch_sign=1,
+    )
+    bare_divergence, _ = periodic_vector_field_residuals(
+        electric,
+        shape,
+        np.eye(3),
+        np.zeros(3),
+        bloch_sign=1,
+    )
+
+    assert direct_divergence[0] < 1.0e-12
+    assert bare_divergence[0] > 1.0e-3
+
+    field_grid = np.empty((1, 1, 1), dtype=object)
+    field_grid[0, 0, 0] = electric
+    band_grid = np.empty((1, 1, 1), dtype=object)
+    band_grid[0, 0, 0] = [0]
+    bundle = SimpleNamespace(
+        mesh=grid,
+        fields=field_grid,
+        metric_material=epsilon,
+        config=SimpleNamespace(k_points=[[0.0], [0.0], [0.0]]),
+        bloch_convention=BlochConvention(1, "test"),
+        band_indices=band_grid,
+    )
+    diagnostics = diagnose_bundle_vector_fields(
+        bundle,
+        quantity="longitudinal",
+        apply_metric=True,
+    )
+
+    assert diagnostics.quantity == "metric_longitudinal"
+    assert diagnostics.max_residual < 1.0e-12
 
 
 def test_periodic_grid_centers_single_sample_direction():
@@ -201,7 +257,8 @@ def test_mpb_source_loads_three_dimensional_vector_fields_without_reordering(tmp
     with h5py.File(tmp_path / "phi.h5", "w") as handle:
         handle.create_dataset("kpoints", data=kpoints)
         handle.create_dataset("phi_periodic", data=scalar)
-        handle.create_dataset("zero_mode", data=np.array([[True, False]]))
+        # Zero-mode metadata is derived from EL, not from the optional scalar file.
+        handle.create_dataset("zero_mode", data=np.array([[False, True]]))
     with h5py.File(tmp_path / "epsilon.h5", "w") as handle:
         handle.create_dataset("epsilon", data=np.full(shape, 2.0))
     incar = tmp_path / "incar"
@@ -240,6 +297,7 @@ def test_mpb_source_loads_three_dimensional_vector_fields_without_reordering(tmp
     assert np.array_equal(bundle.fields[0, 0, 0], raw[0].reshape(2, 8, 3))
     assert np.array_equal(bundle.metric_material, np.ones(8))
     assert tuple(bundle.auxiliary_bundle_loaders) == ("longitudinal", "pseudoscalar")
+    assert bundle.auxiliary_zero_mode_bands["longitudinal"][0, 0, 0] == [0]
 
     longitudinal = bundle.auxiliary_bundle_loaders["longitudinal"]()
     pseudoscalar = bundle.auxiliary_bundle_loaders["pseudoscalar"]()
@@ -252,6 +310,143 @@ def test_mpb_source_loads_three_dimensional_vector_fields_without_reordering(tmp
     assert pseudoscalar.fields[0, 0, 0].shape == (2, 8)
     assert np.array_equal(pseudoscalar.metric_material, np.full(8, 2.0))
     assert np.array_equal(pseudoscalar.zero_modes[0, 0, 0], [True, False])
+
+    longitudinal_only_incar = tmp_path / "incar-longitudinal-only"
+    longitudinal_only_incar.write_text(
+        incar.read_text(encoding="utf-8")
+        .replace("pseudoscalar_file = ./phi.h5\n", "")
+        .replace("pseudoscalar_metric_file = ./epsilon.h5\n", ""),
+        encoding="utf-8",
+    )
+    longitudinal_only = load_input(
+        load_config(longitudinal_only_incar, mode="bloch_symmetry")
+    )
+    assert tuple(longitudinal_only.auxiliary_bundle_loaders) == ("longitudinal",)
+    assert (
+        longitudinal_only.auxiliary_bundle_loaders["longitudinal"]()
+        .band_indices[0, 0, 0]
+        == [1]
+    )
+
+
+def test_mpb_source_loads_three_dimensional_electric_fields_with_epsilon_metric(
+    tmp_path,
+):
+    shape = (2, 2, 2)
+    kpoints = np.zeros((1, 3), dtype=float)
+    with h5py.File(tmp_path / "grid.h5", "w") as handle:
+        handle.attrs["dimension"] = 3
+        handle.create_dataset("shape", data=np.asarray(shape, dtype=np.int64))
+        handle.create_dataset("basis", data=np.eye(3))
+        for axis in range(3):
+            handle.create_dataset(f"u{axis + 1}", data=np.array([-0.5, 0.0]))
+    with h5py.File(tmp_path / "eigenvalues.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("E", data=np.array([[1.0, 2.0]]))
+    raw = (
+        np.arange(1 * 2 * 2 * 2 * 2 * 3, dtype=float)
+        .reshape((1, 2) + shape + (3,))
+        .astype(np.complex128)
+    )
+    raw += 0.25j * raw
+    with h5py.File(tmp_path / "electric.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("E_periodic", data=raw)
+    epsilon = np.linspace(2.0, 3.0, int(np.prod(shape))).reshape(shape)
+    with h5py.File(tmp_path / "epsilon.h5", "w") as handle:
+        handle.create_dataset("epsilon", data=epsilon)
+
+    incar = tmp_path / "incar-electric"
+    incar.write_text(
+        "\n".join(
+            [
+                "dataset_type = mpb",
+                "field_components = full_vector",
+                "primary_field = electric",
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
+                "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+                "origin = 0, 0, 0",
+                "k_points = 0:1:1, 0:1:1, 0:1:1",
+                "band_window = 0:2",
+                "dataset_file = ./electric.h5",
+                "mesh_file = ./grid.h5",
+                "metric_file = ./epsilon.h5",
+                "E_file = ./eigenvalues.h5",
+                "symmetry_file = Pm-3m",
+                "representation_analysis",
+                "Gamma; 0, 0, 0; 0:2",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_input(load_config(incar, mode="bloch_symmetry"))
+
+    assert bundle.maxwell.primary_field is PrimaryField.ELECTRIC
+    assert bundle.maxwell.metric_material is MaterialKind.EPSILON
+    assert bundle.analysis_field_kind is FieldKind.ELECTRIC_POLAR_VECTOR
+    assert bundle.fields[0, 0, 0].shape == (2, 8, 3)
+    assert np.array_equal(bundle.fields[0, 0, 0], raw[0].reshape(2, 8, 3))
+    assert np.array_equal(bundle.metric_material, epsilon.reshape(-1))
+    assert not bundle.auxiliary_bundle_loaders
+
+
+def test_mpb_source_loads_scalar_ez_from_electric_vector_export(tmp_path):
+    shape = (2, 2)
+    kpoints = np.zeros((1, 3), dtype=float)
+    with h5py.File(tmp_path / "grid.h5", "w") as handle:
+        handle.attrs["dimension"] = 2
+        handle.create_dataset("shape", data=np.asarray(shape, dtype=np.int64))
+        handle.create_dataset("basis", data=np.eye(3))
+        handle.create_dataset("u1", data=np.array([-0.5, 0.0]))
+        handle.create_dataset("u2", data=np.array([-0.5, 0.0]))
+    with h5py.File(tmp_path / "eigenvalues.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("E", data=np.array([[1.5]]))
+    raw = np.zeros((1, 1, 2, 2, 1, 3), dtype=np.complex128)
+    raw[0, 0, ..., 0, 2] = np.arange(4).reshape(shape) + 1.0j
+    with h5py.File(tmp_path / "electric.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("E_periodic", data=raw)
+    with h5py.File(tmp_path / "epsilon.h5", "w") as handle:
+        handle.create_dataset("epsilon", data=np.full(shape, 4.0))
+
+    incar = tmp_path / "incar-electric-ez"
+    incar.write_text(
+        "\n".join(
+            [
+                "dataset_type = mpb",
+                "field_components = Ez",
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0, 0 1",
+                "reciprocal_lattice_vectors = 0 0, 0 0",
+                "origin = 0, 0",
+                "k_points = 0:1:1, 0:1:1",
+                "band_window = 0:1",
+                "dataset_file = ./electric.h5",
+                "mesh_file = ./grid.h5",
+                "metric_file = ./epsilon.h5",
+                "E_file = ./eigenvalues.h5",
+                "symmetry_file = p4mm",
+                "representation_analysis",
+                "Gamma; 0, 0; 0:1",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_input(load_config(incar, mode="bloch_symmetry"))
+
+    assert bundle.maxwell.primary_field is PrimaryField.ELECTRIC
+    assert bundle.analysis_field_kind is FieldKind.ELECTRIC_Z
+    assert np.array_equal(
+        bundle.fields[0, 0, 0][0],
+        raw[0, 0, ..., 0, 2].reshape(-1),
+    )
+    assert np.array_equal(bundle.metric_material, np.full(4, 4.0))
 
 
 def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regularizes_gamma(tmp_path):
@@ -277,13 +472,6 @@ def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regul
     with h5py.File(tmp_path / "HL.h5", "w") as handle:
         handle.create_dataset("kpoints", data=kpoints)
         handle.create_dataset("H_periodic", data=longitudinal)
-    scalar = np.ones((1, 2) + shape, dtype=np.complex128)
-    with h5py.File(tmp_path / "phi.h5", "w") as handle:
-        handle.create_dataset("kpoints", data=kpoints)
-        handle.create_dataset("phi_periodic", data=scalar)
-        handle.create_dataset("zero_mode", data=np.array([[True, False]]))
-    with h5py.File(tmp_path / "epsilon.h5", "w") as handle:
-        handle.create_dataset("epsilon", data=np.ones(shape))
     incar = tmp_path / "incar"
     incar.write_text(
         "\n".join(
@@ -307,8 +495,6 @@ def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regul
                 "E_file = ./E.h5",
                 "longitudinal_field_file = ./HL.h5",
                 "longitudinal_energy_file = ./EL.h5",
-                "pseudoscalar_file = ./phi.h5",
-                "pseudoscalar_metric_file = ./epsilon.h5",
                 "symmetry_file = Pm-3m",
                 "representation_analysis",
                 "Gamma; 0,0,0; H[0:3],L[0:2]",
@@ -327,6 +513,8 @@ def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regul
     assert bundle.band_indices[0, 0, 0] == [0, 1, 2, 3, 4]
     assert bundle.band_channels[0].label == "H:0"
     assert bundle.band_channels[3].label == "L:0"
+    assert not bundle.auxiliary_bundle_loaders
+    assert bundle.auxiliary_zero_mode_bands["longitudinal"][0, 0, 0] == [0]
     selected = bundle.symmetry.model.representation_analysis.points[0].band_indices
     assert selected == (0, 1, 2, 3, 4)
     zero_fields = bundle.fields[0, 0, 0][[0, 1, 3]]

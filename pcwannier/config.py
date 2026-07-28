@@ -1298,6 +1298,11 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
             raise ValueError("wannier_subspace=T + L requires longitudinal_band_window.")
         if str(cfg.field_components).strip().lower() != "full_vector" or str(cfg.primary_field).lower() != "magnetic":
             raise ValueError("wannier_subspace=T + L requires full_vector magnetic fields.")
+        if cfg.gamma_zero_regularization:
+            raise ValueError(
+                "gamma_zero_regularization must be false for wannier_subspace=T + L; "
+                "the combined reader already regularizes the Gamma T+L zero space."
+            )
     elif any(
         item.get("channel_bands")
         for item in (cfg.representation_analysis or ())

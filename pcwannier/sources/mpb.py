@@ -122,16 +122,16 @@ def _check_exported_coordinate_axes(
 def load_mpb_input(config: IncarConfig) -> InputBundle:
     if config.maxwell_problem is None:
         raise ValueError("Maxwell field configuration has not been initialized.")
+    maxwell = config.maxwell_problem
     components = config.maxwell_problem.field_components
-    if components is FieldComponents.FULL_VECTOR and (
-        config.maxwell_problem.primary_field is not PrimaryField.MAGNETIC
-    ):
+    if components not in {
+        FieldComponents.EZ,
+        FieldComponents.HZ,
+        FieldComponents.FULL_VECTOR,
+    }:
         raise NotImplementedError(
-            "The MPB 3D adapter currently supports magnetic full-vector fields only."
-        )
-    if components not in {FieldComponents.HZ, FieldComponents.FULL_VECTOR}:
-        raise NotImplementedError(
-            "The MPB adapter supports scalar Hz and 3D magnetic full-vector fields."
+            "The MPB adapter supports scalar Ez/Hz and 3D electric or magnetic "
+            "full-vector fields."
         )
     mesh_path = config.input_path(config.mesh_file)
     field_path = config.input_path(config.dataset_file)
@@ -144,8 +144,10 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         raise ValueError(
             f"MPB grid dimension {grid.dimension} does not match incar kdim={config.kdim}."
         )
-    if components is FieldComponents.HZ and grid.dimension != 2:
-        raise ValueError("field_components=Hz requires a two-dimensional MPB grid.")
+    if components in {FieldComponents.EZ, FieldComponents.HZ} and grid.dimension != 2:
+        raise ValueError(
+            f"field_components={components.value} requires a two-dimensional MPB grid."
+        )
     if components is FieldComponents.FULL_VECTOR and grid.dimension != 3:
         raise ValueError("field_components=full_vector requires a three-dimensional MPB grid.")
     _validate_lattice(config, grid)
@@ -161,18 +163,28 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
     energy_matrix = energy_rows.reshape(k_shape + (eigenvalues.shape[1],))
     energies, band_indices, inner_band_indices = _select_bands(config, energy_matrix)
 
-    with timed_step("read MPB periodic magnetic fields", LOGGER, file=field_path):
+    field_symbol = (
+        "E" if maxwell.primary_field is PrimaryField.ELECTRIC else "H"
+    )
+    dataset_name = f"{field_symbol}_periodic"
+    vector = components is FieldComponents.FULL_VECTOR
+    with timed_step(
+        f"read MPB periodic {maxwell.primary_field.value} fields",
+        LOGGER,
+        file=field_path,
+    ):
         fields = _read_periodic_fields(
             field_path,
             config,
             grid,
             band_indices,
             eigenvalues.shape[1],
-            dataset_name="H_periodic",
-            vector=components is FieldComponents.FULL_VECTOR,
+            dataset_name=dataset_name,
+            vector=vector,
+            vector_component=None if vector else 2,
+            field_description=components.value,
         )
     metric_material = _load_metric_material(config, grid)
-    auxiliary_loaders = _build_auxiliary_channel_loaders(config, grid)
 
     if config.wannier_subspace == "T+L":
         return _combine_transverse_longitudinal(
@@ -185,8 +197,11 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
             band_indices,
             inner_band_indices,
             eigenvalues.shape[1],
-            auxiliary_loaders,
         )
+
+    auxiliary_loaders, auxiliary_zero_mode_bands = _build_auxiliary_channel_loaders(
+        config, grid
+    )
 
     band_lengths = [
         len(band_indices[index]) for index in np.ndindex(band_indices.shape)
@@ -215,6 +230,7 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         field_representation=BlochFieldRepresentation.PERIODIC_PART,
         symmetry=config.symmetry_context,
         analysis_field_kind=config.maxwell_problem.symmetry_field_kind,
+        auxiliary_zero_mode_bands=auxiliary_zero_mode_bands,
         auxiliary_bundle_loaders=auxiliary_loaders,
     )
 
@@ -386,17 +402,21 @@ def _combine_transverse_longitudinal(
     physical_bands: np.ndarray,
     physical_inner: np.ndarray,
     physical_band_count: int,
-    auxiliary_loaders,
 ) -> InputBundle:
-    if grid.dimension != 3 or config.maxwell_problem.field_components is not FieldComponents.FULL_VECTOR:
-        raise NotImplementedError("wannier_subspace=T + L requires a 3D full-vector MPB calculation.")
+    if (
+        grid.dimension != 3
+        or config.maxwell_problem.field_components is not FieldComponents.FULL_VECTOR
+        or config.maxwell_problem.primary_field is not PrimaryField.MAGNETIC
+    ):
+        raise NotImplementedError(
+            "wannier_subspace=T + L requires a 3D full-vector magnetic MPB calculation."
+        )
     field_path = config.input_path(config.longitudinal_field_file)
     energy_path = config.input_path(config.longitudinal_energy_file)
-    scalar_path = config.input_path(config.pseudoscalar_file)
-    if field_path is None or energy_path is None or scalar_path is None:
+    if field_path is None or energy_path is None:
         raise ValueError(
             "wannier_subspace=T + L requires longitudinal_field_file, "
-            "longitudinal_energy_file, and pseudoscalar_file."
+            "and longitudinal_energy_file."
         )
     raw_energy, rows = _read_eigenvalues(energy_path, config, description="longitudinal")
     k_shape = _configured_k_shape(config)
@@ -419,15 +439,12 @@ def _combine_transverse_longitudinal(
         dataset_name="H_periodic",
         vector=True,
     )
-    longitudinal_zero = _read_selected_zero_modes(
-        scalar_path, config, longitudinal_bands, raw_energy.shape[1]
-    )
-
     combined_fields = np.empty(k_shape, dtype=object)
     combined_energies = np.empty(k_shape, dtype=object)
     combined_bands = np.empty(k_shape, dtype=object)
     combined_inner = np.empty(k_shape, dtype=object)
     combined_zero = np.empty(k_shape, dtype=object)
+    longitudinal_zero_bands = np.empty(k_shape, dtype=object)
     l_offset = int(physical_band_count)
     for index in np.ndindex(k_shape):
         h_fields = np.asarray(physical_fields[index], dtype=np.complex128)
@@ -435,7 +452,7 @@ def _combine_transverse_longitudinal(
         h_energy = np.asarray(physical_energies[index], dtype=float)
         l_energy = np.asarray(longitudinal_energies[index], dtype=float)
         h_zero = h_energy <= config.gamma_zero_mode_tolerance
-        l_zero = np.asarray(longitudinal_zero[index], dtype=bool)
+        l_zero = l_energy <= config.gamma_zero_mode_tolerance
 
         k_fractional = np.asarray(
             [config.k_points[axis][index[axis]] for axis in range(3)], dtype=float
@@ -477,6 +494,7 @@ def _combine_transverse_longitudinal(
             + [l_offset + int(value) for value in longitudinal_inner[index]]
         )
         combined_zero[index] = np.concatenate((h_zero, l_zero))
+        longitudinal_zero_bands[index] = selected_l[l_zero].tolist()
 
     combined_energy_matrix = np.concatenate(
         (physical_energy_matrix, longitudinal_energy_matrix), axis=-1
@@ -515,7 +533,7 @@ def _combine_transverse_longitudinal(
         analysis_field_kind=FieldKind.MAGNETIC_AXIAL_VECTOR,
         zero_modes=combined_zero,
         band_channels=channels,
-        auxiliary_bundle_loaders=auxiliary_loaders,
+        auxiliary_zero_mode_bands={"longitudinal": longitudinal_zero_bands},
     )
 
 
@@ -563,7 +581,14 @@ def _read_periodic_fields(
     *,
     dataset_name: str,
     vector: bool,
+    vector_component: int | None = None,
+    field_description: str | None = None,
 ) -> np.ndarray:
+    if vector and vector_component is not None:
+        raise ValueError("A vector field cannot also select one vector component.")
+    if vector_component is not None and vector_component not in {0, 1, 2}:
+        raise ValueError("vector_component must be 0, 1, 2, or None.")
+    description = field_description or dataset_name
     k_shape = _configured_k_shape(config)
     fields = np.empty(k_shape, dtype=object)
     with h5py.File(path, "r") as handle:
@@ -575,7 +600,7 @@ def _read_periodic_fields(
         expected_tail = grid.shape
         if vector:
             expected_tail = expected_tail + (3,)
-        elif dataset_name == "H_periodic":
+        elif vector_component is not None:
             expected_tail = expected_tail + ((1,) if grid.dimension == 2 else ()) + (3,)
         expected_ndim = 2 + len(expected_tail)
         if dataset.ndim != expected_ndim or dataset.shape[1] != band_count:
@@ -609,29 +634,42 @@ def _read_periodic_fields(
                 row_block[selected],
                 dtype=np.complex128,
             )
-            if dataset_name == "H_periodic" and not vector:
+            if vector_component is not None and grid.dimension == 2:
                 block = block[..., 0, :]
             if not np.all(np.isfinite(block)):
                 raise ValueError(
-                    f"MPB Hz fields contain NaN or Inf at k={index}."
+                    f"MPB {description} fields contain NaN or Inf at k={index}."
                 )
             if vector:
                 fields[index] = np.ascontiguousarray(
                     block.reshape(selected.size, grid.point_count, 3)
                 )
-            elif dataset_name == "H_periodic":
-                transverse = float(np.max(np.abs(block[..., :2]), initial=0.0))
-                longitudinal = max(
-                    float(np.max(np.abs(block[..., 2]), initial=0.0)),
+            elif vector_component is not None:
+                other_components = tuple(
+                    component for component in range(3) if component != vector_component
+                )
+                unwanted = float(
+                    np.max(np.abs(block[..., other_components]), initial=0.0)
+                )
+                requested = max(
+                    float(
+                        np.max(
+                            np.abs(block[..., vector_component]),
+                            initial=0.0,
+                        )
+                    ),
                     np.finfo(float).tiny,
                 )
-                if transverse > 1.0e-10 * longitudinal:
+                if unwanted > 1.0e-10 * requested:
                     raise ValueError(
-                        "MPB scalar Hz mode contains non-zero Hx/Hy components: "
-                        f"k={index}, relative={transverse / longitudinal:.6g}."
+                        f"MPB scalar {description} mode contains non-zero orthogonal "
+                        f"components: k={index}, relative={unwanted / requested:.6g}."
                     )
                 fields[index] = np.ascontiguousarray(
-                    block[..., 2].reshape(selected.size, grid.point_count)
+                    block[..., vector_component].reshape(
+                        selected.size,
+                        grid.point_count,
+                    )
                 )
             else:
                 fields[index] = np.ascontiguousarray(
@@ -644,28 +682,44 @@ def _build_auxiliary_channel_loaders(
     config: IncarConfig,
     grid: PeriodicGrid,
 ):
-    values = {
-        "longitudinal_field_file": config.input_path(config.longitudinal_field_file),
-        "longitudinal_energy_file": config.input_path(config.longitudinal_energy_file),
-        "pseudoscalar_file": config.input_path(config.pseudoscalar_file),
-        "pseudoscalar_metric_file": config.input_path(config.pseudoscalar_metric_file),
-    }
-    if not any(path is not None for path in values.values()):
+    field_path = config.input_path(config.longitudinal_field_file)
+    energy_path = config.input_path(config.longitudinal_energy_file)
+    scalar_path = config.input_path(config.pseudoscalar_file)
+    scalar_metric_path = config.input_path(config.pseudoscalar_metric_file)
+    longitudinal_requested = field_path is not None or energy_path is not None
+    pseudoscalar_requested = scalar_path is not None or scalar_metric_path is not None
+    if not longitudinal_requested and not pseudoscalar_requested:
         if config.gamma_zero_regularization:
             raise ValueError(
-                "gamma_zero_regularization requires longitudinal and pseudoscalar MPB files."
+                "gamma_zero_regularization requires longitudinal_field_file and "
+                "longitudinal_energy_file."
             )
-        return {}
-    missing = [name for name, path in values.items() if path is None]
-    if missing:
+        return {}, {}
+    if config.maxwell_problem.primary_field is not PrimaryField.MAGNETIC:
         raise ValueError(
-            "MPB longitudinal analysis requires all auxiliary files; missing "
-            + ", ".join(missing)
+            "MPB longitudinal and pseudoscalar auxiliary channels are only defined "
+            "for a magnetic full-vector primary field."
+        )
+    if longitudinal_requested and (field_path is None or energy_path is None):
+        raise ValueError(
+            "MPB longitudinal analysis requires longitudinal_field_file and "
+            "longitudinal_energy_file."
+        )
+    if pseudoscalar_requested and (
+        scalar_path is None or scalar_metric_path is None or energy_path is None
+    ):
+        raise ValueError(
+            "Optional MPB pseudoscalar analysis requires pseudoscalar_file, "
+            "pseudoscalar_metric_file, and longitudinal_energy_file."
+        )
+    if config.gamma_zero_regularization and not longitudinal_requested:
+        raise ValueError(
+            "gamma_zero_regularization requires longitudinal_field_file and "
+            "longitudinal_energy_file."
         )
     if grid.dimension != 3:
         raise NotImplementedError("MPB longitudinal auxiliary channels require a 3D grid.")
 
-    energy_path = values["longitudinal_energy_file"]
     assert energy_path is not None
     raw_energy, rows = _read_eigenvalues(
         energy_path,
@@ -688,124 +742,120 @@ def _build_auxiliary_channel_loaders(
         description="MPB longitudinal",
     )
 
-    field_path = values["longitudinal_field_file"]
-    scalar_path = values["pseudoscalar_file"]
-    metric_path = values["pseudoscalar_metric_file"]
-    assert field_path is not None and scalar_path is not None and metric_path is not None
-    zero_modes = _read_selected_zero_modes(scalar_path, config, bands, raw_energy.shape[1])
-    longitudinal_config = copy(config)
-    longitudinal_config.S_file = config.longitudinal_S_file
-    longitudinal_config.D_file = config.longitudinal_D_file
-    pseudoscalar_config = copy(config)
-    pseudoscalar_config.S_file = config.pseudoscalar_S_file
-    pseudoscalar_config.D_file = config.pseudoscalar_D_file
+    zero_modes = np.empty(energies.shape, dtype=object)
+    zero_mode_bands = np.empty(bands.shape, dtype=object)
+    for index in np.ndindex(energies.shape):
+        mask = (
+            np.asarray(energies[index], dtype=float)
+            <= config.gamma_zero_mode_tolerance
+        )
+        selected = np.asarray(bands[index], dtype=int)
+        zero_modes[index] = mask
+        zero_mode_bands[index] = selected[mask].tolist()
 
-    def load_longitudinal() -> InputBundle:
-        longitudinal_fields = _read_periodic_fields(
-            field_path,
-            config,
-            grid,
-            bands,
-            raw_energy.shape[1],
-            dataset_name="H_periodic",
-            vector=True,
-        )
-        longitudinal_energies = np.empty(energies.shape, dtype=object)
-        longitudinal_bands = np.empty(bands.shape, dtype=object)
-        longitudinal_inner = np.empty(inner.shape, dtype=object)
-        for index in np.ndindex(bands.shape):
-            mask = ~np.asarray(zero_modes[index], dtype=bool)
-            selected_bands = np.asarray(bands[index], dtype=int)
-            longitudinal_fields[index] = np.asarray(longitudinal_fields[index])[mask]
-            longitudinal_energies[index] = np.asarray(energies[index])[mask]
-            longitudinal_bands[index] = selected_bands[mask].tolist()
-            retained = set(longitudinal_bands[index])
-            longitudinal_inner[index] = [
-                int(value) for value in inner[index] if int(value) in retained
-            ]
-        return InputBundle(
-            config=longitudinal_config,
-            maxwell=config.maxwell_problem,
-            bloch_convention=MPB_BLOCH_CONVENTION,
-            mesh=grid,
-            fields=longitudinal_fields,
-            metric_material=np.ones(grid.point_count, dtype=float),
-            energies=longitudinal_energies,
-            band_indices=longitudinal_bands,
-            inner_band_indices=longitudinal_inner,
-            energy_matrix=energy_matrix,
-            field_representation=BlochFieldRepresentation.PERIODIC_PART,
-            symmetry=config.symmetry_context,
-            analysis_field_kind=FieldKind.MAGNETIC_AXIAL_VECTOR,
-            zero_modes=zero_modes,
-        )
+    loaders = {}
 
-    def load_pseudoscalar() -> InputBundle:
-        scalar_fields = _read_periodic_fields(
-            scalar_path,
-            config,
-            grid,
-            bands,
-            raw_energy.shape[1],
-            dataset_name="phi_periodic",
-            vector=False,
-        )
-        scalar_metric = _load_grid_material(
-            metric_path,
-            grid,
-            candidates=("epsilon", "eta", "metric"),
-            description="pseudoscalar metric",
-        )
-        return InputBundle(
-            config=pseudoscalar_config,
-            maxwell=config.maxwell_problem,
-            bloch_convention=MPB_BLOCH_CONVENTION,
-            mesh=grid,
-            fields=scalar_fields,
-            metric_material=scalar_metric,
-            energies=energies,
-            band_indices=bands,
-            inner_band_indices=inner,
-            energy_matrix=energy_matrix,
-            field_representation=BlochFieldRepresentation.PERIODIC_PART,
-            symmetry=config.symmetry_context,
-            analysis_field_kind=FieldKind.PSEUDOSCALAR,
-            zero_modes=zero_modes,
-        )
+    if field_path is not None:
+        longitudinal_config = copy(config)
+        longitudinal_config.S_file = config.longitudinal_S_file
+        longitudinal_config.D_file = config.longitudinal_D_file
 
-    return {
-        "longitudinal": load_longitudinal,
-        "pseudoscalar": load_pseudoscalar,
-    }
+        def load_longitudinal() -> InputBundle:
+            longitudinal_fields = _read_periodic_fields(
+                field_path,
+                config,
+                grid,
+                bands,
+                raw_energy.shape[1],
+                dataset_name="H_periodic",
+                vector=True,
+            )
+            longitudinal_energies = np.empty(energies.shape, dtype=object)
+            longitudinal_bands = np.empty(bands.shape, dtype=object)
+            longitudinal_inner = np.empty(inner.shape, dtype=object)
+            retained_zero_modes = np.empty(zero_modes.shape, dtype=object)
+            for index in np.ndindex(bands.shape):
+                retained_mask = ~np.asarray(zero_modes[index], dtype=bool)
+                selected_bands = np.asarray(bands[index], dtype=int)
+                longitudinal_fields[index] = np.asarray(longitudinal_fields[index])[
+                    retained_mask
+                ]
+                longitudinal_energies[index] = np.asarray(energies[index])[
+                    retained_mask
+                ]
+                longitudinal_bands[index] = selected_bands[retained_mask].tolist()
+                retained = set(longitudinal_bands[index])
+                longitudinal_inner[index] = [
+                    int(value) for value in inner[index] if int(value) in retained
+                ]
+                retained_zero_modes[index] = np.zeros(
+                    np.count_nonzero(retained_mask), dtype=bool
+                )
+            return InputBundle(
+                config=longitudinal_config,
+                maxwell=config.maxwell_problem,
+                bloch_convention=MPB_BLOCH_CONVENTION,
+                mesh=grid,
+                fields=longitudinal_fields,
+                metric_material=_load_metric_material(config, grid),
+                energies=longitudinal_energies,
+                band_indices=longitudinal_bands,
+                inner_band_indices=longitudinal_inner,
+                energy_matrix=energy_matrix,
+                field_representation=BlochFieldRepresentation.PERIODIC_PART,
+                symmetry=config.symmetry_context,
+                analysis_field_kind=FieldKind.MAGNETIC_AXIAL_VECTOR,
+                zero_modes=retained_zero_modes,
+            )
 
+        loaders["longitudinal"] = load_longitudinal
 
-def _read_selected_zero_modes(
-    path: Path,
-    config: IncarConfig,
-    band_indices: np.ndarray,
-    band_count: int,
-) -> np.ndarray:
-    with h5py.File(path, "r") as handle:
-        if "zero_mode" not in handle:
-            raise ValueError(f"MPB HDF5 file {str(path)!r} is missing dataset /zero_mode.")
-        stored = np.asarray(handle["zero_mode"])
-        if stored.dtype != np.bool_:
-            if not np.issubdtype(stored.dtype, np.number) or not np.all(
-                np.isin(stored, (0, 1))
-            ):
-                raise ValueError("MPB /zero_mode must contain boolean or 0/1 values.")
-        raw = np.asarray(stored, dtype=bool)
-        kpoints = np.asarray(_read_required_dataset(handle, "kpoints"), dtype=float)
-    if raw.ndim != 2 or raw.shape[1] != band_count:
-        raise ValueError(
-            f"MPB /zero_mode must have shape (Nk, {band_count}); got {raw.shape}."
-        )
-    rows = _map_kpoints(config, kpoints)
-    output = np.empty(band_indices.shape, dtype=object)
-    for flat, index in enumerate(np.ndindex(band_indices.shape)):
-        selected = np.asarray(band_indices[index], dtype=np.intp)
-        output[index] = np.asarray(raw[int(rows[flat]), selected], dtype=bool)
-    return output
+    if scalar_path is not None and scalar_metric_path is not None:
+        pseudoscalar_config = copy(config)
+        pseudoscalar_config.S_file = config.pseudoscalar_S_file
+        pseudoscalar_config.D_file = config.pseudoscalar_D_file
+
+        def load_pseudoscalar() -> InputBundle:
+            scalar_fields = _read_periodic_fields(
+                scalar_path,
+                config,
+                grid,
+                bands,
+                raw_energy.shape[1],
+                dataset_name="phi_periodic",
+                vector=False,
+            )
+            scalar_metric = _load_grid_material(
+                scalar_metric_path,
+                grid,
+                candidates=("epsilon", "eta", "metric"),
+                description="pseudoscalar metric",
+            )
+            return InputBundle(
+                config=pseudoscalar_config,
+                maxwell=config.maxwell_problem,
+                bloch_convention=MPB_BLOCH_CONVENTION,
+                mesh=grid,
+                fields=scalar_fields,
+                metric_material=scalar_metric,
+                energies=energies,
+                band_indices=bands,
+                inner_band_indices=inner,
+                energy_matrix=energy_matrix,
+                field_representation=BlochFieldRepresentation.PERIODIC_PART,
+                symmetry=config.symmetry_context,
+                analysis_field_kind=FieldKind.PSEUDOSCALAR,
+                zero_modes=zero_modes,
+            )
+
+        loaders["pseudoscalar"] = load_pseudoscalar
+
+    metadata = (
+        {"longitudinal": zero_mode_bands}
+        if longitudinal_requested
+        else {}
+    )
+    return loaders, metadata
 
 
 def _load_metric_material(
@@ -860,7 +910,11 @@ MPB_SOURCE = SourceAdapter(
     name="mpb",
     bloch_convention=MPB_BLOCH_CONVENTION,
     supported_field_components=frozenset(
-        {FieldComponents.HZ, FieldComponents.FULL_VECTOR}
+        {
+            FieldComponents.EZ,
+            FieldComponents.HZ,
+            FieldComponents.FULL_VECTOR,
+        }
     ),
     input_loader=load_mpb_input,
     mesh_loader=load_mpb_grid,

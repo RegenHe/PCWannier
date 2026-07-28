@@ -100,9 +100,21 @@ def save_vector_wanniers(filename: str | Path, result: RunResult) -> None:
     coordinates = np.asarray(result.extended_mesh.vertices, dtype=float)
     if coordinates.ndim != 2 or coordinates.shape[1] != 3:
         raise ValueError("Vector Wannier text output requires 3D mesh coordinates.")
+    maxwell = result.config.maxwell_problem
+    field_symbol = (
+        "E"
+        if maxwell is not None and maxwell.primary_field.value == "electric"
+        else "H"
+    )
+    component_columns = " ".join(
+        f"Re({field_symbol}{axis}) Im({field_symbol}{axis})"
+        for axis in "xyz"
+    )
     with path.open("w", encoding="utf-8") as handle:
         handle.write("# 3D vector Wannier fields\n")
-        handle.write("# columns: x y z, then Re(Hx) Im(Hx) Re(Hy) Im(Hy) Re(Hz) Im(Hz) per Wannier\n")
+        handle.write(
+            f"# columns: x y z, then {component_columns} per Wannier\n"
+        )
         for cell, values in result.wanniers.items():
             array = np.asarray(values, dtype=np.complex128)
             if array.ndim != 3 or array.shape[0] != coordinates.shape[0] or array.shape[2] != 3:

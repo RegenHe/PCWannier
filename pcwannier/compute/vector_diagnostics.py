@@ -23,6 +23,7 @@ def diagnose_bundle_vector_fields(
     bundle: InputBundle,
     *,
     quantity: str,
+    apply_metric: bool = False,
 ) -> VectorFieldDifferentialDiagnostics:
     """Evaluate divergence or curl without modifying the loaded MPB fields."""
 
@@ -46,6 +47,13 @@ def diagnose_bundle_vector_fields(
                 f"Vector field block at k={index} has shape {block.shape}; expected "
                 f"(bands, {bundle.mesh.point_count}, {dimension})."
             )
+        if apply_metric:
+            metric = np.asarray(bundle.metric_material, dtype=np.float64)
+            if metric.shape != (bundle.mesh.point_count,):
+                raise ValueError(
+                    "Vector differential metric must have one value per grid point."
+                )
+            block = block * metric[None, :, None]
         k_fractional = np.array(
             [bundle.config.k_points[axis][index[axis]] for axis in range(dimension)],
             dtype=np.float64,
@@ -69,7 +77,7 @@ def diagnose_bundle_vector_fields(
                 worst_band = int(actual_bands[local_band])
 
     return VectorFieldDifferentialDiagnostics(
-        quantity=quantity,
+        quantity=f"metric_{quantity}" if apply_metric else quantity,
         max_residual=max(worst_value, 0.0),
         mean_residual=float(np.mean(values)) if values else 0.0,
         worst_k_index=worst_k,

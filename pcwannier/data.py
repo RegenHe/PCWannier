@@ -472,6 +472,7 @@ class InputBundle:
     analysis_field_kind: FieldKind | None = None
     zero_modes: np.ndarray | None = None
     band_channels: dict[int, BandChannelReference] = field(default_factory=dict)
+    auxiliary_zero_mode_bands: dict[str, np.ndarray] = field(default_factory=dict)
     auxiliary_bundle_loaders: dict[str, Callable[[], "InputBundle"]] = field(
         default_factory=dict
     )

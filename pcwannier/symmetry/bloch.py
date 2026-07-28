@@ -50,18 +50,28 @@ class BarycentricStencil:
 
     def apply(self, values: np.ndarray) -> np.ndarray:
         array = np.asarray(values)
+        indices = np.asarray(self.vertex_indices)
+        weights = np.asarray(self.weights)
+        if indices.ndim == 1:
+            if weights.shape != indices.shape:
+                raise ValueError("Direct interpolation weights have an invalid shape.")
+            if array.ndim == 2:
+                return array[:, indices] * weights[None, :]
+            if array.ndim == 3:
+                return array[:, indices, :] * weights[None, :, None]
+            raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
         if array.ndim == 2:
             return np.einsum(
                 "nvc,vc->nv",
-                array[:, self.vertex_indices],
-                self.weights,
+                array[:, indices],
+                weights,
                 optimize=True,
             )
         if array.ndim == 3:
             return np.einsum(
                 "nvcd,vc->nvd",
-                array[:, self.vertex_indices, :],
-                self.weights,
+                array[:, indices, :],
+                weights,
                 optimize=True,
             )
         raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
@@ -152,6 +162,19 @@ class PeriodicGridInterpolator:
         nearest = np.rint(scaled)
         exact = np.abs(scaled - nearest) <= self.tolerance * shape
         scaled = np.where(exact, nearest, scaled)
+        if np.all(exact):
+            raw = nearest.astype(np.int64)
+            wrapped = np.mod(raw, shape)
+            shifts = np.floor_divide(raw, shape)
+            indices = np.ravel_multi_index(
+                tuple(wrapped[:, axis] for axis in range(self.dimension)),
+                self.shape,
+            ).astype(np.intp, copy=False)
+            return BarycentricStencil(
+                indices,
+                np.ones(query.shape[0], dtype=float),
+                shifts,
+            )
         lower = np.floor(scaled).astype(np.int64)
         fraction = scaled - lower
 

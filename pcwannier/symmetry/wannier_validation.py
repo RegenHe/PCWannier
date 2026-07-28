@@ -45,6 +45,9 @@ class _PartialStencil:
             (self.vertex_indices.shape[0],) + array.shape[1:], dtype=array.dtype
         )
         valid = self.valid_vertices
+        if self.vertex_indices.ndim == 1:
+            output[valid] = array[self.vertex_indices[valid]]
+            return output
         if array.ndim == 1:
             output[valid] = np.einsum(
                 "vc,vc->v",
@@ -174,6 +177,20 @@ class _RegularGridInterpolator:
             & (scaled <= upper_bound + self.tolerance / self.step),
             axis=1,
         )
+        if np.all(np.abs(scaled - rounded) <= self.tolerance / self.step):
+            direct = np.clip(rounded, 0.0, upper_bound).astype(np.int64)
+            for axis, size in enumerate(self.shape):
+                if size == 1:
+                    direct[:, axis] = 0
+            indices = np.ravel_multi_index(
+                tuple(direct[:, axis] for axis in range(self.dimension)),
+                self.shape,
+            ).astype(np.intp, copy=False)
+            return _PartialStencil(
+                indices,
+                np.ones(len(query), dtype=float),
+                valid,
+            )
         scaled = np.clip(scaled, 0.0, upper_bound)
         lower = np.floor(scaled).astype(np.int64)
         fraction = scaled - lower
@@ -233,25 +250,14 @@ def validate_wannier_symmetry(
     zero_cell = np.asarray(zero_cell_wanniers, dtype=np.complex128)
     expected_dimension = sum(target.wannier_dimension for target in target_items)
     expected_shape = (mesh.vertices.shape[0], expected_dimension)
-    if state.get_extention_block(0, 0, 0).ndim == 3:
-        expected_shape += (state.get_extention_block(0, 0, 0).shape[-1],)
+    base_block = state.get_block(0, 0, 0)
+    if base_block.ndim == 3:
+        expected_shape += (base_block.shape[-1],)
     if zero_cell.shape != expected_shape:
         raise ValueError(
             f"Zero-cell Wannier array has shape {zero_cell.shape}; "
             f"expected {expected_shape}."
         )
-
-    needed_shifts = {
-        tuple(int(value) for value in action.lattice_shift)
-        for target in target_items
-        for operation_actions in target.orbit.actions
-        for action in operation_actions
-    }
-    cell_fields: dict[tuple[int, ...], np.ndarray] = {(0,) * group.dimension: zero_cell}
-    for shift in sorted(needed_shifts):
-        if shift not in cell_fields:
-            _, fields, _ = generate_wannier(ctx, list(shift))
-            cell_fields[shift] = fields
 
     fractional = fractional_mesh_vertices(
         mesh, ctx.config.real_lattice_vectors, ctx.config.lattice_const
@@ -262,28 +268,52 @@ def validate_wannier_symmetry(
         np.finfo(float).eps * max(float(np.max(np.abs(mesh.vertices))), 1.0) * 128.0,
     )
     integration_family = getattr(mesh, "integration_family", "finite_element")
+    needed_shifts = {
+        tuple(int(value) for value in action.lattice_shift)
+        for target in target_items
+        for operation_actions in target.orbit.actions
+        for action in operation_actions
+    }
+    cell_fields: dict[tuple[int, ...], np.ndarray] | None
+    translated_indices: dict[tuple[int, ...], np.ndarray] = {}
     if integration_family == "uniform_grid":
         interpolator = _RegularGridInterpolator(mesh, group.tolerance)
+        cell_fields = None
+        for shift in sorted(needed_shifts):
+            translated_indices[shift] = _uniform_translation_indices(mesh, shift)
     elif integration_family == "finite_element":
         interpolator = _TriangleInterpolator(
             mesh.vertices,
             mesh.elements,
             physical_tolerance,
         )
+        cell_fields = {(0,) * group.dimension: zero_cell}
+        for shift in sorted(needed_shifts):
+            if shift not in cell_fields:
+                _, fields, _ = generate_wannier(ctx, list(shift))
+                cell_fields[shift] = fields
     else:
         raise ValueError(f"Unknown spatial integration family {integration_family!r}.")
     if state.extended_inner_product is None:
         raise RuntimeError("Extended metric inner product has not been initialized.")
-    operation_data = {}
+    full_inner_product = state.extended_inner_product
+    target_offsets = []
+    offset = 0
+    for target_index, target in enumerate(target_items):
+        target_offsets.append((target_index, target, offset))
+        offset += target.wannier_dimension
+    ordered_entries = []
     for operation_index, operation in enumerate(group.operations):
-        preimage_fractional = (fractional - operation.translation) @ np.linalg.inv(operation.rotation).T
+        preimage_fractional = (
+            fractional - operation.translation
+        ) @ np.linalg.inv(operation.rotation).T
         if integration_family == "uniform_grid":
             stencil = interpolator.stencil(preimage_fractional)
             if not np.any(stencil.valid_vertices):
                 raise RuntimeError(
                     f"No common interior grid points remain for operation {operation.name}."
                 )
-            inner_product = state.extended_inner_product.restrict_points(
+            valid_inner_product = state.extended_inner_product.restrict_points(
                 stencil.valid_vertices
             )
         else:
@@ -301,28 +331,20 @@ def validate_wannier_symmetry(
                 raise RuntimeError(
                     f"No common interior triangles remain for operation {operation.name}."
                 )
-            inner_product = state.extended_inner_product.restrict_elements(
+            valid_inner_product = state.extended_inner_product.restrict_elements(
                 valid_elements
             )
-        field_matrix = cartesian_field_matrix(
-            operation,
-            lattice,
-            state.maxwell.symmetry_field_kind,
-            group.tolerance,
+        component_matrix = np.asarray(
+            cartesian_field_matrix(
+                operation,
+                lattice,
+                state.maxwell.symmetry_field_kind,
+                group.tolerance,
+            ),
+            dtype=np.complex128,
         )
-        operation_data[operation_index] = (
-            stencil,
-            inner_product,
-            np.asarray(field_matrix, dtype=np.complex128),
-        )
-
-    full_inner_product = state.extended_inner_product
-    entries = []
-    offset = 0
-    for target in target_items:
-        irrep_dimension = target.site_irrep.dimension
-        for operation_index, operation in enumerate(group.operations):
-            stencil, valid_inner_product, component_matrix = operation_data[operation_index]
+        for target_index, target, offset in target_offsets:
+            irrep_dimension = target.site_irrep.dimension
             for orbit_index in range(target.multiplicity):
                 action = target.orbit.action(operation_index, orbit_index)
                 shift = tuple(int(value) for value in action.lattice_shift)
@@ -340,10 +362,16 @@ def validate_wannier_symmetry(
                         offset + target.wannier_index(row, action.target_index)
                         for row in range(irrep_dimension)
                     )
-                    expected = sum(
-                        site_matrix[row, irrep_index] * cell_fields[shift][:, target_indices[row]]
-                        for row in range(irrep_dimension)
-                    )
+                    expected = np.zeros_like(transformed)
+                    for row in range(irrep_dimension):
+                        if cell_fields is None:
+                            target_field = zero_cell[
+                                translated_indices[shift],
+                                target_indices[row],
+                            ]
+                        else:
+                            target_field = cell_fields[shift][:, target_indices[row]]
+                        expected += site_matrix[row, irrep_index] * target_field
                     residual_field = transformed - expected
                     residual_norm = _field_norm(valid_inner_product, residual_field)
                     transformed_norm = _field_norm(valid_inner_product, transformed)
@@ -360,8 +388,15 @@ def validate_wannier_symmetry(
                             expected_norm / max(full_expected_norm, 1.0e-30),
                         )
                     )
-                    entries.append(
-                        WannierSymmetryEntry(
+                    ordered_entries.append(
+                        (
+                            (
+                                target_index,
+                                operation_index,
+                                orbit_index,
+                                irrep_index,
+                            ),
+                            WannierSymmetryEntry(
                             operation_index,
                             operation.name or f"g{operation_index}",
                             target.name,
@@ -370,10 +405,12 @@ def validate_wannier_symmetry(
                             shift,
                             residual,
                             retained,
+                            ),
                         )
                     )
-        offset += target.wannier_dimension
+        del stencil, valid_inner_product
 
+    entries = [entry for _, entry in sorted(ordered_entries, key=lambda item: item[0])]
     max_residual = max((entry.residual for entry in entries), default=0.0)
     mean_residual = float(np.mean([entry.residual for entry in entries])) if entries else 0.0
     retained = min((entry.retained_norm for entry in entries), default=1.0)
@@ -392,3 +429,23 @@ def validate_wannier_symmetry(
 
 def _field_norm(inner_product, field) -> float:
     return inner_product.norm(field, name="Wannier symmetry norm")
+
+
+def _uniform_translation_indices(mesh, shift) -> np.ndarray:
+    """Map W_0(r) to W_R(r)=W_0(r-R) on a periodic extended grid."""
+
+    translation = tuple(int(value) for value in shift)
+    if len(translation) != mesh.dimension:
+        raise ValueError(
+            f"Wannier lattice shift must have dimension {mesh.dimension}."
+        )
+    point_shift = tuple(
+        translation[axis] * int(mesh.base_shape[axis])
+        for axis in range(mesh.dimension)
+    )
+    indices = np.arange(mesh.point_count, dtype=np.intp).reshape(mesh.shape)
+    return np.roll(
+        indices,
+        shift=point_shift,
+        axis=tuple(range(mesh.dimension)),
+    ).reshape(-1)

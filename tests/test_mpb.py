@@ -23,6 +23,7 @@ from pcwannier.maxwell import FieldKind, MaterialKind, PrimaryField
 from pcwannier.sources import load_input
 from pcwannier.sources.mpb import load_mpb_grid
 from pcwannier.symmetry.bloch import PeriodicGridInterpolator
+from pcwannier.symmetry.wannier_validation import _uniform_translation_indices
 
 
 def test_uniform_grid_integrates_real_and_complex_constants():
@@ -529,6 +530,8 @@ def test_periodic_grid_quasiperiodic_stencil_tracks_each_corner_shift():
     stencil = PeriodicGridInterpolator(grid).stencil(
         np.array([[0.5, -0.5], [0.5, 0.5]])
     )
+    assert stencil.vertex_indices.shape == (2,)
+    assert stencil.lattice_shifts.shape == (2, 2)
     values = np.ones((1, grid.point_count), dtype=np.complex128)
     kpoint = np.array([0.25, 0.125])
 
@@ -543,6 +546,33 @@ def test_periodic_grid_quasiperiodic_stencil_tracks_each_corner_shift():
     )
 
     assert np.allclose(actual[0], expected, rtol=0.0, atol=1.0e-14)
+
+
+def test_uniform_wannier_cell_translation_matches_fourier_phase():
+    grid = PeriodicGrid((2, 2), np.eye(2))
+    mapping = grid.extension([3, 3], np.eye(2), 1.0)
+    fractional = grid.fractional_vertices
+    k_axis = np.array([-1.0 / 3.0, 0.0, 1.0 / 3.0])
+    rng = np.random.default_rng(20260728)
+    periodic_fields = rng.normal(size=(3, 3, 4)) + 1j * rng.normal(
+        size=(3, 3, 4)
+    )
+    shift = (1, -1)
+
+    zero = np.zeros(grid.point_count, dtype=np.complex128)
+    translated = np.zeros_like(zero)
+    for i, kx in enumerate(k_axis):
+        for j, ky in enumerate(k_axis):
+            kpoint = np.array([kx, ky])
+            field = periodic_fields[i, j][mapping]
+            spatial_phase = np.exp(2j * np.pi * (fractional @ kpoint))
+            zero += field * spatial_phase
+            translated += field * spatial_phase * np.exp(
+                -2j * np.pi * np.dot(kpoint, shift)
+            )
+
+    indices = _uniform_translation_indices(grid, shift)
+    assert np.allclose(translated, zero[indices], rtol=0.0, atol=2.0e-14)
 
 
 def test_mpb_source_loads_reordered_hdf5_kpoints(tmp_path):

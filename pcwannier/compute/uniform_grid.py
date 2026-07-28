@@ -177,8 +177,7 @@ class UniformGridInnerProduct:
         if left_matrix.shape[2] != right_matrix.shape[2]:
             raise ValueError("left and right fields have different component counts.")
         indices = self._point_indices
-        left_selected = left_matrix[:, indices, :]
-        right_selected = right_matrix[:, indices, :]
+        wavevector = None
         if phase_wavevector is not None:
             wavevector = np.asarray(
                 phase_wavevector, dtype=np.float64
@@ -190,16 +189,25 @@ class UniformGridInnerProduct:
                 raise ValueError(
                     f"phase_wavevector must contain {self.grid.dimension} finite components."
                 )
-            phase = np.exp(1j * (self.grid.vertices[indices] @ wavevector))
-            right_selected = right_selected * phase[None, :, None]
-        weighted_right = right_selected * self.metric[indices][None, :, None]
-        left_values = left_selected.conj() if conjugate_left else left_selected
-        result = np.einsum(
-            "mpc,npc->mn",
-            left_values,
-            weighted_right,
-            optimize=True,
+        result = np.zeros(
+            (left_matrix.shape[0], right_matrix.shape[0]),
+            dtype=np.complex128,
         )
+        for start in range(0, indices.size, _POINT_CHUNK_SIZE):
+            local = indices[start : start + _POINT_CHUNK_SIZE]
+            left_selected = left_matrix[:, local, :]
+            right_selected = right_matrix[:, local, :]
+            if wavevector is not None:
+                phase = np.exp(1j * (self.grid.vertices[local] @ wavevector))
+                right_selected = right_selected * phase[None, :, None]
+            weighted_right = right_selected * self.metric[local][None, :, None]
+            left_values = left_selected.conj() if conjugate_left else left_selected
+            result += np.einsum(
+                "mpc,npc->mn",
+                left_values,
+                weighted_right,
+                optimize=True,
+            )
         return np.asarray(result * self.point_weight, dtype=np.complex128)
 
     def norms(
@@ -221,10 +229,16 @@ class UniformGridInnerProduct:
             raise FloatingPointError(
                 f"{name} requires a real metric; imaginary residual={imag_residual:.6g}."
             )
-        integrand = metric.real[:, None, None] * np.abs(matrix[indices]) ** 2
-        result = (
-            np.sum(integrand, axis=(0, 1), dtype=np.float64) * self.point_weight
-        )
+        result = np.zeros(matrix.shape[2], dtype=np.float64)
+        for start in range(0, indices.size, _POINT_CHUNK_SIZE):
+            local = indices[start : start + _POINT_CHUNK_SIZE]
+            result += np.einsum(
+                "p,pci->i",
+                metric.real[start : start + local.size],
+                np.abs(matrix[local]) ** 2,
+                optimize=True,
+            )
+        result *= self.point_weight
         if not np.all(np.isfinite(result)):
             raise FloatingPointError(f"{name} contains non-finite values.")
         return np.asarray(result, dtype=np.float64)
@@ -309,3 +323,4 @@ def _to_field_columns(values, point_count: int, name: str) -> np.ndarray:
             f"{name} must contain finite values with one axis of length {point_count}."
         )
     return np.asarray(result, dtype=np.complex128)
+_POINT_CHUNK_SIZE = 262144

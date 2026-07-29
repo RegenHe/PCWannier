@@ -76,10 +76,13 @@ class RepresentationAnalysisSpec:
     degeneracy_tolerance: DegeneracyTolerance
     points: tuple[RepresentationPointSpec, ...]
     leakage_tolerance: float = 1.0e-8
+    character_tolerance: float = 1.0e-5
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.leakage_tolerance) or self.leakage_tolerance <= 0.0:
             raise ValueError("Representation leakage tolerance must be positive and finite.")
+        if not np.isfinite(self.character_tolerance) or self.character_tolerance <= 0.0:
+            raise ValueError("Representation character tolerance must be positive and finite.")
 
 
 @dataclass(frozen=True)

@@ -72,6 +72,7 @@ class IncarConfig:
     representation_degeneracy_absolute: float = 1.0e-6
     representation_degeneracy_relative: float = 1.0e-8
     representation_leakage_tolerance: float | None = None
+    representation_character_tolerance: float = 1.0e-5
     wannier_targets: list[dict[str, Any]] | None = None
     representation_analysis: list[dict[str, Any]] | None = None
     projection_target_bindings: tuple[Any, ...] = field(default=(), init=False, repr=False)
@@ -539,6 +540,7 @@ class IncarParser:
                         if cfg.representation_leakage_tolerance is None
                         else cfg.representation_leakage_tolerance
                     ),
+                    cfg.representation_character_tolerance,
                 )
             gauge = None
             if cfg.symmetry_constrained and not analysis_only:
@@ -687,6 +689,7 @@ class IncarParser:
             "representation_degeneracy_absolute",
             "representation_degeneracy_relative",
             "representation_leakage_tolerance",
+            "representation_character_tolerance",
             "projection_rank_tolerance",
             "gamma_zero_mode_tolerance",
         }:
@@ -1362,6 +1365,11 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         or cfg.representation_leakage_tolerance <= 0.0
     ):
         raise ValueError("representation_leakage_tolerance must be positive and finite.")
+    if (
+        not np.isfinite(cfg.representation_character_tolerance)
+        or cfg.representation_character_tolerance <= 0.0
+    ):
+        raise ValueError("representation_character_tolerance must be positive and finite.")
     if not np.isfinite(cfg.gamma_zero_mode_tolerance) or cfg.gamma_zero_mode_tolerance < 0.0:
         raise ValueError("gamma_zero_mode_tolerance must be finite and non-negative.")
     if cfg.symmetry_max_iter <= 0:

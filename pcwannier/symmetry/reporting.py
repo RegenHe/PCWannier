@@ -81,28 +81,26 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             {name: complex(value) for name, value in point.unitary_characters.items()},
         )
         for block in point.degenerate_blocks:
-            label = (
-                _format_irrep_decomposition(block.decomposition)
-                if block.decomposition is not None
-                else f"unavailable ({block.irrep_unavailable_reason or 'invalid representation'})"
-            )
+            label = _format_block_irrep(block, include_unavailable_reason=True)
             LOGGER.info(
                 "Bloch symmetry block %s bands(1-based)=%s eigenvalues=%s degeneracy=%s "
-                "irrep=%s generators=%s unitary_characters=%s coupled_outer_bands(1-based)=%s "
+                "irrep=%s class_representative_characters=%s "
+                "unitary_characters=%s coupled_outer_bands(1-based)=%s "
                 "candidate_excluded_bands(1-based)=%s unitarity=%.6g leakage=%.6g "
-                "twisted_composition=%.6g",
+                "twisted_composition=%.6g character_fit_error=%s",
                 point.name,
                 tuple(band + 1 for band in block.band_indices),
                 tuple(complex(value) for value in block.energies),
                 len(block.band_indices),
                 label,
-                block.generator_eigenvalues,
+                _class_representative_characters(point, block),
                 {name: complex(value) for name, value in block.unitary_characters.items()},
                 tuple(band + 1 for band in block.coupled_outer_bands),
                 tuple(band + 1 for band in block.candidate_excluded_bands),
                 block.unitarity_error,
                 block.leakage,
                 block.twisted_composition_residual,
+                block.character_fit_error,
             )
             for diagnostic in block.antiunitary_diagnostics:
                 LOGGER.info(
@@ -191,19 +189,17 @@ def format_bloch_symmetry_report(
                 "  antiunitary_operations=" + ", ".join(point.antiunitary_operation_names)
             )
         for block in point.degenerate_blocks:
-            irrep = (
-                _format_irrep_decomposition(block.decomposition)
-                if block.decomposition is not None
-                else "unavailable"
-            )
+            irrep = _format_block_irrep(block)
             lines.append(
                 f"  bands {_format_bands(block.band_indices)}: "
                 f"eigenvalues={_format_values(block.energies)}; "
                 f"dimension={len(block.band_indices)}; irrep={irrep}"
             )
-            for operation, eigenvalues in block.generator_eigenvalues.items():
+            for class_label, operation, character in _class_representative_characters(
+                point, block
+            ):
                 lines.append(
-                    f"    {operation} eigenvalues={_format_values(eigenvalues)}"
+                    f"    {class_label}({operation}) character={_format_number(character)}"
                 )
             if block.irrep_unavailable_reason:
                 lines.append(f"    note={block.irrep_unavailable_reason}")
@@ -274,6 +270,36 @@ def _format_irrep_decomposition(decomposition) -> str:
     return " + ".join(terms) or "none"
 
 
+def _format_block_irrep(block, *, include_unavailable_reason: bool = False) -> str:
+    if block.decomposition is not None:
+        return _format_irrep_decomposition(block.decomposition)
+    if block.approximate_decomposition is not None:
+        label = _format_irrep_decomposition(block.approximate_decomposition)
+        error = 0.0 if block.character_fit_error is None else block.character_fit_error
+        return f"{label} (approximate; character_error={error:.6g})"
+    if include_unavailable_reason:
+        return f"unavailable ({block.irrep_unavailable_reason or 'invalid representation'})"
+    return "unavailable"
+
+
+def _class_representative_characters(point, block):
+    resolved = point.resolved_little_group
+    if resolved is None:
+        return ()
+    output = []
+    for class_index, conjugacy_class in enumerate(
+        resolved.table.conjugacy_classes, start=1
+    ):
+        representative_index = conjugacy_class.element_indices[0]
+        operation = resolved.table.element_names[representative_index]
+        if operation not in block.unitary_characters:
+            continue
+        output.append(
+            (f"K{class_index}", operation, block.unitary_characters[operation])
+        )
+    return tuple(output)
+
+
 def _format_bands(indices) -> str:
     values = tuple(int(value) + 1 for value in indices)
     return ",".join(str(value) for value in values) or "none"
@@ -284,10 +310,11 @@ def _format_vector(values) -> str:
 
 
 def _format_values(values) -> str:
-    def one(value) -> str:
-        number = complex(value)
-        if abs(number.imag) <= 1.0e-12:
-            return f"{number.real:.10g}"
-        return f"{number.real:.10g}{number.imag:+.10g}j"
+    return "(" + ", ".join(_format_number(value) for value in values) + ")"
 
-    return "(" + ", ".join(one(value) for value in values) + ")"
+
+def _format_number(value) -> str:
+    number = complex(value)
+    if abs(number.imag) <= 1.0e-12:
+        return f"{number.real:.10g}"
+    return f"{number.real:.10g}{number.imag:+.10g}j"

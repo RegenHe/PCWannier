@@ -71,8 +71,9 @@ class DegenerateBlock:
     sewing_matrices: dict[str, np.ndarray]
     leakage: float
     decomposition: IrrepDecomposition | None = None
+    approximate_decomposition: IrrepDecomposition | None = None
+    character_fit_error: float | None = None
     unitary_characters: dict[str, complex] = field(default_factory=dict)
-    generator_eigenvalues: dict[str, tuple[complex, ...]] = field(default_factory=dict)
     antiunitary_diagnostics: tuple["AntiunitaryOperationDiagnostic", ...] = ()
     coupled_outer_bands: tuple[int, ...] = ()
     candidate_excluded_bands: tuple[int, ...] = ()
@@ -377,6 +378,53 @@ def decompose_little_group_characters(
     return IrrepDecomposition(raw, rounded, residuals, class_residuals)
 
 
+def _character_decomposition_error(
+    little_group_definition: ResolvedLittleGroup,
+    physical_characters: dict[str, complex],
+    decomposition: IrrepDecomposition,
+) -> float:
+    """Maximum trace mismatch after reconstructing the rounded irrep content."""
+
+    table = little_group_definition.table
+    observed = np.asarray(
+        [physical_characters[name] for name in table.operation_names],
+        dtype=np.complex128,
+    )
+    reconstructed = np.zeros(table.order, dtype=np.complex128)
+    for irrep in little_group_definition.require_irreps():
+        multiplicity = decomposition.multiplicities.get(irrep.name, 0)
+        if multiplicity:
+            reconstructed += multiplicity * np.asarray(
+                irrep.characters, dtype=np.complex128
+            )
+    return float(np.max(np.abs(observed - reconstructed), initial=0.0))
+
+
+def _credible_approximate_decomposition(
+    little_group_definition: ResolvedLittleGroup,
+    decomposition: IrrepDecomposition,
+    physical_dimension: int,
+    character_fit_error: float,
+    tolerance: float,
+) -> bool:
+    """Accept a character-pattern label without promoting it to a valid representation."""
+
+    dimensions = {
+        irrep.name: irrep.dimension for irrep in little_group_definition.require_irreps()
+    }
+    multiplicities = decomposition.multiplicities
+    if any(value < 0 for value in multiplicities.values()):
+        return False
+    reconstructed_dimension = sum(
+        dimensions[name] * value for name, value in multiplicities.items()
+    )
+    return bool(
+        reconstructed_dimension == physical_dimension
+        and character_fit_error <= tolerance
+        and decomposition.max_residual <= tolerance
+    )
+
+
 def compare_representations(
     target_dimension: int,
     physical_dimension: int,
@@ -459,6 +507,7 @@ def analyze_bloch_symmetry(
     split_degenerate_blocks: bool = True,
     degeneracy_tolerance: DegeneracyTolerance | None = None,
     leakage_tolerance: float | None = None,
+    character_tolerance: float | None = None,
 ) -> BlochSymmetryPointAnalysis:
     """Analyze only the physical Bloch representation at one sampled k point."""
 
@@ -474,6 +523,15 @@ def analyze_bloch_symmetry(
     )
     if not np.isfinite(leakage) or leakage <= 0.0:
         raise ValueError("Bloch-symmetry leakage tolerance must be positive and finite.")
+    character = (
+        1.0e-2
+        if character_tolerance is None and spec is None
+        else spec.character_tolerance
+        if character_tolerance is None
+        else float(character_tolerance)
+    )
+    if not np.isfinite(character) or character <= 0.0:
+        raise ValueError("Bloch-symmetry character tolerance must be positive and finite.")
     point = RepresentationPointSpec(
         name or "k=" + np.array2string(np.asarray(k_point, dtype=float)),
         np.asarray(k_point, dtype=float),
@@ -491,6 +549,7 @@ def analyze_bloch_symmetry(
         point,
         split_degenerate_blocks=bool(split_degenerate_blocks),
         leakage_tolerance=leakage,
+        character_tolerance=character,
     )
 
 
@@ -519,6 +578,7 @@ def run_bloch_symmetry_analysis(
                 point,
                 split_degenerate_blocks=True,
                 leakage_tolerance=spec.leakage_tolerance,
+                character_tolerance=spec.character_tolerance,
             )
             for point in spec.points
         )
@@ -556,6 +616,7 @@ def _analyze_bloch_point(
     *,
     split_degenerate_blocks: bool,
     leakage_tolerance: float,
+    character_tolerance: float,
 ) -> BlochSymmetryPointAnalysis:
     group = context.model.group
     k_index = provider.find_k_index(point.k_fractional)
@@ -663,7 +724,6 @@ def _analyze_bloch_point(
         else (bands,)
     )
     band_position = {band: index for index, band in enumerate(bands)}
-    generator_indices = _minimal_unitary_generators(group, operation_indices)
     unitary_indices = tuple(
         index for index in operation_indices if not group.operations[index].antiunitary
     )
@@ -739,25 +799,34 @@ def _analyze_bloch_point(
             unitarity_error,
             twisted_residual,
         )
+        decomposition = None
+        approximate_decomposition = None
+        character_fit_error = None
         if (
-            unavailable_reason is None
-            and resolved_little_group is not None
+            resolved_little_group is not None
             and not any(resolved_little_group.factor_system.antiunitary_flags)
         ):
-            decomposition = decompose_little_group_characters(
+            character_decomposition = decompose_little_group_characters(
                 resolved_little_group, block_unitary_characters
             )
-        else:
-            decomposition = None
+            character_fit_error = _character_decomposition_error(
+                resolved_little_group,
+                block_unitary_characters,
+                character_decomposition,
+            )
+            if unavailable_reason is None:
+                decomposition = character_decomposition
+            elif _credible_approximate_decomposition(
+                resolved_little_group,
+                character_decomposition,
+                len(block),
+                character_fit_error,
+                character_tolerance,
+            ):
+                approximate_decomposition = character_decomposition
         candidates = _candidate_excluded_bands(
             energy_line, available, block, point.degeneracy_tolerance
         )
-        generator_eigenvalues = {
-            _operation_name(group, index): _sorted_eigenvalues(
-                block_matrices[_operation_name(group, index)]
-            )
-            for index in generator_indices
-        }
         antiunitary_diagnostics = _antiunitary_diagnostics(
             group,
             resolved_little_group,
@@ -771,8 +840,9 @@ def _analyze_bloch_point(
                 sewing_matrices=block_matrices,
                 leakage=leakage,
                 decomposition=decomposition,
+                approximate_decomposition=approximate_decomposition,
+                character_fit_error=character_fit_error,
                 unitary_characters=block_unitary_characters,
-                generator_eigenvalues=generator_eigenvalues,
                 antiunitary_diagnostics=antiunitary_diagnostics,
                 coupled_outer_bands=coupled,
                 candidate_excluded_bands=candidates,
@@ -1128,38 +1198,6 @@ def _candidate_excluded_bands(
         if index not in available
         and any(tolerance.equivalent(energy, selected) for selected in selected_energies)
     )
-
-
-def _minimal_unitary_generators(
-    group: SpaceGroup,
-    operation_indices: tuple[int, ...],
-) -> tuple[int, ...]:
-    unitary = tuple(
-        index for index in operation_indices if not group.operations[index].antiunitary
-    )
-    allowed = set(unitary)
-    generators: list[int] = []
-
-    def generated_closure() -> set[int]:
-        closure = {group.identity_index, *generators}
-        changed = True
-        while changed:
-            changed = False
-            for left in tuple(closure):
-                for right in tuple(closure):
-                    product = group.multiply_mod_lattice(left, right).result_index
-                    if product in allowed and product not in closure:
-                        closure.add(product)
-                        changed = True
-        return closure
-
-    closure = generated_closure()
-    for index in unitary:
-        if index == group.identity_index or index in closure:
-            continue
-        generators.append(index)
-        closure = generated_closure()
-    return tuple(generators)
 
 
 def _unitary_subgroup_name(

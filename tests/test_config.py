@@ -42,6 +42,7 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.maxwell_problem.curl_material == MaterialKind.MU
     assert cfg.symmetry_constrained is True
     assert cfg.symmetry_output_basis == "strict"
+    assert cfg.representation_character_tolerance == pytest.approx(1.0e-2)
     assert cfg.symmetry_context is not None
     assert cfg.symmetry_context.model.symmetry_gauge.enabled
     assert cfg.symmetry_context.model.bloch_convention.sign == -1
@@ -364,6 +365,7 @@ def test_central_config_validation_rejects_invalid_core_geometry(tmp_path, old, 
         ("max_iter = -1", "max_iter must be non-negative"),
         ("epsilon = 0", "epsilon must be finite and positive"),
         ("projection_rank_tolerance = 1", "projection_rank_tolerance"),
+        ("representation_character_tolerance = 0", "representation_character_tolerance"),
         ("neighbor = 0 0", r"neighbor\[0\] must be non-zero"),
         ("inner_window = 2:4", "frozen inner_window bands"),
         ("k_path\nX; 0.5; 0\nend", "k_path point 0"),

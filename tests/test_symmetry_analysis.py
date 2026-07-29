@@ -15,7 +15,10 @@ from pcwannier.data import BlochSymmetryRunResult, InputBundle, Mesh
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.matrix_io import load_cell_matrix
 from pcwannier.outputs import write_bloch_symmetry_outputs
-from pcwannier.symmetry.reporting import format_symmetry_analysis_report
+from pcwannier.symmetry.reporting import (
+    format_bloch_symmetry_report,
+    format_symmetry_analysis_report,
+)
 from pcwannier.symmetry import (
     BlochSymmetryAction,
     DegeneracyTolerance,
@@ -521,6 +524,54 @@ def test_bloch_analysis_reports_leakage_without_constructing_an_irrep():
     assert block.coupled_outer_bands == (1,)
     assert block.decomposition is None
     assert "leakage" in block.irrep_unavailable_reason
+
+
+def test_leaky_block_can_report_an_approximate_character_label():
+    model = p4mm_model(
+        points=(("Gamma", [0.0, 0.0], (0, 1), None),)
+    )
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+            np.ones(mesh.vertices.shape[0]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0, 2.0])
+    provider = StateBlochSymmetryProvider(state, context)
+    original = provider.sewing_matrix_in_band_basis
+
+    def leaky_band_basis(mapping, source_band_indices, target_band_indices=None, **kwargs):
+        source = tuple(source_band_indices)
+        target = source if target_band_indices is None else tuple(target_band_indices)
+        matrix = original(
+            mapping,
+            source,
+            target,
+            **kwargs,
+        )
+        if source == (0, 1) and target == (2,):
+            return matrix + np.array([[0.02, 0.0]])
+        if source == (2,) and target == (0, 1):
+            return matrix + np.array([[0.02], [0.0]])
+        return matrix
+
+    provider.sewing_matrix_in_band_basis = leaky_band_basis
+    result = run_bloch_symmetry_analysis(state, context, provider=provider)
+    block = result.point("Gamma").degenerate_blocks[0]
+
+    assert block.leakage > model.representation_analysis.leakage_tolerance
+    assert block.decomposition is None
+    assert block.approximate_decomposition is not None
+    assert block.approximate_decomposition.multiplicities["E"] == 1
+    assert block.character_fit_error == pytest.approx(0.0, abs=1.0e-12)
+
+    report = format_bloch_symmetry_report(result)
+    assert "irrep=E (approximate; character_error=" in report
+    assert "K1(E) character=2" in report
+    assert "note=band subspace leakage" in report
 
 
 def test_band_basis_leakage_does_not_use_globally_mixed_sewing_blocks():

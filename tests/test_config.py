@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pytest
 
@@ -86,15 +88,22 @@ def test_bloch_symmetry_config_mode_does_not_require_wannier_inputs(tmp_path):
     assert point.target_names is None
 
 
-def test_longitudinal_energy_inversion_requires_t_plus_l(tmp_path):
+def test_longitudinal_settings_are_ignored_for_transverse_subspace(tmp_path):
     incar = tmp_path / "incar"
     incar.write_text(
-        _minimal_symmetry_incar() + "\ninvert_longitudinal_energies = true\n",
+        _minimal_symmetry_incar()
+        + "\ninvert_longitudinal_energies = true\n"
+        + "longitudinal_band_window = 0:2\n"
+        + "longitudinal_field_file = missing-HL.h5\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=r"requires wannier_subspace=T \+ L"):
-        load_config(incar)
+    config = load_config(incar)
+
+    assert config.wannier_subspace == "T"
+    assert config.invert_longitudinal_energies is False
+    assert config.longitudinal_band_window is None
+    assert config.longitudinal_field_file is False
 
 
 def test_energy_window_parser(tmp_path):
@@ -195,21 +204,42 @@ def test_rank_deficient_b_vectors_are_rejected(tmp_path):
         load_config(incar)
 
 
-def test_removed_w_center_input_is_rejected(tmp_path):
+def test_removed_w_center_input_is_warned_and_ignored(tmp_path, caplog):
     incar = tmp_path / "incar"
     incar.write_text(_minimal_symmetry_incar() + "\nw_center = 0, 0\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="w_center input has been removed"):
-        load_config(incar)
+    with caplog.at_level(logging.WARNING):
+        config = load_config(incar)
+
+    assert "Unknown incar field 'w_center' is ignored" in caplog.text
+    assert config.name == "Wannier"
+    assert config.kdim == 2
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "unknown_option = 1",
+        "dielectric_file = eps.txt",
+        "representation_field_kind = scalar",
+        "hopping_state = 0:3, 0:3",
+    ],
+)
+def test_incar_warns_and_ignores_unknown_fields(tmp_path, suffix, caplog):
+    incar = tmp_path / "incar"
+    incar.write_text(_minimal_symmetry_incar() + "\n" + suffix + "\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(incar)
+
+    assert "Unknown incar field" in caplog.text
+    assert config.name == "Wannier"
+    assert config.kdim == 2
 
 
 @pytest.mark.parametrize(
     ("suffix", "message"),
     [
-        ("unknown_option = 1", "Unknown incar field"),
-        ("dielectric_file = eps.txt", "Unknown incar field"),
-        ("representation_field_kind = scalar", "Unknown incar field"),
-        ("hopping_state = 0:3, 0:3", "Unknown incar field"),
         ("lattice_const = 2", "Duplicate incar field"),
         ("this is not an assignment", "Malformed incar line"),
     ],

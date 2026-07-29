@@ -327,7 +327,11 @@ class StateInitializer:
         ):
             self.matA[idx] = amat
             self.matC[idx] = cmat
-        if self.config.inner_window is not False or self.config.longitudinal_inner_window is not False:
+        has_longitudinal_inner = (
+            self.config.wannier_subspace == "T+L"
+            and self.config.longitudinal_inner_window is not False
+        )
+        if self.config.inner_window is not False or has_longitudinal_inner:
             self.inner_projection()
         else:
             self.set_window_indices()

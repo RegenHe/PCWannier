@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
+import logging
 import math
 import cmath
 import re
 
 import numpy as np
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .maxwell import MaxwellProblem
@@ -301,12 +304,14 @@ class IncarParser:
         assigned_fields: set[str] = set()
         allowed_fields = _user_config_fields()
 
-        def reserve_field(name: str) -> None:
+        def reserve_field(name: str) -> bool:
             if name not in allowed_fields:
-                raise ValueError(f"Unknown incar field: {name!r}.")
+                LOGGER.warning("Unknown incar field %r is ignored.", name)
+                return False
             if name in assigned_fields:
                 raise ValueError(f"Duplicate incar field or block: {name!r}.")
             assigned_fields.add(name)
+            return True
 
         with self.filename.open("r", encoding="utf-8") as handle:
             for line_number, raw in enumerate(handle, start=1):
@@ -375,13 +380,8 @@ class IncarParser:
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
-                if key == "w_center":
-                    raise ValueError(
-                        "The w_center input has been removed because forcing Wannier centers is not a physical operation."
-                    )
-                if key == "symmetry":
-                    raise ValueError("The boolean symmetry input has been removed; use symmetry_file = ./sym.yaml.")
-                reserve_field(key)
+                if not reserve_field(key):
+                    continue
                 if key in {"projections", "k_path", "wannier_targets", "representation_analysis"}:
                     raise ValueError(f"incar field {key!r} must use its block form terminated by 'end'.")
                 setattr(cfg, key, self.parse_value(key, value))
@@ -1138,7 +1138,44 @@ def _validate_vector_list(name: str, vectors, dimension: int, *, reject_opposite
         seen.append(vector)
 
 
+def _configure_wannier_subspace(cfg: IncarConfig) -> bool:
+    cfg.wannier_subspace = re.sub(r"\s+", "", str(cfg.wannier_subspace)).upper()
+    if cfg.wannier_subspace not in {"T", "T+L"}:
+        raise ValueError("wannier_subspace must be 'T' or 'T + L'.")
+    if cfg.wannier_subspace == "T+L":
+        return True
+
+    for name, inactive in (
+        ("longitudinal_field_file", False),
+        ("longitudinal_energy_file", False),
+        ("pseudoscalar_file", False),
+        ("pseudoscalar_metric_file", False),
+        ("longitudinal_band_window", None),
+        ("longitudinal_inner_window", False),
+        ("invert_longitudinal_energies", False),
+        ("gamma_zero_regularization", False),
+    ):
+        setattr(cfg, name, inactive)
+
+    filtered_points = []
+    for point in cfg.representation_analysis or ():
+        selectors = point.get("channel_bands")
+        if not selectors:
+            filtered_points.append(point)
+            continue
+        h_bands = selectors.get("H")
+        if h_bands:
+            physical_point = dict(point)
+            physical_point["bands"] = tuple(int(value) for value in h_bands)
+            physical_point["channel_bands"] = None
+            filtered_points.append(physical_point)
+    if cfg.representation_analysis is not None:
+        cfg.representation_analysis = filtered_points or None
+    return False
+
+
 def _validate_config_inputs(cfg: IncarConfig) -> None:
+    longitudinal_enabled = _configure_wannier_subspace(cfg)
     dimension = None
     if cfg.lattice_const is not None and (
         not np.isfinite(cfg.lattice_const) or float(cfg.lattice_const) <= 0.0
@@ -1187,12 +1224,17 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
 
     _validate_band_window("band_window", cfg.band_window, allow_false=False)
     _validate_band_window("inner_window", cfg.inner_window, allow_false=True)
-    _validate_band_window(
-        "longitudinal_band_window", cfg.longitudinal_band_window, allow_false=False
-    )
-    _validate_band_window(
-        "longitudinal_inner_window", cfg.longitudinal_inner_window, allow_false=True
-    )
+    if longitudinal_enabled:
+        _validate_band_window(
+            "longitudinal_band_window",
+            cfg.longitudinal_band_window,
+            allow_false=False,
+        )
+        _validate_band_window(
+            "longitudinal_inner_window",
+            cfg.longitudinal_inner_window,
+            allow_false=True,
+        )
     if (
         isinstance(cfg.band_window, np.ndarray)
         and isinstance(cfg.inner_window, np.ndarray)
@@ -1281,10 +1323,7 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
 
     if cfg.integration_mode not in {"nodal", "quadratic"}:
         raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
-    cfg.wannier_subspace = re.sub(r"\s+", "", str(cfg.wannier_subspace)).upper()
-    if cfg.wannier_subspace not in {"T", "T+L"}:
-        raise ValueError("wannier_subspace must be 'T' or 'T + L'.")
-    if cfg.wannier_subspace == "T+L":
+    if longitudinal_enabled:
         if cfg.longitudinal_band_window is None:
             raise ValueError("wannier_subspace=T + L requires longitudinal_band_window.")
         if str(cfg.field_components).strip().lower() != "full_vector" or str(cfg.primary_field).lower() != "magnetic":
@@ -1294,17 +1333,6 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
                 "gamma_zero_regularization must be false for wannier_subspace=T + L; "
                 "the combined reader already regularizes the Gamma T+L zero space."
             )
-    elif any(
-        item.get("channel_bands")
-        for item in (cfg.representation_analysis or ())
-    ):
-        raise ValueError(
-            "H[...] and L[...] representation-analysis selectors require wannier_subspace=T + L."
-        )
-    if cfg.invert_longitudinal_energies and cfg.wannier_subspace != "T+L":
-        raise ValueError(
-            "invert_longitudinal_energies=true requires wannier_subspace=T + L."
-        )
     cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
     if cfg.symmetry_output_basis not in {"strict", "fem"}:
         raise ValueError("symmetry_output_basis must be 'strict' or 'fem'.")

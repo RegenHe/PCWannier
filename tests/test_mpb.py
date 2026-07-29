@@ -332,7 +332,7 @@ def test_mpb_grid_rejects_shifted_coordinate_metadata(tmp_path):
         load_mpb_grid(tmp_path / "grid.h5")
 
 
-def test_mpb_source_loads_three_dimensional_vector_fields_without_reordering(tmp_path):
+def test_mpb_transverse_subspace_does_not_load_longitudinal_channels(tmp_path):
     shape = (2, 2, 2)
     kpoints = np.array([[0.0, 0.0, 0.0]])
     with h5py.File(tmp_path / "grid.h5", "w") as handle:
@@ -350,20 +350,6 @@ def test_mpb_source_loads_three_dimensional_vector_fields_without_reordering(tmp
     with h5py.File(tmp_path / "fields.h5", "w") as handle:
         handle.create_dataset("kpoints", data=kpoints)
         handle.create_dataset("H_periodic", data=raw)
-    with h5py.File(tmp_path / "EL.h5", "w") as handle:
-        handle.create_dataset("kpoints", data=kpoints)
-        handle.create_dataset("E", data=np.array([[0.0, 2.0]]))
-    with h5py.File(tmp_path / "longitudinal.h5", "w") as handle:
-        handle.create_dataset("kpoints", data=kpoints)
-        handle.create_dataset("H_periodic", data=raw + 100.0)
-    scalar = np.arange(1 * 2 * 2 * 2 * 2, dtype=float).reshape(1, 2, 2, 2, 2)
-    with h5py.File(tmp_path / "phi.h5", "w") as handle:
-        handle.create_dataset("kpoints", data=kpoints)
-        handle.create_dataset("phi_periodic", data=scalar)
-        # Zero-mode metadata is derived from EL, not from the optional scalar file.
-        handle.create_dataset("zero_mode", data=np.array([[False, True]]))
-    with h5py.File(tmp_path / "epsilon.h5", "w") as handle:
-        handle.create_dataset("epsilon", data=np.full(shape, 2.0))
     incar = tmp_path / "incar"
     incar.write_text(
         "\n".join(
@@ -371,64 +357,48 @@ def test_mpb_source_loads_three_dimensional_vector_fields_without_reordering(tmp
                 "dataset_type = mpb",
                 "field_components = full_vector",
                 "primary_field = magnetic",
+                "wannier_subspace = T",
+                "invert_longitudinal_energies = true",
                 "lattice_const = 1",
                 "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
                 "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
                 "origin = 0, 0, 0",
                 "k_points = 0:1:1, 0:1:1, 0:1:1",
                 "band_window = 0:2",
+                "longitudinal_band_window = 0:2",
                 "dataset_file = ./fields.h5",
                 "mesh_file = ./grid.h5",
                 "metric_file = false",
                 "E_file = ./E.h5",
-                "longitudinal_field_file = ./longitudinal.h5",
-                "longitudinal_energy_file = ./EL.h5",
-                "pseudoscalar_file = ./phi.h5",
-                "pseudoscalar_metric_file = ./epsilon.h5",
+                "longitudinal_field_file = ./missing-longitudinal.h5",
+                "longitudinal_energy_file = ./missing-EL.h5",
+                "pseudoscalar_file = ./missing-phi.h5",
+                "pseudoscalar_metric_file = ./missing-epsilon.h5",
                 "symmetry_file = Pm-3m",
                 "representation_analysis",
-                "Gamma; 0, 0, 0; 0:2",
+                "Gamma; 0, 0, 0; H[0:2],L[0:1]",
                 "end",
             ]
         ),
         encoding="utf-8",
     )
 
-    bundle = load_input(load_config(incar, mode="bloch_symmetry"))
+    config = load_config(incar, mode="bloch_symmetry")
+    bundle = load_input(config)
 
     assert bundle.fields[0, 0, 0].shape == (2, 8, 3)
     assert np.array_equal(bundle.fields[0, 0, 0], raw[0].reshape(2, 8, 3))
     assert np.array_equal(bundle.metric_material, np.ones(8))
-    assert tuple(bundle.auxiliary_bundle_loaders) == ("longitudinal", "pseudoscalar")
-    assert bundle.auxiliary_zero_mode_bands["longitudinal"][0, 0, 0] == [0]
-
-    longitudinal = bundle.auxiliary_bundle_loaders["longitudinal"]()
-    pseudoscalar = bundle.auxiliary_bundle_loaders["pseudoscalar"]()
-    assert longitudinal.fields[0, 0, 0].shape == (1, 8, 3)
-    assert longitudinal.band_indices[0, 0, 0] == [1]
-    assert np.array_equal(
-        longitudinal.fields[0, 0, 0][0],
-        (raw[0, 1] + 100.0).reshape(8, 3),
-    )
-    assert pseudoscalar.fields[0, 0, 0].shape == (2, 8)
-    assert np.array_equal(pseudoscalar.metric_material, np.full(8, 2.0))
-    assert np.array_equal(pseudoscalar.zero_modes[0, 0, 0], [True, False])
-
-    longitudinal_only_incar = tmp_path / "incar-longitudinal-only"
-    longitudinal_only_incar.write_text(
-        incar.read_text(encoding="utf-8")
-        .replace("pseudoscalar_file = ./phi.h5\n", "")
-        .replace("pseudoscalar_metric_file = ./epsilon.h5\n", ""),
-        encoding="utf-8",
-    )
-    longitudinal_only = load_input(
-        load_config(longitudinal_only_incar, mode="bloch_symmetry")
-    )
-    assert tuple(longitudinal_only.auxiliary_bundle_loaders) == ("longitudinal",)
+    assert not bundle.auxiliary_bundle_loaders
+    assert not bundle.auxiliary_zero_mode_bands
+    assert config.invert_longitudinal_energies is False
+    assert config.longitudinal_field_file is False
+    assert config.longitudinal_energy_file is False
+    assert config.pseudoscalar_file is False
+    assert config.pseudoscalar_metric_file is False
     assert (
-        longitudinal_only.auxiliary_bundle_loaders["longitudinal"]()
-        .band_indices[0, 0, 0]
-        == [1]
+        config.symmetry_context.model.representation_analysis.points[0].band_indices
+        == (0, 1)
     )
 
 

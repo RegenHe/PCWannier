@@ -199,10 +199,6 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
             eigenvalues.shape[1],
         )
 
-    auxiliary_loaders, auxiliary_zero_mode_bands = _build_auxiliary_channel_loaders(
-        config, grid
-    )
-
     band_lengths = [
         len(band_indices[index]) for index in np.ndindex(band_indices.shape)
     ]
@@ -230,8 +226,8 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         field_representation=BlochFieldRepresentation.PERIODIC_PART,
         symmetry=config.symmetry_context,
         analysis_field_kind=config.maxwell_problem.symmetry_field_kind,
-        auxiliary_zero_mode_bands=auxiliary_zero_mode_bands,
-        auxiliary_bundle_loaders=auxiliary_loaders,
+        auxiliary_zero_mode_bands={},
+        auxiliary_bundle_loaders={},
     )
 
 

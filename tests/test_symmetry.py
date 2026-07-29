@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 import numpy as np
 import pytest
@@ -266,11 +267,13 @@ def test_incar_loads_relative_space_group_file(tmp_path):
     assert config.symmetry_context.model.target("square_2c_A1").wannier_dimension == 2
 
 
-def test_old_boolean_symmetry_input_is_rejected(tmp_path):
+def test_old_boolean_symmetry_input_is_warned_and_ignored(tmp_path, caplog):
     incar = tmp_path / "incar"
     incar.write_text("symmetry = true\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="use symmetry_file"):
-        load_config(incar)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValueError, match="Missing required incar fields"):
+            load_config(incar)
+    assert "Unknown incar field 'symmetry' is ignored" in caplog.text
 
 
 def test_invalid_space_group_and_dimension_are_rejected(tmp_path):

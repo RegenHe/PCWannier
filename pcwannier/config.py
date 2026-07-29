@@ -120,7 +120,6 @@ class IncarConfig:
     max_iter: int = 2000
     extension: list[int] | None = None
     band_calc_num: int | None = None
-    hopping_state: list[np.ndarray] | None = None
     neighbor: list[list[int]] = field(default_factory=list)
     k_path: list[dict[str, Any]] | None = None
 
@@ -727,14 +726,6 @@ class IncarParser:
                 if not np.isfinite(step) or step == 0.0:
                     raise ValueError(f"Invalid k_points range with zero or non-finite step: {part!r}")
                 ranges.append(np.arange(start, stop, step))
-            return ranges
-        if key == "hopping_state":
-            ranges = []
-            for part in value.split(","):
-                tokens = [int(x) for x in part.strip().split(":")]
-                if len(tokens) != 2:
-                    raise ValueError(f"Invalid hopping_state range: {part!r}")
-                ranges.append(np.arange(tokens[0], tokens[1]))
             return ranges
         if key in {
             "band_window",

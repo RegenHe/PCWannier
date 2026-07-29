@@ -55,7 +55,7 @@ def parse_args(argv=None):
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="Logging level.",
     )
-    parser.add_argument("--out", default=None, help="Output directory override")
+    parser.add_argument("-o", "--out", default=None, help="Output directory override")
     parser.add_argument(
         "-s",
         "--analyze-symmetry",
@@ -64,9 +64,9 @@ def parse_args(argv=None):
     )
     parser.add_argument("-b", "--base", action="store_true", help="Plot projection base functions and exit")
     parser.add_argument("-c", "--cache", action="store_true", help="Use cached calculation matrices")
-    parser.add_argument("--interp", default=None, help="Interpolation mesh point path")
-    parser.add_argument("--interp-wannier", default=None, help="Interpolated Wannier output path")
-    parser.add_argument("--interp-metric", default=None, help="Interpolated metric-material output path")
+    parser.add_argument("-I", "--interp", default=None, help="Interpolation mesh point path")
+    parser.add_argument("-W", "--interp-wannier", default=None, help="Interpolated Wannier output path")
+    parser.add_argument("-M", "--interp-metric", default=None, help="Interpolated metric-material output path")
     return parser.parse_args(argv)
 
 

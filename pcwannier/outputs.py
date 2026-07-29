@@ -13,7 +13,14 @@ import matplotlib.pyplot as plt
 from matplotlib.tri import LinearTriInterpolator, Triangulation
 
 from .config import EnergyWindow, IncarConfig
-from .data import BandResult, BlochSymmetryRunResult, Mesh, RunResult, TopologyResult
+from .data import (
+    BandResult,
+    BlochSymmetryRunResult,
+    Mesh,
+    PeriodicGrid,
+    RunResult,
+    TopologyResult,
+)
 from .matrix_io import save_cell_matrix
 from .symmetry.cache import save_sewing_matrix_cache
 from .symmetry.reporting import (
@@ -172,33 +179,59 @@ def save_band(filename: str | Path, energies: np.ndarray, k_path: np.ndarray | N
             handle.write(f"{k_text},{e_text}\n")
 
 
-def load_interpolation_points(filename: str | Path) -> np.ndarray:
+def load_interpolation_points(
+    filename: str | Path,
+    dimension: int | None = None,
+) -> np.ndarray:
     path = Path(filename)
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         points = np.loadtxt(handle, delimiter=",")
     points = np.asarray(points, dtype=float)
     if points.ndim == 1:
         points = points.reshape(1, -1)
-    if points.ndim != 2 or points.shape[1] != 2:
-        raise ValueError(f"Invalid interpolation mesh {path}: each row must contain x,y.")
+    allowed_dimensions = (2, 3) if dimension is None else (int(dimension),)
+    if points.ndim != 2 or points.shape[1] not in allowed_dimensions:
+        columns = " or ".join(
+            ",".join(("x", "y", "z")[:item]) for item in allowed_dimensions
+        )
+        raise ValueError(
+            f"Invalid interpolation mesh {path}: each row must contain {columns}."
+        )
+    if not np.all(np.isfinite(points)):
+        raise ValueError(f"Invalid interpolation mesh {path}: coordinates must be finite.")
     return points
 
 
-def save_points_with_values(filename: str | Path, points: np.ndarray, values: np.ndarray) -> None:
+def save_points_with_values(
+    filename: str | Path,
+    points: np.ndarray,
+    values: np.ndarray,
+    *,
+    value_labels: list[str] | None = None,
+) -> None:
     path = Path(filename)
     _ensure_parent(path)
     points = np.asarray(points, dtype=float)
     vals = np.asarray(values)
     if vals.ndim == 1:
         vals = vals.reshape(1, -1)
-    if points.ndim != 2 or points.shape[1] != 2:
-        raise ValueError("points must have shape (n, 2).")
+    if points.ndim != 2 or points.shape[1] not in (2, 3):
+        raise ValueError("points must have shape (n, 2) or (n, 3).")
     if vals.shape[1] != points.shape[0]:
         raise ValueError("Number of interpolation points and value rows differ.")
+    if value_labels is not None and len(value_labels) != vals.shape[0]:
+        raise ValueError("Number of interpolation labels and value rows differ.")
 
     with path.open("w", encoding="utf-8") as handle:
-        for idx, (x, y) in enumerate(points):
-            row = [f"{x:.10f}", f"{y:.10f}"]
+        if value_labels is not None:
+            coordinate_labels = list(("x", "y", "z")[: points.shape[1]])
+            handle.write(
+                "# columns: "
+                + ", ".join(coordinate_labels + value_labels)
+                + "\n"
+            )
+        for idx, point in enumerate(points):
+            row = [f"{coordinate:.10f}" for coordinate in point]
             for value in vals[:, idx]:
                 if np.iscomplexobj(value):
                     row.append(f"{np.real(value):.10f}{np.imag(value):+.10f}j")
@@ -214,20 +247,51 @@ def write_interpolation_outputs(
     interp_metric: str | Path | None = None,
     out_dir: str | Path | None = None,
 ) -> None:
-    points = load_interpolation_points(interp_path)
-    interp_path = Path(interp_path)
     mesh = result.extended_mesh
+    dimension = int(np.asarray(mesh.vertices).shape[1])
+    points = load_interpolation_points(interp_path, dimension=dimension)
+    interp_path = Path(interp_path)
     tile_count = int(np.prod(result.config.extension[: result.config.kdim]))
 
     wannier_path = _resolve_interpolation_output(interp_path, interp_wannier, "interp-wannier", out_dir)
     if wannier_path is not None:
         values = []
-        for _, wmat in result.wanniers.items():
+        labels = []
+        for cell, wmat in result.wanniers.items():
             wmat = np.asarray(wmat)
-            for band in range(wmat.shape[1]):
-                values.append(_interpolate_complex_mesh(mesh, wmat[:, band], points, tile_count))
+            cell_label = "_".join(str(index) for index in cell)
+            if wmat.ndim == 2:
+                for band in range(wmat.shape[1]):
+                    values.append(
+                        _interpolate_complex_mesh(
+                            mesh, wmat[:, band], points, tile_count
+                        )
+                    )
+                    labels.append(f"W[{cell_label},{band + 1}]")
+            elif wmat.ndim == 3 and wmat.shape[2] == dimension:
+                for band in range(wmat.shape[1]):
+                    interpolated = _interpolate_complex_mesh(
+                        mesh, wmat[:, band], points, tile_count
+                    )
+                    values.extend(
+                        interpolated[:, component]
+                        for component in range(dimension)
+                    )
+                    labels.extend(
+                        f"W[{cell_label},{band + 1}].{axis}"
+                        for axis in ("x", "y", "z")[:dimension]
+                    )
+            else:
+                raise ValueError(
+                    f"Wannier field has unsupported interpolation shape {wmat.shape}."
+                )
         with timed_step("write interpolated Wannier data", LOGGER, file=wannier_path):
-            save_points_with_values(wannier_path, points, np.asarray(values))
+            save_points_with_values(
+                wannier_path,
+                points,
+                np.asarray(values),
+                value_labels=labels if dimension == 3 else None,
+            )
 
     metric_path = _resolve_interpolation_output(
         interp_path, interp_metric, "interp-metric", out_dir
@@ -243,7 +307,12 @@ def write_interpolation_outputs(
             file=metric_path,
             material=material,
         ):
-            save_points_with_values(metric_path, points, metric.reshape(1, -1))
+            save_points_with_values(
+                metric_path,
+                points,
+                metric.reshape(1, -1),
+                value_labels=[material] if dimension == 3 else None,
+            )
 
 
 def _resolve_interpolation_output(
@@ -280,6 +349,13 @@ def _interpolate_complex(triang: Triangulation, values: np.ndarray, points: np.n
 def _interpolate_real_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, tile_count: int) -> np.ndarray:
     """Interpolate a tiled non-conforming mesh without building a global triangle finder."""
     if getattr(mesh, "integration_family", "finite_element") == "uniform_grid":
+        if not isinstance(mesh, PeriodicGrid):
+            raise TypeError("Uniform-grid interpolation requires PeriodicGrid metadata.")
+        if mesh.dimension == 3:
+            interpolated = _interpolate_uniform_grid(mesh, values, points)
+            if interpolated.ndim != 1:
+                raise ValueError("Real scalar interpolation received component-valued data.")
+            return np.asarray(np.real(interpolated), dtype=float)
         triang = Triangulation(
             mesh.vertices[:, 0],
             mesh.vertices[:, 1],
@@ -312,9 +388,113 @@ def _interpolate_real_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, t
 
 def _interpolate_complex_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, tile_count: int) -> np.ndarray:
     values = np.asarray(values)
+    if (
+        getattr(mesh, "integration_family", "finite_element") == "uniform_grid"
+        and isinstance(mesh, PeriodicGrid)
+        and mesh.dimension == 3
+    ):
+        return np.asarray(
+            _interpolate_uniform_grid(mesh, values, points),
+            dtype=np.complex128,
+        )
     real = _interpolate_real_mesh(mesh, np.real(values), points, tile_count)
     imag = _interpolate_real_mesh(mesh, np.imag(values), points, tile_count)
     return real + 1j * imag
+
+
+def _interpolate_uniform_grid(
+    grid: PeriodicGrid,
+    values: np.ndarray,
+    points: np.ndarray,
+) -> np.ndarray:
+    """Multilinearly interpolate an extended regular grid without wrapping."""
+
+    coordinates = np.asarray(points, dtype=float)
+    data = np.asarray(values)
+    if coordinates.ndim != 2 or coordinates.shape[1] != grid.dimension:
+        raise ValueError(
+            f"Interpolation points must have shape (n, {grid.dimension})."
+        )
+    if data.ndim < 1 or data.shape[0] != grid.point_count:
+        raise ValueError(
+            f"Uniform-grid values have shape {data.shape}; "
+            f"expected first dimension {grid.point_count}."
+        )
+    if not np.all(np.isfinite(data)):
+        raise ValueError("Uniform-grid interpolation values must be finite.")
+
+    fractional = coordinates @ np.linalg.inv(grid.lattice_vectors)
+    lower = np.zeros((coordinates.shape[0], grid.dimension), dtype=np.intp)
+    upper = np.zeros_like(lower)
+    fractions = np.zeros_like(fractional)
+    valid = np.ones(coordinates.shape[0], dtype=bool)
+    coordinate_tolerance = max(
+        np.finfo(float).eps
+        * max(float(np.max(np.abs(grid.fractional_vertices))), 1.0)
+        * 256.0,
+        1.0e-12,
+    )
+
+    fractional_grid = grid.fractional_vertices.reshape(
+        grid.shape + (grid.dimension,)
+    )
+    for axis, size in enumerate(grid.shape):
+        selector: list[int | slice] = [0] * grid.dimension
+        selector[axis] = slice(None)
+        axis_values = fractional_grid[tuple(selector) + (axis,)]
+        if axis_values.size != size:
+            raise ValueError("PeriodicGrid fractional coordinates do not match its shape.")
+        if size == 1:
+            valid &= np.abs(fractional[:, axis] - axis_values[0]) <= coordinate_tolerance
+            continue
+
+        step = float(axis_values[1] - axis_values[0])
+        if step <= 0.0 or not np.allclose(
+            np.diff(axis_values), step, rtol=1.0e-10, atol=coordinate_tolerance
+        ):
+            raise ValueError("Uniform-grid interpolation requires evenly spaced axes.")
+        position = (fractional[:, axis] - axis_values[0]) / step
+        valid &= (position >= -coordinate_tolerance / step) & (
+            position <= (size - 1) + coordinate_tolerance / step
+        )
+        position = np.clip(position, 0.0, float(size - 1))
+        axis_lower = np.floor(position).astype(np.intp)
+        at_upper_edge = axis_lower == size - 1
+        axis_lower[at_upper_edge] = size - 2
+        lower[:, axis] = axis_lower
+        upper[:, axis] = axis_lower + 1
+        fractions[:, axis] = position - axis_lower
+
+    dtype = np.result_type(data.dtype, np.float64)
+    output = np.full(
+        (coordinates.shape[0],) + data.shape[1:],
+        np.nan,
+        dtype=dtype,
+    )
+    if not np.any(valid):
+        return output
+
+    valid_lower = lower[valid]
+    valid_upper = upper[valid]
+    valid_fractions = fractions[valid]
+    interpolated = np.zeros(
+        (int(np.count_nonzero(valid)),) + data.shape[1:],
+        dtype=dtype,
+    )
+    for corner in np.ndindex(*(2,) * grid.dimension):
+        indices = tuple(
+            valid_upper[:, axis] if corner[axis] else valid_lower[:, axis]
+            for axis in range(grid.dimension)
+        )
+        flat = np.ravel_multi_index(indices, grid.shape)
+        weight = np.ones(valid_lower.shape[0], dtype=float)
+        for axis in range(grid.dimension):
+            fraction = valid_fractions[:, axis]
+            weight *= fraction if corner[axis] else 1.0 - fraction
+        weight_shape = (weight.shape[0],) + (1,) * (data.ndim - 1)
+        interpolated += data[flat] * weight.reshape(weight_shape)
+    output[valid] = interpolated
+    return output
 
 
 def write_base_figures(

@@ -209,6 +209,7 @@ def test_removed_w_center_input_is_rejected(tmp_path):
         ("unknown_option = 1", "Unknown incar field"),
         ("dielectric_file = eps.txt", "Unknown incar field"),
         ("representation_field_kind = scalar", "Unknown incar field"),
+        ("hopping_state = 0:3, 0:3", "Unknown incar field"),
         ("lattice_const = 2", "Duplicate incar field"),
         ("this is not an assignment", "Malformed incar line"),
     ],

@@ -20,10 +20,112 @@ from pcwannier.config import load_config
 from pcwannier.conventions import BlochConvention, BlochFieldRepresentation
 from pcwannier.data import PeriodicGrid
 from pcwannier.maxwell import FieldKind, MaterialKind, PrimaryField
+from pcwannier.maxwell import MaxwellProblem
+from pcwannier.outputs import (
+    _interpolate_uniform_grid,
+    load_interpolation_points,
+    write_interpolation_outputs,
+)
 from pcwannier.sources import load_input
 from pcwannier.sources.mpb import load_mpb_grid
 from pcwannier.symmetry.bloch import PeriodicGridInterpolator
 from pcwannier.symmetry.wannier_validation import _uniform_translation_indices
+
+
+def test_three_dimensional_uniform_grid_interpolation_is_trilinear():
+    lattice = np.array(
+        [[1.4, 0.0, 0.0], [0.2, 1.1, 0.0], [0.1, 0.3, 0.9]],
+        dtype=float,
+    )
+    grid = PeriodicGrid((3, 4, 2), lattice)
+    fractional = grid.fractional_vertices
+    scalar = (
+        1.0
+        + 2.0 * fractional[:, 0]
+        - 3.0 * fractional[:, 1]
+        + 0.5 * fractional[:, 2]
+    )
+    values = np.column_stack((scalar, 2.0j * scalar, 3.0 - scalar))
+    query_fractional = np.array(
+        [[-0.25, -0.125, -0.25], [1.0 / 6.0, 0.25, 0.0]],
+        dtype=float,
+    )
+    query = query_fractional @ lattice
+
+    actual = _interpolate_uniform_grid(grid, values, query)
+    expected_scalar = (
+        1.0
+        + 2.0 * query_fractional[:, 0]
+        - 3.0 * query_fractional[:, 1]
+        + 0.5 * query_fractional[:, 2]
+    )
+    expected = np.column_stack(
+        (expected_scalar, 2.0j * expected_scalar, 3.0 - expected_scalar)
+    )
+
+    assert np.allclose(actual, expected, rtol=0.0, atol=1.0e-13)
+    outside = np.array([[1.0, 1.0, 1.0]]) @ lattice
+    assert np.all(np.isnan(_interpolate_uniform_grid(grid, values, outside)))
+
+
+def test_three_dimensional_wannier_and_metric_interpolation_outputs(tmp_path):
+    lattice = np.eye(3)
+    grid = PeriodicGrid((2, 2, 2), lattice)
+    fractional = grid.fractional_vertices
+    scalar = 2.0 + fractional[:, 0] + 2.0 * fractional[:, 1]
+    vector = np.column_stack((scalar, 1.0j * scalar, -scalar))
+    metric = 4.0 + fractional[:, 2]
+    query = np.array([[-0.25, -0.25, -0.25], [0.0, 0.0, 0.0]])
+    points_path = tmp_path / "points.txt"
+    np.savetxt(points_path, query, delimiter=",")
+    result = SimpleNamespace(
+        extended_mesh=grid,
+        extended_metric_material=metric,
+        wanniers={(0, 0, 0): vector[:, None, :]},
+        config=SimpleNamespace(
+            extension=[1, 1, 1],
+            kdim=3,
+            maxwell_problem=MaxwellProblem.for_components(
+                "full_vector", "magnetic"
+            ),
+        ),
+    )
+
+    write_interpolation_outputs(
+        result,
+        points_path,
+        "wannier-interp.txt",
+        "metric-interp.txt",
+        out_dir=tmp_path,
+    )
+
+    loaded_points = load_interpolation_points(points_path, dimension=3)
+    wannier = np.loadtxt(
+        tmp_path / "wannier-interp.txt",
+        delimiter=",",
+        comments="#",
+        dtype=np.complex128,
+    )
+    metric_output = np.loadtxt(
+        tmp_path / "metric-interp.txt",
+        delimiter=",",
+        comments="#",
+    )
+    expected_scalar = 2.0 + query[:, 0] + 2.0 * query[:, 1]
+
+    assert np.array_equal(loaded_points, query)
+    assert np.allclose(wannier[:, :3].real, query)
+    assert np.allclose(wannier[:, 3], expected_scalar)
+    assert np.allclose(wannier[:, 4], 1.0j * expected_scalar)
+    assert np.allclose(wannier[:, 5], -expected_scalar)
+    assert np.allclose(metric_output[:, :3], query)
+    assert np.allclose(metric_output[:, 3], 4.0 + query[:, 2])
+    assert "W[0_0_0,1].x" in (
+        tmp_path / "wannier-interp.txt"
+    ).read_text(encoding="utf-8").splitlines()[0]
+    assert "mu" in (
+        tmp_path / "metric-interp.txt"
+    ).read_text(encoding="utf-8").splitlines()[0]
 
 
 def test_uniform_grid_integrates_real_and_complex_constants():

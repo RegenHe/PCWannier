@@ -19,7 +19,7 @@ def save_cell_matrix(
     data,
     shape: tuple | None = None,
     *,
-    precision: int = 8,
+    precision: int = 17,
     header_comments: Iterable[str] = (),
     cell_comments: Mapping[tuple[int, ...], Iterable[str]] | None = None,
 ) -> None:

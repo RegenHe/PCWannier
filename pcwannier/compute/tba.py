@@ -101,7 +101,7 @@ class TBAModel:
         """Measure truncation error on the original sampled k mesh."""
         k_cart, projected = self._projected_k_hamiltonians()
         h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
-        neighbors = np.asarray(self.config.neighbor, dtype=int)
+        neighbors = self._band_neighbors(hoppings)
         hop_array = self._hoppings_for_neighbors(hoppings, neighbors)
         reconstructed = self._h_of_k_factory(h0, neighbors, hop_array)(k_cart)
         matrix_errors = np.linalg.norm(reconstructed - projected, axis=(1, 2))
@@ -244,7 +244,7 @@ class TBAModel:
         k_axis = np.arange(0, total + 1)
 
         h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
-        neigh = np.asarray(config.neighbor, dtype=int)
+        neigh = self._band_neighbors(hoppings)
         hops = self._hoppings_for_neighbors(hoppings, neigh)
         h_of_k = self._h_of_k_factory(h0, neigh, hops)
         hks = h_of_k(self._kfrac_to_kcart(k_path))
@@ -311,7 +311,7 @@ class TBAModel:
         nk_shape = kfrac.shape[:-1]
         k_flat = kfrac.reshape(int(np.prod(nk_shape)), kdim)
         h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
-        neigh = np.asarray(config.neighbor, dtype=int)
+        neigh = self._band_neighbors(hoppings)
         hops = self._hoppings_for_neighbors(hoppings, neigh)
         hks = self._h_of_k_factory(h0, neigh, hops)(self._kfrac_to_kcart(k_flat))
         eigvals, eigvecs = np.linalg.eigh(hks)
@@ -346,6 +346,20 @@ class TBAModel:
                 value = self.gen_hopping(key)
             selected.append(np.asarray(value, dtype=np.complex128))
         return np.asarray(selected, dtype=np.complex128)
+
+    def _band_neighbors(
+        self,
+        hoppings: dict[tuple[int, int, int], np.ndarray],
+    ) -> np.ndarray:
+        """Return the configured interpolation range, or every available R vector."""
+
+        configured = np.asarray(self.config.neighbor, dtype=int)
+        if configured.size:
+            if configured.ndim == 1:
+                configured = configured.reshape(1, -1)
+            return configured
+        complete = [key for key in hoppings if key != (0, 0, 0)]
+        return np.asarray(complete, dtype=int).reshape(-1, 3)
 
     def _h_of_k_factory(self, h0: np.ndarray, neigh: np.ndarray, hops: np.ndarray):
         config = self.config

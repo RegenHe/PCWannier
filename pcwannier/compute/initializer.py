@@ -499,8 +499,17 @@ class StateInitializer:
                 raise ValueError(f"Cached {name} matrix at k={idx} contains non-finite values.")
             if require_semiunitary:
                 residual = np.linalg.norm(cell.conj().T @ cell - np.eye(band_count), ord="fro")
-                if residual > 1e-6:
-                    raise ValueError(f"Cached {name} matrix at k={idx} is not semi-unitary (residual={residual:.6g}).")
+                tolerance = 1.0e-6
+                if bool(getattr(self.config, "symmetry_constrained", False)):
+                    tolerance = max(
+                        tolerance,
+                        float(getattr(self.config, "symmetry_tolerance", tolerance)),
+                    )
+                if residual > tolerance:
+                    raise ValueError(
+                        f"Cached {name} matrix at k={idx} is not semi-unitary "
+                        f"(residual={residual:.6g}, tolerance={tolerance:.6g})."
+                    )
 
     @property
     def projection_rank_tolerance(self) -> float:

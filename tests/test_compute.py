@@ -203,6 +203,20 @@ def test_collect_hoppings_does_not_fill_an_empty_band_neighbor_selection():
     assert len(hoppings) == 1 + len(TBAModel.R_half_rect(tba.state.k_shape))
 
 
+def test_empty_band_neighbor_selection_uses_complete_hopping_set():
+    tba = object.__new__(TBAModel)
+    tba.config = SimpleNamespace(neighbor=[])
+    hoppings = {
+        (0, 0, 0): np.asarray([[1.0]]),
+        (1, 0, 0): np.asarray([[2.0]]),
+        (0, 1, 0): np.asarray([[3.0]]),
+    }
+
+    actual = tba._band_neighbors(hoppings)
+
+    assert np.array_equal(actual, [[1, 0, 0], [0, 1, 0]])
+
+
 def test_band_neighbor_selection_does_not_change_complete_hopping_output():
     tba = object.__new__(TBAModel)
     tba.config = SimpleNamespace(
@@ -609,6 +623,26 @@ def test_valid_cached_s_is_reused_without_integrating(tmp_path):
     assert np.max(report[..., 2]) == pytest.approx(0.1)
     assert not strict_need
     assert np.max(strict_report[..., 3]) < 1.0e-10
+
+
+def test_cached_v_uses_symmetry_tolerance_for_semiunitarity():
+    initializer = object.__new__(StateInitializer)
+    initializer.config = SimpleNamespace(
+        band_calc_num=1,
+        symmetry_constrained=True,
+        symmetry_tolerance=5.0e-4,
+    )
+    initializer.state = SimpleNamespace(
+        k_indices=lambda: iter(((0, 0, 0),)),
+        E_idx=_object_grid(np.asarray([0], dtype=int)),
+    )
+    cached = _object_grid(np.asarray([[np.sqrt(1.0 + 2.5e-5)]], dtype=np.complex128))
+
+    initializer._validate_cached_matrix("V", cached, require_semiunitary=True)
+
+    initializer.config.symmetry_constrained = False
+    with pytest.raises(ValueError, match="not semi-unitary"):
+        initializer._validate_cached_matrix("V", cached, require_semiunitary=True)
 
 
 def _synthetic_spectrum_model(raw_energies, projected_hamiltonian, basis):

@@ -21,7 +21,9 @@ class StateCollection:
             )
         self.threads = max(1, int(threads))
         self.mesh = bundle.mesh
-        self.fields = bundle.fields
+        # State transformations replace object-grid entries. Keep the source
+        # bundle reusable without copying the large field blocks themselves.
+        self.fields = np.asarray(bundle.fields, dtype=object).copy()
         self._normalize_field_blocks()
         raw_metric = np.asarray(bundle.metric_material)
         if np.iscomplexobj(raw_metric) and np.any(np.abs(raw_metric.imag) > 1.0e-12):
@@ -65,7 +67,7 @@ class StateCollection:
             is BlochFieldRepresentation.PERIODIC_PART
         )
         self.is_orthogonalized = False
-        self.extention_mesh: Mesh | PeriodicGrid | None = None
+        self.extended_mesh: Mesh | PeriodicGrid | None = None
         self.extended_inner_product = None
         self.space_to_original_mapping: np.ndarray | None = None
         self.extended_metric_material: np.ndarray | None = None
@@ -338,42 +340,42 @@ class StateCollection:
             phase = phase[:, :, None]
         return block * phase
 
-    def get_extention_phase(self, i: int, j: int, k: int) -> np.ndarray:
-        if self.extention_mesh is None:
+    def get_extended_phase(self, i: int, j: int, k: int) -> np.ndarray:
+        if self.extended_mesh is None:
             raise ValueError("The field has not been extended.")
         kvec = get_kxyz(self.config, [i, j, k])[: self.config.kdim]
-        return np.exp(1j * self.bloch_sign * np.dot(self.extention_mesh.vertices, kvec))
+        return np.exp(1j * self.bloch_sign * np.dot(self.extended_mesh.vertices, kvec))
 
-    def extention(self, n: list[int]) -> None:
-        self.extention_mesh = self.mesh.__deepcopy__()
-        self.space_to_original_mapping = self.extention_mesh.extension(
+    def extend(self, n: list[int]) -> None:
+        self.extended_mesh = self.mesh.__deepcopy__()
+        self.space_to_original_mapping = self.extended_mesh.extension(
             n,
             self.config.real_lattice_vectors,
             float(self.config.lattice_const),
         )
         metric = self.get_extended_metric_material()
         self.extended_inner_product = create_metric_inner_product(
-            self.extention_mesh,
+            self.extended_mesh,
             metric,
             mode=self.config.integration_mode,
             backend=self.inner_product.backend,
         )
 
-    def get_extention_field(self, i: int, j: int, k: int, n: int) -> np.ndarray:
-        if self.extention_mesh is None or self.space_to_original_mapping is None:
+    def get_extended_field(self, i: int, j: int, k: int, n: int) -> np.ndarray:
+        if self.extended_mesh is None or self.space_to_original_mapping is None:
             raise ValueError("The field has not been extended.")
         scale = np.sqrt(float(np.prod(self.config.extension[: self.config.kdim])))
         base = self.get_block(i, j, k)[n]
         return base[self.space_to_original_mapping] / scale
 
-    def get_extention_block(self, i: int, j: int, k: int) -> np.ndarray:
-        if self.extention_mesh is None or self.space_to_original_mapping is None:
+    def get_extended_block(self, i: int, j: int, k: int) -> np.ndarray:
+        if self.extended_mesh is None or self.space_to_original_mapping is None:
             raise ValueError("The field has not been extended.")
         scale = np.sqrt(float(np.prod(self.config.extension[: self.config.kdim])))
         return self.get_block(i, j, k)[:, self.space_to_original_mapping] / scale
 
     def get_extended_metric_material(self) -> np.ndarray:
-        if self.extention_mesh is None or self.space_to_original_mapping is None:
+        if self.extended_mesh is None or self.space_to_original_mapping is None:
             raise ValueError("The field has not been extended.")
         if self.extended_metric_material is None:
             self.extended_metric_material = self.metric_material[

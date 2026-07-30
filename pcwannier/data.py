@@ -13,16 +13,16 @@ from .conventions import BlochConvention, BlochFieldRepresentation
 from .maxwell import FieldKind, MaxwellProblem
 
 if TYPE_CHECKING:
-    from .symmetry import (
-        SymmetryAnalysisResult,
+    from .symmetry.analysis import (
         BlochSymmetryAnalysisResult,
-        SymmetryContext,
-        SymmetryDisentanglementResult,
-        SymmetryGaugeResult,
         GammaZeroRegularizationAnalysis,
-        SymmetryLocalizationResult,
-        SewingMatrixCacheEntry,
+        SymmetryAnalysisResult,
     )
+    from .symmetry.cache import SewingMatrixCacheEntry
+    from .symmetry.disentanglement import SymmetryDisentanglementResult
+    from .symmetry.gauge import SymmetryGaugeResult
+    from .symmetry.localization import SymmetryLocalizationResult
+    from .symmetry.representation import SymmetryContext
 
 
 def periodic_axis_coordinates(
@@ -211,27 +211,6 @@ class Mesh:
         else:
             parent[root_a] = root_b
 
-    def match(self, new_vertices: np.ndarray, vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        tree = cKDTree(new_vertices)
-        dists, idxs = tree.query(vertices, k=1)
-        idx_existing = np.where(dists < self.mindist * 0.5)[0]
-        idx_new = [idxs[i] for i in idx_existing]
-        return np.asarray(idx_new, dtype=np.intp), np.asarray(idx_existing, dtype=np.intp)
-
-    def rebuild_index(self, space_to_original_mapping=None) -> tuple[dict[int, int], np.ndarray]:
-        used_indices = sorted(set(int(x) for x in self.elements.flatten()))
-        new_vertices = np.asarray([self.vertices[i] for i in used_indices])
-        old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(used_indices)}
-        if space_to_original_mapping is None:
-            new_mapping = np.arange(len(self.vertices), dtype=np.intp)[used_indices]
-        else:
-            mapping = np.asarray(space_to_original_mapping, dtype=np.intp)
-            new_mapping = mapping[used_indices]
-
-        self.elements = np.asarray([[old_to_new[int(idx)] for idx in element] for element in self.elements], dtype=np.intp)
-        self.vertices = new_vertices
-        return old_to_new, np.asarray(new_mapping, dtype=np.intp)
-
     def __deepcopy__(self, memo=None):
         return Mesh(copy.deepcopy(self.vertices, memo), copy.deepcopy(self.elements, memo), copy.deepcopy(self.edge, memo))
 
@@ -414,15 +393,6 @@ class PeriodicGrid:
         self._set_fractional_vertices(fractional)
         return mapping
 
-    def fingerprint_items(self) -> tuple[tuple[str, np.ndarray], ...]:
-        return (
-            ("grid_base_shape", np.asarray(self.base_shape, dtype=np.int64)),
-            ("grid_shape", np.asarray(self.shape, dtype=np.int64)),
-            ("grid_tile_shape", np.asarray(self.tile_shape, dtype=np.int64)),
-            ("grid_lattice", np.asarray(self.lattice_vectors, dtype=np.float64)),
-            ("grid_offset", np.asarray(self.sample_offset, dtype=np.float64)),
-        )
-
     def __deepcopy__(self, memo=None):
         result = PeriodicGrid(
             self.base_shape,
@@ -555,22 +525,7 @@ class RunResult:
     output_spectrum_diagnostics: OutputSpectrumDiagnostics | None = None
     hopping_reconstruction_diagnostics: HoppingReconstructionDiagnostics | None = None
     sewing_matrices: tuple[SewingMatrixCacheEntry, ...] | None = None
-    sewing_calculation_fingerprint: str | None = None
     trial_covariance_diagnostics: tuple[Any, ...] = ()
-
-
-@dataclass
-class BlochSymmetryRunResult:
-    config: IncarConfig
-    orthogonality_report: np.ndarray
-    S: np.ndarray
-    symmetry: SymmetryContext
-    analysis: BlochSymmetryAnalysisResult
-    sewing_matrices: tuple[SewingMatrixCacheEntry, ...]
-    sewing_calculation_fingerprint: str
-    auxiliary_channels: dict[str, "BlochSymmetryChannelResult"] = field(default_factory=dict)
-    gamma_zero_regularization: "GammaZeroRegularizationAnalysis | None" = None
-    differential_diagnostics: "VectorFieldDifferentialDiagnostics | None" = None
 
 
 @dataclass
@@ -580,5 +535,13 @@ class BlochSymmetryChannelResult:
     S: np.ndarray
     analysis: BlochSymmetryAnalysisResult
     sewing_matrices: tuple[SewingMatrixCacheEntry, ...]
-    sewing_calculation_fingerprint: str
     differential_diagnostics: "VectorFieldDifferentialDiagnostics | None" = None
+
+
+@dataclass
+class BlochSymmetryRunResult:
+    config: IncarConfig
+    symmetry: SymmetryContext
+    primary: BlochSymmetryChannelResult
+    auxiliary_channels: dict[str, BlochSymmetryChannelResult] = field(default_factory=dict)
+    gamma_zero_regularization: "GammaZeroRegularizationAnalysis | None" = None

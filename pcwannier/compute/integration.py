@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
+from typing import Protocol
 
 import numpy as np
 
@@ -37,10 +38,42 @@ class IntegrationMode(str, Enum):
             raise ValueError(f"integration mode must be one of {allowed}; got {value!r}.") from exc
 
 
+class MetricInnerProductProtocol(Protocol):
+    """Common metric-inner-product surface for all spatial discretizations."""
+
+    backend: str
+    mode: object
+    domain_kind: str
+    uses_full_bloch_fields: bool
+
+    def overlap(
+        self,
+        left: np.ndarray,
+        right: np.ndarray,
+        *,
+        conjugate_left: bool = True,
+        phase_wavevector: np.ndarray | None = None,
+        chunk_size: int | None = None,
+    ) -> np.ndarray: ...
+
+    def norms(
+        self,
+        values: np.ndarray,
+        *,
+        chunk_size: int | None = None,
+        name: str = "metric norms",
+    ) -> np.ndarray: ...
+
+    def norm(self, field: np.ndarray, *, name: str = "metric field norm") -> float: ...
+
+    def restrict_domain(self, selector) -> "MetricInnerProductProtocol": ...
+
+
 class MetricInnerProduct:
     """Metric-weighted FEM inner products on one immutable mesh view."""
 
     IMPLEMENTATION_VERSION = "metric-inner-product-v1"
+    domain_kind = "elements"
 
     def __init__(
         self,
@@ -154,6 +187,9 @@ class MetricInnerProduct:
             backend=self.backend,
         )
 
+    def restrict_domain(self, selector) -> MetricInnerProduct:
+        return self.restrict_elements(selector)
+
 
 def create_metric_inner_product(
     domain,
@@ -161,7 +197,7 @@ def create_metric_inner_product(
     *,
     mode: str | IntegrationMode = IntegrationMode.NODAL,
     backend: str | None = None,
-):
+) -> MetricInnerProductProtocol:
     """Create the metric inner product selected by the spatial discretization."""
 
     family = getattr(domain, "integration_family", "finite_element")

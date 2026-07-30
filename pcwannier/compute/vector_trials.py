@@ -9,11 +9,11 @@ from ..projections import (
     ProjectionRecord3D,
     TrialCovarianceDiagnostics,
 )
-from ..symmetry import (
+from ..symmetry.field_action import cartesian_field_matrix
+from ..symmetry.representation import (
     SiteIrrep,
     WannierTargetRepresentation,
     build_symmetry_context,
-    cartesian_field_matrix,
 )
 from .initializer import StateBases
 

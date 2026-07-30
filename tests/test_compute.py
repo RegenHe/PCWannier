@@ -186,6 +186,23 @@ def test_collect_hoppings_is_complete_and_independent_of_band_neighbors():
     assert tba.config.neighbor == [[1, 0]]
 
 
+def test_collect_hoppings_does_not_fill_an_empty_band_neighbor_selection():
+    tba = object.__new__(TBAModel)
+    tba.config = SimpleNamespace(neighbor=[], kdim=2, band_calc_num=1)
+    tba.state = SimpleNamespace(k_shape=(4, 4, 1))
+    tba.threads = 1
+    tba._projected_k_hamiltonians = lambda: (
+        np.empty((0, 2)),
+        np.empty((0, 1, 1)),
+    )
+    tba.gen_hopping = lambda r=None: np.asarray([[0.0]], dtype=np.complex128)
+
+    hoppings = tba.collect_hoppings()
+
+    assert tba.config.neighbor == []
+    assert len(hoppings) == 1 + len(TBAModel.R_half_rect(tba.state.k_shape))
+
+
 def test_band_neighbor_selection_does_not_change_complete_hopping_output():
     tba = object.__new__(TBAModel)
     tba.config = SimpleNamespace(
@@ -399,6 +416,7 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
         inner_band_indices=indices.copy(),
         energy_matrix=np.array([[[[1.0, 2.0]]]]),
     )
+    source_fields = np.asarray(bundle.fields[0, 0, 0]).copy()
     state = StateCollection(bundle, threads=1)
     overlap_calls = 0
     original_overlap = state._overlap_matrix
@@ -423,6 +441,10 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
     assert np.max(mixed_report[..., 2]) > 1e-3
     assert overlap_calls == 1
     assert np.array_equal(state.S[0, 0, 0], raw_s)
+    assert state.fields is not bundle.fields
+    assert np.array_equal(bundle.fields[0, 0, 0], source_fields)
+    repeated = StateCollection(bundle, threads=1)
+    assert np.array_equal(repeated.get_block(0, 0, 0), source_fields)
 
 
 def test_inner_window_projection_is_not_overwritten_by_matc():
@@ -466,7 +488,7 @@ def test_projection_rejects_nonpositive_or_nonfinite_basis_norm(norm):
         integration_mode="nodal",
     )
     initializer.state = SimpleNamespace(
-        extention_mesh=SimpleNamespace(rfunc=lambda *args: np.ones(3)),
+        extended_mesh=SimpleNamespace(rfunc=lambda *args: np.ones(3)),
         extended_metric_material=np.ones(3),
         compute_backend="python",
         E_idx=_object_grid([0]),
@@ -678,7 +700,7 @@ def test_state_metric_interface_controls_overlap_norms_and_extension():
     expected_norms = np.real(np.diag(expected_overlap))
     assert np.allclose(state.inner_product.norms(block.T), expected_norms)
 
-    state.extention([2, 1])
+    state.extend([2, 1])
     assert np.array_equal(
         state.extended_metric_material,
         metric[state.space_to_original_mapping],

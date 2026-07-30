@@ -11,7 +11,12 @@ import pcwannier.symmetry.analysis as symmetry_analysis_module
 from pcwannier import BlochConvention
 from pcwannier.compute.integration import MetricInnerProduct
 from pcwannier.compute.state import StateCollection
-from pcwannier.data import BlochSymmetryRunResult, InputBundle, Mesh
+from pcwannier.data import (
+    BlochSymmetryChannelResult,
+    BlochSymmetryRunResult,
+    InputBundle,
+    Mesh,
+)
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.matrix_io import load_cell_matrix
 from pcwannier.outputs import write_bloch_symmetry_outputs
@@ -356,7 +361,6 @@ def test_state_provider_roundtrips_full_outer_sewing_cache(tmp_path, monkeypatch
         dimension=2,
         bloch_sign=model.bloch_convention.sign,
         k_shape=(1, 1),
-        calculation_fingerprint=provider.sewing_cache_fingerprint,
     )
     saved = load_sewing_matrix_cache(path)
     generic = load_cell_matrix(path, (1,))
@@ -386,7 +390,7 @@ def test_state_provider_roundtrips_full_outer_sewing_cache(tmp_path, monkeypatch
         )
 
 
-def test_state_provider_rejects_sewing_cache_for_different_calculation(tmp_path):
+def test_state_provider_rejects_sewing_cache_with_different_outer_bands(tmp_path):
     model = square_2c_model(analysis=False)
     context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
     mesh = _square_mesh()
@@ -408,7 +412,6 @@ def test_state_provider_rejects_sewing_cache_for_different_calculation(tmp_path)
         dimension=2,
         bloch_sign=model.bloch_convention.sign,
         k_shape=(1, 1),
-        calculation_fingerprint=provider.sewing_cache_fingerprint,
     )
 
     changed = _synthetic_state(fields, energies=[1.0, 1.0])
@@ -416,16 +419,8 @@ def test_state_provider_rejects_sewing_cache_for_different_calculation(tmp_path)
     changed.config.use_cached_data = ["D"]
     changed.config.D_file = str(path)
     changed.config.input_path = lambda value: Path(value)
-    with pytest.raises(ValueError, match="calculation fingerprint does not match"):
+    with pytest.raises(ValueError, match="outer-window band ids do not match"):
         StateBlochSymmetryProvider(changed, context)
-
-    magnetic = _synthetic_state(fields, energies=[1.0, 1.0])
-    magnetic.maxwell = MaxwellProblem.for_components("Hz")
-    magnetic.config.use_cached_data = ["D"]
-    magnetic.config.D_file = str(path)
-    magnetic.config.input_path = lambda value: Path(value)
-    with pytest.raises(ValueError, match="calculation fingerprint does not match"):
-        StateBlochSymmetryProvider(magnetic, context)
 
 
 def test_state_provider_rejects_inconsistent_periodic_duplicate_nodes():
@@ -865,12 +860,14 @@ def test_bloch_preanalysis_writes_reusable_s_and_d_text_caches(tmp_path):
     config = SimpleNamespace(S_file="S.txt", D_file="D.txt", base_dir=tmp_path)
     result = BlochSymmetryRunResult(
         config=config,
-        orthogonality_report=np.zeros((1, 1, 1, 6)),
-        S=smat,
         symmetry=context,
-        analysis=analysis,
-        sewing_matrices=provider.cached_sewing_matrices,
-        sewing_calculation_fingerprint=provider.sewing_cache_fingerprint,
+        primary=BlochSymmetryChannelResult(
+            field_kind=FieldKind.SCALAR,
+            orthogonality_report=np.zeros((1, 1, 1, 6)),
+            S=smat,
+            analysis=analysis,
+            sewing_matrices=provider.cached_sewing_matrices,
+        ),
     )
 
     write_bloch_symmetry_outputs(result, config, tmp_path)

@@ -559,12 +559,11 @@ def _resolve_channel_analysis_context(config: IncarConfig, *, l_offset: int):
         changed = True
     if not changed:
         return context
-    from ..symmetry import build_symmetry_context
+    from ..symmetry.representation import build_symmetry_context
 
     analysis = replace(specification, points=tuple(resolved_points))
     model = replace(context.model, representation_analysis=analysis)
     resolved = build_symmetry_context(model, context.k_points)
-    config.symmetry_context = resolved
     return resolved
 
 
@@ -680,11 +679,8 @@ def _build_auxiliary_channel_loaders(
 ):
     field_path = config.input_path(config.longitudinal_field_file)
     energy_path = config.input_path(config.longitudinal_energy_file)
-    scalar_path = config.input_path(config.pseudoscalar_file)
-    scalar_metric_path = config.input_path(config.pseudoscalar_metric_file)
     longitudinal_requested = field_path is not None or energy_path is not None
-    pseudoscalar_requested = scalar_path is not None or scalar_metric_path is not None
-    if not longitudinal_requested and not pseudoscalar_requested:
+    if not longitudinal_requested:
         if config.gamma_zero_regularization:
             raise ValueError(
                 "gamma_zero_regularization requires longitudinal_field_file and "
@@ -693,20 +689,13 @@ def _build_auxiliary_channel_loaders(
         return {}, {}
     if config.maxwell_problem.primary_field is not PrimaryField.MAGNETIC:
         raise ValueError(
-            "MPB longitudinal and pseudoscalar auxiliary channels are only defined "
+            "MPB longitudinal auxiliary channels are only defined "
             "for a magnetic full-vector primary field."
         )
     if longitudinal_requested and (field_path is None or energy_path is None):
         raise ValueError(
             "MPB longitudinal analysis requires longitudinal_field_file and "
             "longitudinal_energy_file."
-        )
-    if pseudoscalar_requested and (
-        scalar_path is None or scalar_metric_path is None or energy_path is None
-    ):
-        raise ValueError(
-            "Optional MPB pseudoscalar analysis requires pseudoscalar_file, "
-            "pseudoscalar_metric_file, and longitudinal_energy_file."
         )
     if config.gamma_zero_regularization and not longitudinal_requested:
         raise ValueError(
@@ -805,46 +794,6 @@ def _build_auxiliary_channel_loaders(
             )
 
         loaders["longitudinal"] = load_longitudinal
-
-    if scalar_path is not None and scalar_metric_path is not None:
-        pseudoscalar_config = copy(config)
-        pseudoscalar_config.S_file = config.pseudoscalar_S_file
-        pseudoscalar_config.D_file = config.pseudoscalar_D_file
-
-        def load_pseudoscalar() -> InputBundle:
-            scalar_fields = _read_periodic_fields(
-                scalar_path,
-                config,
-                grid,
-                bands,
-                raw_energy.shape[1],
-                dataset_name="phi_periodic",
-                vector=False,
-            )
-            scalar_metric = _load_grid_material(
-                scalar_metric_path,
-                grid,
-                candidates=("epsilon", "eta", "metric"),
-                description="pseudoscalar metric",
-            )
-            return InputBundle(
-                config=pseudoscalar_config,
-                maxwell=config.maxwell_problem,
-                bloch_convention=MPB_BLOCH_CONVENTION,
-                mesh=grid,
-                fields=scalar_fields,
-                metric_material=scalar_metric,
-                energies=energies,
-                band_indices=bands,
-                inner_band_indices=inner,
-                energy_matrix=energy_matrix,
-                field_representation=BlochFieldRepresentation.PERIODIC_PART,
-                symmetry=config.symmetry_context,
-                analysis_field_kind=FieldKind.PSEUDOSCALAR,
-                zero_modes=zero_modes,
-            )
-
-        loaders["pseudoscalar"] = load_pseudoscalar
 
     metadata = (
         {"longitudinal": zero_mode_bands}

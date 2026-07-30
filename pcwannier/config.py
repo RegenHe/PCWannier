@@ -14,7 +14,7 @@ LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .maxwell import MaxwellProblem
-    from .symmetry import SymmetryContext
+    from .symmetry.representation import SymmetryContext
 
 
 class EnergyWindow(NamedTuple):
@@ -46,12 +46,8 @@ class IncarConfig:
     invert_longitudinal_energies: bool = False
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None
     longitudinal_inner_window: np.ndarray | EnergyWindow | bool = False
-    pseudoscalar_file: str | bool = False
-    pseudoscalar_metric_file: str | bool = False
     longitudinal_S_file: str = "./S_L.txt"
     longitudinal_D_file: str = "./D_L.txt"
-    pseudoscalar_S_file: str = "./S_phi.txt"
-    pseudoscalar_D_file: str = "./D_phi.txt"
     gamma_zero_regularization: bool = False
     gamma_zero_mode_tolerance: float = 1.0e-10
     E_is_real: bool = True
@@ -72,7 +68,7 @@ class IncarConfig:
     representation_degeneracy_absolute: float = 1.0e-6
     representation_degeneracy_relative: float = 1.0e-8
     representation_leakage_tolerance: float | None = None
-    representation_character_tolerance: float = 1.0e-5
+    representation_character_tolerance: float = 1.0e-2
     wannier_targets: list[dict[str, Any]] | None = None
     representation_analysis: list[dict[str, Any]] | None = None
     projection_target_bindings: tuple[Any, ...] = field(default=(), init=False, repr=False)
@@ -104,7 +100,7 @@ class IncarConfig:
     hermitian: bool = True
     disable_orth: bool = True
     M_in: bool = False
-    use_cached_data: list[str] = field(default_factory=lambda: ["FALSE"])
+    use_cached_data: list[str] = field(default_factory=list)
 
     composition_of_b: list[list[float]] | None = None
     b_vectors: np.ndarray | None = None
@@ -426,7 +422,18 @@ class IncarParser:
         source.validate_field_components(cfg.field_components)
         cfg.validate_runtime_scope()
         if cfg.symmetry_file is not False and str(cfg.symmetry_file).lower() != "false":
-            from .symmetry import (
+            from .symmetry.field_action import cartesian_field_matrix
+            from .symmetry.io import (
+                compose_symmetry_model,
+                load_symmetry,
+                load_symmetry_from_spglib,
+                resolve_symmetry_file,
+            )
+            from .symmetry.representation import (
+                apply_magnetic_bias_to_model,
+                build_symmetry_context,
+            )
+            from .symmetry.specs import (
                 DegeneracyTolerance,
                 FieldKind,
                 RepresentationAnalysisSpec,
@@ -434,13 +441,6 @@ class IncarParser:
                 SymmetryCalculationSpec,
                 SymmetryGaugeSpec,
                 WannierTargetSpec,
-                apply_magnetic_bias_to_model,
-                build_symmetry_context,
-                cartesian_field_matrix,
-                compose_symmetry_model,
-                load_symmetry,
-                load_symmetry_from_spglib,
-                resolve_symmetry_file,
             )
 
             requested_symmetry_path = cfg.input_path(cfg.symmetry_file)
@@ -639,12 +639,8 @@ class IncarParser:
             "metric_file",
             "longitudinal_field_file",
             "longitudinal_energy_file",
-            "pseudoscalar_file",
-            "pseudoscalar_metric_file",
             "longitudinal_S_file",
             "longitudinal_D_file",
-            "pseudoscalar_S_file",
-            "pseudoscalar_D_file",
             "S_file",
             "D_file",
             "symmetry_report_file",
@@ -1151,8 +1147,6 @@ def _configure_wannier_subspace(cfg: IncarConfig) -> bool:
     for name, inactive in (
         ("longitudinal_field_file", False),
         ("longitudinal_energy_file", False),
-        ("pseudoscalar_file", False),
-        ("pseudoscalar_metric_file", False),
         ("longitudinal_band_window", None),
         ("longitudinal_inner_window", False),
         ("invert_longitudinal_energies", False),

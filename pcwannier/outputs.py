@@ -132,17 +132,20 @@ def save_vector_wanniers(filename: str | Path, result: RunResult) -> None:
                 f"CELL({', '.join(str(value) for value in cell)}) "
                 f"shape={array.shape}:\n"
             )
-            columns = [coordinates]
-            for index in range(array.shape[1]):
-                for component in range(3):
-                    columns.extend(
-                        (
-                            array[:, index, component].real,
-                            array[:, index, component].imag,
-                        )
-                    )
-            matrix = np.column_stack(columns)
-            np.savetxt(handle, matrix, fmt="%.12e")
+            column_count = 3 + 6 * array.shape[1]
+            chunk_size = 1 << 14
+            for start in range(0, coordinates.shape[0], chunk_size):
+                stop = min(start + chunk_size, coordinates.shape[0])
+                matrix = np.empty((stop - start, column_count), dtype=np.float64)
+                matrix[:, :3] = coordinates[start:stop]
+                column = 3
+                for index in range(array.shape[1]):
+                    for component in range(3):
+                        values = array[start:stop, index, component]
+                        matrix[:, column] = values.real
+                        matrix[:, column + 1] = values.imag
+                        column += 2
+                np.savetxt(handle, matrix, fmt="%.12e")
             handle.write("\n")
 
 
@@ -597,29 +600,24 @@ def write_bloch_symmetry_outputs(
     if s_path is None or d_path is None:
         raise RuntimeError("Bloch symmetry cache output paths could not be resolved.")
     with timed_step("write raw S matrix", LOGGER, file=s_path):
-        save_cell_matrix(s_path, result.S, result.S.shape)
+        save_cell_matrix(s_path, result.primary.S, result.primary.S.shape)
     with timed_step(
         "write D symmetry matrices",
         LOGGER,
         file=d_path,
-        count=len(result.sewing_matrices),
+        count=len(result.primary.sewing_matrices),
     ):
         save_sewing_matrix_cache(
             d_path,
-            result.sewing_matrices,
+            result.primary.sewing_matrices,
             dimension=result.symmetry.model.dimension,
             bloch_sign=result.symmetry.model.bloch_convention.sign,
             k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
-            calculation_fingerprint=result.sewing_calculation_fingerprint,
         )
     channel_paths = {
         "longitudinal": (
             getattr(config, "longitudinal_S_file", "S_L.txt"),
             getattr(config, "longitudinal_D_file", "D_L.txt"),
-        ),
-        "pseudoscalar": (
-            getattr(config, "pseudoscalar_S_file", "S_phi.txt"),
-            getattr(config, "pseudoscalar_D_file", "D_phi.txt"),
         ),
     }
     for channel_name, channel in result.auxiliary_channels.items():
@@ -652,7 +650,6 @@ def write_bloch_symmetry_outputs(
                 dimension=result.symmetry.model.dimension,
                 bloch_sign=result.symmetry.model.bloch_convention.sign,
                 k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
-                calculation_fingerprint=channel.sewing_calculation_fingerprint,
             )
 
     report_path = _resolve_output(
@@ -661,7 +658,7 @@ def write_bloch_symmetry_outputs(
     if report_path is not None:
         sections = [
             "# PCWannier symmetry analysis",
-            format_bloch_symmetry_report(result.analysis, title="physical"),
+            format_bloch_symmetry_report(result.primary.analysis, title="physical"),
         ]
         if result.gamma_zero_regularization is not None:
             sections.append(
@@ -686,7 +683,11 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
     m_path = _resolve_output(config.M_file, config, out_dir)
     if m_path is not None:
         with timed_step("write M0 matrix", LOGGER, file=m_path):
-            save_cell_matrix(m_path, result.M0, result.M0.shape + (len(config.composition_of_b) // 2,))
+            save_cell_matrix(
+                m_path,
+                result.M0,
+                result.M0.shape + (len(config.composition_of_b) // 2,),
+            )
     v_path = _resolve_output(config.V_file, config, out_dir)
     if v_path is not None:
         with timed_step("write V matrix", LOGGER, file=v_path):
@@ -704,8 +705,6 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
     if d_path is not None and result.sewing_matrices:
         if result.symmetry is None:
             raise ValueError("Sewing matrices are present without a symmetry context.")
-        if result.sewing_calculation_fingerprint is None:
-            raise ValueError("Sewing matrices are present without their calculation fingerprint.")
         with timed_step(
             "write D symmetry matrices",
             LOGGER,
@@ -718,7 +717,6 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
                 dimension=result.symmetry.model.dimension,
                 bloch_sign=result.symmetry.model.bloch_convention.sign,
                 k_shape=tuple(len(axis) for axis in result.symmetry.k_points),
-                calculation_fingerprint=result.sewing_calculation_fingerprint,
             )
 
     report_path = _resolve_output(

@@ -10,7 +10,7 @@ from ..config import IncarConfig
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..symmetry import SymmetryGaugeResult
+    from ..symmetry.gauge import SymmetryGaugeResult
 
 
 @dataclass
@@ -38,7 +38,3 @@ class CalculationContext:
             fem_output = bool(self.config.disable_orth)
         transform = self.state.get_transform(fem_output)
         return transform[i, j, k] @ self.bloch_gauge_at(i, j, k)
-
-    def state_coefficients_at(self, i: int, j: int, k: int):
-        """Backward-compatible alias for final output coefficients."""
-        return self.output_state_coefficients_at(i, j, k)

@@ -269,16 +269,22 @@ def apply_magnetic_bias(
     the Cartesian axial vector B to -B are represented as Theta g.
     """
 
-    if group.dimension != 2:
-        raise NotImplementedError("Magnetic-bias symmetry classification currently supports 2D groups.")
+    if group.dimension not in {2, 3}:
+        raise NotImplementedError(
+            "Magnetic-bias symmetry classification supports two- and three-dimensional groups."
+        )
     if any(operation.antiunitary for operation in group.operations):
         raise ValueError("Magnetic bias must be applied to spatial operations without antiunitary flags.")
     threshold = group.tolerance if tolerance is None else float(tolerance)
     if not np.isfinite(threshold) or threshold <= 0.0:
         raise ValueError("Magnetic-bias tolerance must be positive and finite.")
     lattice = np.asarray(real_lattice_vectors, dtype=float)
-    if lattice.shape != (2, 2) or not np.all(np.isfinite(lattice)):
-        raise ValueError("real_lattice_vectors must be a finite 2 x 2 matrix.")
+    expected_lattice_shape = (group.dimension, group.dimension)
+    if lattice.shape != expected_lattice_shape or not np.all(np.isfinite(lattice)):
+        raise ValueError(
+            f"real_lattice_vectors must be a finite {group.dimension} x "
+            f"{group.dimension} matrix."
+        )
     bias = np.asarray(magnetic_bias_direction, dtype=float)
     if bias.shape != (3,) or not np.all(np.isfinite(bias)):
         raise ValueError("magnetic_bias_direction must be a finite Cartesian three-vector.")
@@ -290,17 +296,24 @@ def apply_magnetic_bias(
     inverse_lattice_t = np.linalg.inv(lattice.T)
     retained = []
     for operation in group.operations:
-        rotation_2d = lattice.T @ operation.rotation @ inverse_lattice_t
+        rotation_cartesian = lattice.T @ operation.rotation @ inverse_lattice_t
         isometry_residual = float(
-            np.linalg.norm(rotation_2d.T @ rotation_2d - np.eye(2), ord="fro")
+            np.linalg.norm(
+                rotation_cartesian.T @ rotation_cartesian
+                - np.eye(group.dimension),
+                ord="fro",
+            )
         )
         if isometry_residual > threshold:
             raise ValueError(
                 f"Operation {operation.name or '<unnamed>'!r} is not a Cartesian isometry "
                 f"(residual={isometry_residual:.6g})."
             )
-        rotation_3d = np.eye(3)
-        rotation_3d[:2, :2] = rotation_2d
+        if group.dimension == 2:
+            rotation_3d = np.eye(3)
+            rotation_3d[:2, :2] = rotation_cartesian
+        else:
+            rotation_3d = rotation_cartesian
         transformed = float(np.linalg.det(rotation_3d)) * (rotation_3d @ bias)
         if np.linalg.norm(transformed - bias) <= threshold:
             antiunitary = False

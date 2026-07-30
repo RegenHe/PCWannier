@@ -118,6 +118,7 @@ class UniformGridInnerProduct:
 
     IMPLEMENTATION_VERSION = "uniform-grid-inner-product-v1"
     integration_family = "uniform_grid"
+    domain_kind = "points"
     uses_full_bloch_fields = False
 
     def __init__(
@@ -282,6 +283,9 @@ class UniformGridInnerProduct:
             backend=self.backend,
             point_selector=selected,
         )
+
+    def restrict_domain(self, selector) -> UniformGridInnerProduct:
+        return self.restrict_points(selector)
 
     def restrict_elements(self, selector):
         raise TypeError(

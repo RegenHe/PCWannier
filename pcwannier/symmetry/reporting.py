@@ -84,7 +84,7 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             label = _format_block_irrep(block, include_unavailable_reason=True)
             LOGGER.info(
                 "Bloch symmetry block %s bands(1-based)=%s eigenvalues=%s degeneracy=%s "
-                "irrep=%s class_representative_characters=%s "
+                "irrep=%s class_character_summary=%s "
                 "unitary_characters=%s coupled_outer_bands(1-based)=%s "
                 "candidate_excluded_bands(1-based)=%s unitarity=%.6g leakage=%.6g "
                 "twisted_composition=%.6g character_fit_error=%s",
@@ -93,7 +93,7 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
                 tuple(complex(value) for value in block.energies),
                 len(block.band_indices),
                 label,
-                _class_representative_characters(point, block),
+                _class_character_entries(point, block),
                 {name: complex(value) for name, value in block.unitary_characters.items()},
                 tuple(band + 1 for band in block.coupled_outer_bands),
                 tuple(band + 1 for band in block.candidate_excluded_bands),
@@ -195,11 +195,11 @@ def format_bloch_symmetry_report(
                 f"eigenvalues={_format_values(block.energies)}; "
                 f"dimension={len(block.band_indices)}; irrep={irrep}"
             )
-            for class_label, operation, character in _class_representative_characters(
+            for class_label, operation, character, quantity in _class_character_entries(
                 point, block
             ):
                 lines.append(
-                    f"    {class_label}({operation}) character={_format_number(character)}"
+                    f"    {class_label}({operation}) {quantity}={_format_number(character)}"
                 )
             if block.irrep_unavailable_reason:
                 lines.append(f"    note={block.irrep_unavailable_reason}")
@@ -282,10 +282,11 @@ def _format_block_irrep(block, *, include_unavailable_reason: bool = False) -> s
     return "unavailable"
 
 
-def _class_representative_characters(point, block):
+def _class_character_entries(point, block):
     resolved = point.resolved_little_group
     if resolved is None:
         return ()
+    projective = not resolved.factor_system.cohomologically_trivial
     output = []
     for class_index, conjugacy_class in enumerate(
         resolved.table.conjugacy_classes, start=1
@@ -294,8 +295,21 @@ def _class_representative_characters(point, block):
         operation = resolved.table.element_names[representative_index]
         if operation not in block.unitary_characters:
             continue
+        if projective:
+            value = block.unitary_characters[operation]
+            quantity = "representative_trace"
+        else:
+            class_characters = [
+                block.unitary_characters[resolved.table.element_names[index]]
+                for index in conjugacy_class.element_indices
+                if resolved.table.element_names[index] in block.unitary_characters
+            ]
+            if not class_characters:
+                continue
+            value = sum(class_characters) / len(class_characters)
+            quantity = "character"
         output.append(
-            (f"K{class_index}", operation, block.unitary_characters[operation])
+            (f"K{class_index}", operation, value, quantity)
         )
     return tuple(output)
 

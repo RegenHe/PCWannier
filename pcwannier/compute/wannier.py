@@ -22,7 +22,7 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
     r_cart *= float(config.lattice_const)
 
     band_count = int(config.band_calc_num)
-    nv = state.extention_mesh.vertices.shape[0]
+    nv = state.extended_mesh.vertices.shape[0]
     vector_field = state.get_block(0, 0, 0).ndim == 3
     wsum_shape = (nv, band_count, 3) if vector_field else (nv, band_count)
     wsum = np.zeros(wsum_shape, dtype=np.complex128)
@@ -30,7 +30,7 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
     if state.space_to_original_mapping is None:
         raise RuntimeError("Extended field mapping has not been initialized.")
     mapping = np.asarray(state.space_to_original_mapping, dtype=np.intp)
-    vertices = np.asarray(state.extention_mesh.vertices, dtype=float)
+    vertices = np.asarray(state.extended_mesh.vertices, dtype=float)
     extension_scale = np.sqrt(
         float(np.prod(config.extension[: config.kdim]))
     )

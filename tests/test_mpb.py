@@ -6,7 +6,7 @@ import h5py
 import numpy as np
 import pytest
 
-from pcwannier.compute import (
+from pcwannier.compute.uniform_grid import (
     UniformGridInnerProduct,
     integrate_components,
     integrate_scalar,
@@ -29,7 +29,12 @@ from pcwannier.outputs import (
 from pcwannier.sources import load_input
 from pcwannier.sources.mpb import load_mpb_grid
 from pcwannier.symmetry.bloch import PeriodicGridInterpolator
-from pcwannier.symmetry.wannier_validation import _uniform_translation_indices
+from pcwannier.symmetry.group import SpaceGroupOperation
+from pcwannier.symmetry.wannier_validation import (
+    _RegularGridInterpolator,
+    _uniform_operation_norms,
+    _uniform_translation_indices,
+)
 
 
 def test_three_dimensional_uniform_grid_interpolation_is_trilinear():
@@ -265,7 +270,55 @@ def test_periodic_grid_centers_single_sample_direction():
     assert np.allclose(grid.fractional_vertices[:, 1], 0.0)
     stencil = PeriodicGridInterpolator(grid).stencil(grid.fractional_vertices)
     values = np.arange(grid.point_count, dtype=float)[None, :]
+    assert stencil.weights is None
+    assert stencil.vertex_indices.dtype.itemsize <= 4
+    assert stencil.lattice_shifts.dtype.itemsize == 1
     assert np.allclose(stencil.apply(values), values)
+
+
+def test_multilinear_stencil_applies_large_queries_in_consistent_chunks():
+    grid = PeriodicGrid((2, 2, 2), np.eye(3))
+    interpolator = PeriodicGridInterpolator(grid)
+    query = np.tile(np.array([[-0.25, -0.25, -0.25]]), (33000, 1))
+    stencil = interpolator.stencil(query)
+    values = np.arange(16, dtype=float).reshape(2, 8).astype(np.complex128)
+
+    actual = stencil.apply(values)
+
+    assert stencil.weights is not None
+    assert actual.shape == (2, len(query))
+    assert np.allclose(actual, actual[:, :1])
+
+
+def test_chunked_uniform_wannier_symmetry_norms_match_identity_action():
+    grid = PeriodicGrid((3, 3, 3), np.eye(3))
+    rng = np.random.default_rng(17)
+    field = rng.normal(size=(grid.point_count, 1, 3)) + 1j * rng.normal(
+        size=(grid.point_count, 1, 3)
+    )
+    metric = 1.0 + np.arange(grid.point_count, dtype=float) / grid.point_count
+    inner = UniformGridInnerProduct(grid, metric)
+    operation = SpaceGroupOperation(np.eye(3, dtype=int), np.zeros(3), name="E")
+
+    residual, transformed, expected, full_expected = _uniform_operation_norms(
+        field,
+        grid.fractional_vertices,
+        _RegularGridInterpolator(grid, 1.0e-10),
+        operation,
+        np.eye(3),
+        MaxwellProblem.for_components("full_vector", "magnetic"),
+        0,
+        (0,),
+        np.ones(1),
+        np.arange(grid.point_count),
+        inner,
+    )
+
+    reference = inner.norm(field[:, 0])
+    assert residual < 1.0e-25
+    assert transformed == pytest.approx(reference)
+    assert expected == pytest.approx(reference)
+    assert full_expected == pytest.approx(reference)
 
 
 def test_uniform_grid_rejects_nonfinite_input():
@@ -332,7 +385,9 @@ def test_mpb_grid_rejects_shifted_coordinate_metadata(tmp_path):
         load_mpb_grid(tmp_path / "grid.h5")
 
 
-def test_mpb_transverse_subspace_does_not_load_longitudinal_channels(tmp_path):
+def test_mpb_transverse_subspace_does_not_load_longitudinal_channels(
+    tmp_path, caplog
+):
     shape = (2, 2, 2)
     kpoints = np.array([[0.0, 0.0, 0.0]])
     with h5py.File(tmp_path / "grid.h5", "w") as handle:
@@ -394,8 +449,10 @@ def test_mpb_transverse_subspace_does_not_load_longitudinal_channels(tmp_path):
     assert config.invert_longitudinal_energies is False
     assert config.longitudinal_field_file is False
     assert config.longitudinal_energy_file is False
-    assert config.pseudoscalar_file is False
-    assert config.pseudoscalar_metric_file is False
+    assert not hasattr(config, "pseudoscalar_file")
+    assert not hasattr(config, "pseudoscalar_metric_file")
+    assert "Unknown incar field 'pseudoscalar_file' is ignored" in caplog.text
+    assert "Unknown incar field 'pseudoscalar_metric_file' is ignored" in caplog.text
     assert (
         config.symmetry_context.model.representation_analysis.points[0].band_indices
         == (0, 1)

@@ -10,21 +10,22 @@ from ..data import (
     InputBundle,
     RunResult,
 )
-from ..symmetry import (
-    StateBlochSymmetryProvider,
-    build_symmetry_context,
-    construct_symmetry_gauge,
-    disentangle_symmetry_constrained,
-    evaluate_symmetry_gauge,
-    localize_symmetry_constrained,
-    outer_band_grid,
+from ..symmetry.analysis import (
     regularize_gamma_zero_modes,
     run_bloch_symmetry_analysis,
     run_symmetry_analysis,
+)
+from ..symmetry.bloch import StateBlochSymmetryProvider
+from ..symmetry.disentanglement import (
+    disentangle_symmetry_constrained,
+    outer_band_grid,
     validate_frozen_window_covariance,
     validate_outer_window_closure,
-    validate_wannier_symmetry,
 )
+from ..symmetry.gauge import construct_symmetry_gauge, evaluate_symmetry_gauge
+from ..symmetry.localization import localize_symmetry_constrained
+from ..symmetry.representation import build_symmetry_context
+from ..symmetry.wannier_validation import validate_wannier_symmetry
 from ..timing import timed_step
 from ..symmetry.reporting import (
     log_bloch_symmetry_analysis,
@@ -112,15 +113,10 @@ def run_bloch_symmetry_preanalysis(
                 log_gamma_zero_regularization(gamma_regularization)
             return BlochSymmetryRunResult(
                 config=bundle.config,
-                orthogonality_report=physical.orthogonality_report,
-                S=physical.S,
                 symmetry=bundle.symmetry,
-                analysis=physical.analysis,
-                sewing_matrices=physical.sewing_matrices,
-                sewing_calculation_fingerprint=physical.sewing_calculation_fingerprint,
+                primary=physical,
                 auxiliary_channels=auxiliary_channels,
                 gamma_zero_regularization=gamma_regularization,
-                differential_diagnostics=physical.differential_diagnostics,
             )
 
 
@@ -192,16 +188,22 @@ def _analyze_bundle_channel(
             provider=provider,
         )
     log_bloch_symmetry_analysis(analysis)
+    stencil_count, stencil_bytes = provider.spatial_cache_info
+    LOGGER.info(
+        "Spatial symmetry stencil cache: entries=%s size=%.1f MB",
+        stencil_count,
+        stencil_bytes / (1024.0 * 1024.0),
+    )
+    provider.release_spatial_cache()
     if state.S is None:
         raise RuntimeError("Raw S overlap cache was not initialized during preanalysis.")
     return BlochSymmetryChannelResult(
-        field_kind,
-        report,
-        state.S,
-        analysis,
-        provider.cached_sewing_matrices,
-        provider.sewing_cache_fingerprint,
-        differential_diagnostics,
+        field_kind=field_kind,
+        orthogonality_report=report,
+        S=state.S,
+        analysis=analysis,
+        sewing_matrices=provider.cached_sewing_matrices,
+        differential_diagnostics=differential_diagnostics,
     )
 
 
@@ -297,7 +299,6 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         bundle.symmetry, trial_covariance_diagnostics = prepare_vector_trial_targets(
             state, bundle.symmetry
         )
-        config.symmetry_context = bundle.symmetry
     symmetry_analysis = None
     symmetry_provider = None
     if bundle.symmetry is not None and (
@@ -316,11 +317,11 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             )
         log_symmetry_analysis(symmetry_analysis)
     with timed_step("extend mesh", LOGGER, extension=config.extension):
-        state.extention(config.extension)
+        state.extend(config.extension)
     LOGGER.info(
         "Extended mesh: vertices=%s triangles=%s",
-        state.extention_mesh.vertices.shape[0],
-        state.extention_mesh.elements.shape[0],
+        state.extended_mesh.vertices.shape[0],
+        state.extended_mesh.elements.shape[0],
     )
 
     mset = MSet(state, threads=threads)
@@ -566,6 +567,14 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             gauge_spec.real_space_tolerance,
             " (diagnostic only for FEM output)" if not enforce_wannier_residual else "",
         )
+    if symmetry_provider is not None:
+        stencil_count, stencil_bytes = symmetry_provider.spatial_cache_info
+        LOGGER.info(
+            "Spatial symmetry stencil cache before release: entries=%s size=%.1f MB",
+            stencil_count,
+            stencil_bytes / (1024.0 * 1024.0),
+        )
+        symmetry_provider.release_spatial_cache()
     tba = TBAModel(ctx, threads=threads)
     if config.invert_longitudinal_energies:
         LOGGER.info(
@@ -596,7 +605,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     return RunResult(
         config=config,
         mesh=state.mesh,
-        extended_mesh=state.extention_mesh,
+        extended_mesh=state.extended_mesh,
         extended_metric_material=state.extended_metric_material,
         orthogonality_report=report,
         S=state.S,
@@ -621,9 +630,6 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         hopping_reconstruction_diagnostics=hopping_reconstruction_diagnostics,
         sewing_matrices=(
             None if symmetry_provider is None else symmetry_provider.cached_sewing_matrices
-        ),
-        sewing_calculation_fingerprint=(
-            None if symmetry_provider is None else symmetry_provider.sewing_cache_fingerprint
         ),
         trial_covariance_diagnostics=trial_covariance_diagnostics,
     )

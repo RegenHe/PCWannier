@@ -10,7 +10,7 @@ import numpy as np
 from ..matrix_io import load_cell_matrix, save_cell_matrix
 
 
-_FORMAT = "pcwannier-sewing-text-v1"
+_FORMAT = "pcwannier-sewing-text-v2"
 _CACHE_PREFIX = "PCWANNIER_D_CACHE "
 _ENTRY_PREFIX = "PCWANNIER_D_ENTRY "
 
@@ -36,7 +36,6 @@ class SewingMatrixCache:
     dimension: int
     bloch_sign: int
     k_shape: tuple[int, ...]
-    calculation_fingerprint: str
     entries: tuple[SewingMatrixCacheEntry, ...]
 
 
@@ -47,7 +46,6 @@ def save_sewing_matrix_cache(
     dimension: int,
     bloch_sign: int,
     k_shape: tuple[int, ...],
-    calculation_fingerprint: str,
 ) -> None:
     """Write physical sewing matrices as ordinary text CELL blocks."""
 
@@ -83,7 +81,6 @@ def save_sewing_matrix_cache(
         "dimension": int(dimension),
         "bloch_sign": int(bloch_sign),
         "k_shape": [int(value) for value in k_shape],
-        "calculation_fingerprint": _validated_fingerprint(calculation_fingerprint),
         "entry_count": len(cached_entries),
     }
     save_cell_matrix(
@@ -127,7 +124,6 @@ def load_sewing_matrix_cache(filename: str | Path) -> SewingMatrixCache:
     dimension = int(metadata.get("dimension", 0))
     bloch_sign = int(metadata.get("bloch_sign", 0))
     k_shape = tuple(int(value) for value in metadata.get("k_shape", ()))
-    fingerprint = _validated_fingerprint(metadata.get("calculation_fingerprint", ""))
     entry_count = int(metadata.get("entry_count", -1))
     if dimension <= 0 or bloch_sign not in (-1, 1) or len(k_shape) != dimension:
         raise ValueError(f"D matrix cache {path} has invalid global metadata.")
@@ -175,7 +171,7 @@ def load_sewing_matrix_cache(filename: str | Path) -> SewingMatrixCache:
                 antiunitary=bool(record.get("antiunitary", False)),
             )
         )
-    return SewingMatrixCache(dimension, bloch_sign, k_shape, fingerprint, tuple(entries))
+    return SewingMatrixCache(dimension, bloch_sign, k_shape, tuple(entries))
 
 
 def _validated_matrix(matrix, label: str) -> np.ndarray:
@@ -185,13 +181,6 @@ def _validated_matrix(matrix, label: str) -> np.ndarray:
     if not np.all(np.isfinite(array)):
         raise ValueError(f"D cache matrix {label} contains non-finite values.")
     return array
-
-
-def _validated_fingerprint(value) -> str:
-    text = str(value).lower()
-    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
-        raise ValueError("D matrix cache calculation fingerprint must be a SHA-256 hex digest.")
-    return text
 
 
 def _compact_json(value) -> str:

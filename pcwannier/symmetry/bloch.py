@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
+from collections import OrderedDict
 from itertools import product
 import logging
 from typing import TYPE_CHECKING
@@ -45,36 +45,56 @@ def fractional_mesh_vertices(mesh, real_lattice_vectors, lattice_const: float) -
 @dataclass(frozen=True)
 class BarycentricStencil:
     vertex_indices: np.ndarray
-    weights: np.ndarray
+    weights: np.ndarray | None
     lattice_shifts: np.ndarray | None = None
+
+    @property
+    def nbytes(self) -> int:
+        total = int(np.asarray(self.vertex_indices).nbytes)
+        if self.weights is not None:
+            total += int(np.asarray(self.weights).nbytes)
+        if self.lattice_shifts is not None:
+            total += int(np.asarray(self.lattice_shifts).nbytes)
+        return total
 
     def apply(self, values: np.ndarray) -> np.ndarray:
         array = np.asarray(values)
         indices = np.asarray(self.vertex_indices)
-        weights = np.asarray(self.weights)
         if indices.ndim == 1:
-            if weights.shape != indices.shape:
-                raise ValueError("Direct interpolation weights have an invalid shape.")
-            if array.ndim == 2:
-                return array[:, indices] * weights[None, :]
-            if array.ndim == 3:
-                return array[:, indices, :] * weights[None, :, None]
+            if self.weights is not None:
+                raise ValueError("Direct permutation stencils must not store interpolation weights.")
+            if array.ndim in {2, 3}:
+                return np.take(array, indices, axis=1)
             raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
-        if array.ndim == 2:
-            return np.einsum(
-                "nvc,vc->nv",
-                array[:, indices],
-                weights,
-                optimize=True,
-            )
-        if array.ndim == 3:
-            return np.einsum(
-                "nvcd,vc->nvd",
-                array[:, indices, :],
-                weights,
-                optimize=True,
-            )
-        raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
+        if self.weights is None:
+            raise ValueError("Multilinear interpolation requires weights.")
+        weights = np.asarray(self.weights)
+        if weights.shape != indices.shape:
+            raise ValueError("Interpolation indices and weights have incompatible shapes.")
+        output_shape = (array.shape[0], indices.shape[0]) + array.shape[2:]
+        output = np.empty(output_shape, dtype=np.result_type(array.dtype, weights.dtype))
+        chunk_size = 1 << 15
+        for start in range(0, indices.shape[0], chunk_size):
+            stop = min(start + chunk_size, indices.shape[0])
+            chunk_indices = indices[start:stop]
+            chunk_weights = weights[start:stop]
+            if array.ndim == 2:
+                output[:, start:stop] = np.einsum(
+                    "nvc,vc->nv",
+                    array[:, chunk_indices],
+                    chunk_weights,
+                    optimize=True,
+                )
+            elif array.ndim == 3:
+                output[:, start:stop, :] = np.einsum(
+                    "nvcd,vc->nvd",
+                    array[:, chunk_indices, :],
+                    chunk_weights,
+                    optimize=True,
+                )
+            else:
+                raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
+        return output
 
     def apply_quasiperiodic(
         self,
@@ -91,11 +111,13 @@ class BarycentricStencil:
         if shifts.shape[-1] != kpoint.size:
             raise ValueError("Bloch k point and interpolation lattice shifts have different dimensions.")
         if shifts.ndim == 2:
-            sampled = self.apply(values)
+            sampled = np.asarray(self.apply(values), dtype=np.complex128)
             phase = np.exp(2j * np.pi * int(bloch_sign) * (shifts @ kpoint))
             if sampled.ndim == 2:
-                return sampled * phase[None, :]
-            return sampled * phase[None, :, None]
+                sampled *= phase[None, :]
+            else:
+                sampled *= phase[None, :, None]
+            return sampled
 
         phase = np.exp(
             2j * np.pi * int(bloch_sign) * np.einsum(
@@ -105,23 +127,35 @@ class BarycentricStencil:
                 optimize=True,
             )
         )
+        if self.weights is None:
+            raise ValueError("Multilinear quasi-periodic interpolation requires weights.")
         weighted = self.weights * phase
         array = np.asarray(values)
-        if array.ndim == 2:
-            return np.einsum(
-                "nvc,vc->nv",
-                array[:, self.vertex_indices],
-                weighted,
-                optimize=True,
-            )
-        if array.ndim == 3:
-            return np.einsum(
-                "nvcd,vc->nvd",
-                array[:, self.vertex_indices, :],
-                weighted,
-                optimize=True,
-            )
-        raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
+        indices = np.asarray(self.vertex_indices)
+        output_shape = (array.shape[0], indices.shape[0]) + array.shape[2:]
+        output = np.empty(output_shape, dtype=np.complex128)
+        chunk_size = 1 << 15
+        for start in range(0, indices.shape[0], chunk_size):
+            stop = min(start + chunk_size, indices.shape[0])
+            chunk_indices = indices[start:stop]
+            chunk_weights = weighted[start:stop]
+            if array.ndim == 2:
+                output[:, start:stop] = np.einsum(
+                    "nvc,vc->nv",
+                    array[:, chunk_indices],
+                    chunk_weights,
+                    optimize=True,
+                )
+            elif array.ndim == 3:
+                output[:, start:stop, :] = np.einsum(
+                    "nvcd,vc->nvd",
+                    array[:, chunk_indices, :],
+                    chunk_weights,
+                    optimize=True,
+                )
+            else:
+                raise ValueError("Bloch fields must have shape (bands, vertices[, components]).")
+        return output
 
 
 class PeriodicGridInterpolator:
@@ -171,9 +205,9 @@ class PeriodicGridInterpolator:
                 self.shape,
             ).astype(np.intp, copy=False)
             return BarycentricStencil(
-                indices,
-                np.ones(query.shape[0], dtype=float),
-                shifts,
+                _compact_indices(indices),
+                None,
+                _compact_signed(shifts),
             )
         lower = np.floor(scaled).astype(np.int64)
         fraction = scaled - lower
@@ -200,7 +234,11 @@ class PeriodicGridInterpolator:
             )
             weights[:, corner_index] = np.prod(component_weights, axis=1)
             lattice_shifts[:, corner_index] = shifts
-        return BarycentricStencil(indices, weights, lattice_shifts)
+        return BarycentricStencil(
+            _compact_indices(indices),
+            weights,
+            _compact_signed(lattice_shifts),
+        )
 
 
 class PeriodicTriangleInterpolator:
@@ -372,6 +410,7 @@ class BlochSymmetryAction:
         bloch_sign: int = -1,
         tolerance: float = 1.0e-8,
         interpolator=None,
+        stencil_cache_bytes: int = 256 * 1024 * 1024,
     ):
         if bloch_sign not in {-1, 1}:
             raise ValueError("Bloch sign must be -1 or 1.")
@@ -386,7 +425,17 @@ class BlochSymmetryAction:
             if interpolator is None
             else interpolator
         )
-        self._stencils: dict[tuple[bytes, bytes], BarycentricStencil] = {}
+        self._stencil_cache_bytes_limit = max(0, int(stencil_cache_bytes))
+        self._stencil_cache_nbytes = 0
+        self._stencils: OrderedDict[tuple[bytes, bytes], BarycentricStencil] = OrderedDict()
+
+    @property
+    def stencil_cache_info(self) -> tuple[int, int]:
+        return len(self._stencils), self._stencil_cache_nbytes
+
+    def clear_stencil_cache(self) -> None:
+        self._stencils.clear()
+        self._stencil_cache_nbytes = 0
 
     def apply(
         self,
@@ -464,12 +513,40 @@ class BlochSymmetryAction:
         key = (operation.rotation.tobytes(), np.round(reduced_tau / self.tolerance).astype(np.int64).tobytes())
         cached = self._stencils.get(key)
         if cached is not None:
+            self._stencils.move_to_end(key)
             return cached
         inverse_rotation = np.linalg.inv(operation.rotation)
         preimages = (self.fractional_vertices - operation.translation) @ inverse_rotation.T
         stencil = self.interpolator.stencil(preimages)
-        self._stencils[key] = stencil
+        if self._stencil_cache_bytes_limit > 0 and stencil.nbytes <= self._stencil_cache_bytes_limit:
+            while (
+                self._stencils
+                and self._stencil_cache_nbytes + stencil.nbytes
+                > self._stencil_cache_bytes_limit
+            ):
+                _, removed = self._stencils.popitem(last=False)
+                self._stencil_cache_nbytes -= removed.nbytes
+            self._stencils[key] = stencil
+            self._stencil_cache_nbytes += stencil.nbytes
         return stencil
+
+
+def _compact_indices(indices: np.ndarray) -> np.ndarray:
+    values = np.asarray(indices)
+    maximum = int(np.max(values, initial=0))
+    dtype = np.uint32 if maximum <= np.iinfo(np.uint32).max else np.uint64
+    return values.astype(dtype, copy=False)
+
+
+def _compact_signed(values: np.ndarray) -> np.ndarray:
+    array = np.asarray(values)
+    minimum = int(np.min(array, initial=0))
+    maximum = int(np.max(array, initial=0))
+    for dtype in (np.int8, np.int16, np.int32, np.int64):
+        limits = np.iinfo(dtype)
+        if minimum >= limits.min and maximum <= limits.max:
+            return array.astype(dtype, copy=False)
+    return array
 
 
 def build_bloch_symmetry_action(
@@ -610,7 +687,6 @@ class StateBlochSymmetryProvider:
         self._transform_inverse_cache: dict[tuple[int, ...], np.ndarray] = {}
         self._band_lowdin_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], np.ndarray] = {}
         self._band_basis_sewing_cache: dict[tuple[object, ...], np.ndarray] = {}
-        self._cache_fingerprint: str | None = None
         cached_names = {
             str(value).upper() for value in getattr(state.config, "use_cached_data", ())
         }
@@ -714,10 +790,11 @@ class StateBlochSymmetryProvider:
         return tuple(self._sewing_cache[key] for key in sorted(self._sewing_cache))
 
     @property
-    def sewing_cache_fingerprint(self) -> str:
-        if self._cache_fingerprint is None:
-            self._cache_fingerprint = self._calculation_fingerprint()
-        return self._cache_fingerprint
+    def spatial_cache_info(self) -> tuple[int, int]:
+        return self.action.stencil_cache_info
+
+    def release_spatial_cache(self) -> None:
+        self.action.clear_stencil_cache()
 
     def sewing_matrix_at(
         self,
@@ -1087,11 +1164,6 @@ class StateBlochSymmetryProvider:
             raise ValueError(
                 f"Sewing cache k shape {cache.k_shape} does not match current shape {expected_shape}."
             )
-        if cache.calculation_fingerprint != self.sewing_cache_fingerprint:
-            raise ValueError(
-                "Sewing cache calculation fingerprint does not match the current mesh, fields, "
-                "metric material, field components, orthogonalization, lattice, or integration settings."
-            )
         for entry in cache.entries:
             try:
                 field_kind = FieldKind(entry.field_kind)
@@ -1139,59 +1211,6 @@ class StateBlochSymmetryProvider:
                 raise ValueError("Sewing cache contains conflicting duplicate entries.")
             self._sewing_cache[key] = entry
 
-    def _calculation_fingerprint(self) -> str:
-        digest = hashlib.sha256()
-        digest.update(b"PCWannier sewing input v2\0")
-        if self.state.inner_product.uses_full_bloch_fields:
-            digest.update(b"quadratic full-Bloch sewing v1\0")
-        for label, value in (
-            ("real_lattice_vectors", self.state.config.real_lattice_vectors),
-            ("lattice_const", [self.state.config.lattice_const]),
-            ("bloch_sign", [self.bloch_sign]),
-            ("symmetry_tolerance", [self.context.model.tolerance]),
-            ("mesh_vertices", self.state.mesh.vertices),
-            ("mesh_elements", self.state.mesh.elements),
-            ("metric_material", self.state.metric_material),
-        ):
-            _update_array_digest(digest, label, value)
-        digest.update(self.field_kind.value.encode("utf-8"))
-        maxwell = getattr(self.state, "maxwell", None)
-        if maxwell is not None:
-            digest.update(maxwell.field_components.value.encode("utf-8"))
-            digest.update(maxwell.primary_field.value.encode("utf-8"))
-            digest.update(maxwell.metric_material.value.encode("utf-8"))
-        mode = self.state.inner_product.mode
-        digest.update(str(getattr(mode, "value", mode)).encode("utf-8"))
-        digest.update(self.state.inner_product.IMPLEMENTATION_VERSION.encode("utf-8"))
-        fingerprint_items = getattr(self.state.mesh, "fingerprint_items", None)
-        if callable(fingerprint_items):
-            for label, value in fingerprint_items():
-                _update_array_digest(digest, label, value)
-        digest.update(self.state.bloch_convention.name.encode("utf-8"))
-        bias = self.context.model.magnetic_bias_direction
-        if bias is not None:
-            _update_array_digest(digest, "magnetic_bias_direction", bias)
-        for operation in self.context.model.group.operations:
-            digest.update(bytes((int(operation.antiunitary),)))
-        transforms = self.state.get_transform()
-        for k_index in self._k_indices:
-            storage_index = state_index(k_index)
-            _update_array_digest(
-                digest, f"bands:{storage_index}", self._actual_bands(k_index)
-            )
-            _update_array_digest(
-                digest,
-                f"field:{storage_index}",
-                self.state.get_block(*storage_index),
-            )
-            _update_array_digest(
-                digest,
-                f"transform:{storage_index}",
-                transforms[storage_index],
-            )
-        return digest.hexdigest()
-
-
 def _inverse_sqrt_hermitian(matrix, *, description: str) -> np.ndarray:
     value = np.asarray(matrix, dtype=np.complex128)
     value = 0.5 * (value + value.conj().T)
@@ -1204,26 +1223,3 @@ def _inverse_sqrt_hermitian(matrix, *, description: str) -> np.ndarray:
             f"{float(np.min(eigenvalues)):.6g}."
         )
     return eigenvectors @ np.diag(1.0 / np.sqrt(eigenvalues)) @ eigenvectors.conj().T
-
-
-def _update_array_digest(digest, label: str, value) -> None:
-    array = np.asarray(value)
-    if array.dtype.hasobject:
-        raise TypeError(f"Cannot fingerprint object array {label!r}.")
-    digest.update(label.encode("utf-8"))
-    digest.update(array.dtype.str.encode("ascii"))
-    digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
-    if array.size == 0:
-        return
-    if array.flags.c_contiguous:
-        digest.update(memoryview(array).cast("B"))
-        return
-    iterator = np.nditer(
-        array,
-        flags=["external_loop", "buffered", "zerosize_ok"],
-        order="C",
-        buffersize=1 << 17,
-    )
-    for chunk in iterator:
-        contiguous = np.ascontiguousarray(chunk)
-        digest.update(memoryview(contiguous).cast("B"))

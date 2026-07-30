@@ -8,15 +8,13 @@ from pcwannier.cli import main, parse_args
 from pcwannier.maxwell import MaxwellProblem
 
 
-def test_analysis_cache_paths_include_auxiliary_channels(tmp_path):
+def test_analysis_cache_paths_include_longitudinal_channel(tmp_path):
     config = SimpleNamespace(
         base_dir=tmp_path / "input",
         S_file="raw-S.txt",
         D_file="raw-D.txt",
         longitudinal_S_file="long-S.txt",
         longitudinal_D_file="long-D.txt",
-        pseudoscalar_S_file=False,
-        pseudoscalar_D_file=False,
     )
 
     cli_module._configure_analysis_cache_paths(config, tmp_path / "output")
@@ -26,8 +24,6 @@ def test_analysis_cache_paths_include_auxiliary_channels(tmp_path):
     assert Path(config.D_file) == output / "raw-D.txt"
     assert Path(config.longitudinal_S_file) == output / "long-S.txt"
     assert Path(config.longitudinal_D_file) == output / "long-D.txt"
-    assert Path(config.pseudoscalar_S_file) == output / "S_phi.txt"
-    assert Path(config.pseudoscalar_D_file) == output / "D_phi.txt"
 
 
 def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path, monkeypatch):
@@ -74,7 +70,11 @@ def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path
     ) == 0
 
     assert calls["run"] == (bundle, 3, "auto")
-    assert calls["outputs"] == (result, config, out)
+    assert calls["outputs"][0] is result
+    assert calls["outputs"][1] is not config
+    assert calls["outputs"][1].compute_backend == "auto"
+    assert calls["outputs"][2] == out
+    assert config.compute_backend != "auto"
     assert calls["interpolation"] == (
         result,
         "points.txt",
@@ -91,22 +91,30 @@ def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path
 
 def test_cli_cache_paths_and_base_mode_are_dataset_independent(tmp_path, monkeypatch):
     cache_config = _config(tmp_path)
+    loaded_configs = []
     monkeypatch.setattr(cli_module, "load_config", lambda path: cache_config)
-    monkeypatch.setattr(cli_module, "load_input", lambda config: object())
+    monkeypatch.setattr(
+        cli_module,
+        "load_input",
+        lambda config: loaded_configs.append(config) or object(),
+    )
     monkeypatch.setattr(cli_module, "run_calculation", lambda bundle, **kwargs: object())
     monkeypatch.setattr(cli_module, "write_outputs", lambda result, config, out_dir: None)
 
     cache_out = tmp_path / "cache-out"
     assert main(["-i", "example-incar", "--out", str(cache_out), "--cache"]) == 0
-    assert cache_config.use_cached_data == ["U", "V", "M", "S", "A", "D"]
+    resolved_cache_config = loaded_configs[-1]
+    assert resolved_cache_config.use_cached_data == ["U", "V", "M", "S", "A", "D"]
+    assert cache_config.use_cached_data == []
     for attr in ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file"):
-        assert Path(getattr(cache_config, attr)).parent == cache_out
+        assert Path(getattr(resolved_cache_config, attr)).parent == cache_out
 
     constrained_config = _config(tmp_path)
     constrained_config.symmetry_constrained = True
     monkeypatch.setattr(cli_module, "load_config", lambda path: constrained_config)
     assert main(["-i", "example-incar", "--cache"]) == 0
-    assert constrained_config.use_cached_data == ["V", "M", "S", "A", "D"]
+    assert loaded_configs[-1].use_cached_data == ["V", "M", "S", "A", "D"]
+    assert constrained_config.use_cached_data == []
 
     base_config = _config(tmp_path)
     mesh = object()
@@ -125,7 +133,8 @@ def test_cli_cache_paths_and_base_mode_are_dataset_independent(tmp_path, monkeyp
     )
     base_out = tmp_path / "base-out"
     assert main(["-i", "example-incar", "--out", str(base_out), "--base"]) == 0
-    assert calls["base"] == (base_config, mesh, base_out)
+    assert calls["base"][0] is not base_config
+    assert calls["base"][1:] == (mesh, base_out)
 
 
 def test_relative_out_is_resolved_once_for_cache_input_and_output(tmp_path, monkeypatch):
@@ -138,17 +147,21 @@ def test_relative_out_is_resolved_once_for_cache_input_and_output(tmp_path, monk
     monkeypatch.setattr(
         cli_module,
         "write_outputs",
-        lambda result, actual_config, out_dir: calls.setdefault("out_dir", out_dir),
+        lambda result, actual_config, out_dir: calls.update(
+            config=actual_config, out_dir=out_dir
+        ),
     )
 
     assert main(["-i", "example-incar", "--out", "relative-out", "--cache"]) == 0
 
     expected = (tmp_path / "relative-out").resolve()
     assert calls["out_dir"] == expected
+    resolved_config = calls["config"]
     for attr in ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file"):
-        cache_path = Path(getattr(config, attr))
+        cache_path = Path(getattr(resolved_config, attr))
         assert cache_path.is_absolute()
         assert cache_path.parent == expected
+        assert not Path(getattr(config, attr)).is_absolute()
 
 
 def test_cli_bloch_symmetry_analysis_stops_before_wannier_and_writes_caches(
@@ -196,10 +209,16 @@ def test_cli_bloch_symmetry_analysis_stops_before_wannier_and_writes_caches(
 
     assert calls["config"] == ("example-incar", "bloch_symmetry")
     assert calls["run"][0] is bundle
-    assert calls["write"] == (result, config, out)
-    assert config.use_cached_data == ["S", "D"]
-    assert Path(config.S_file) == out / "S.txt"
-    assert Path(config.D_file) == out / "D.txt"
+    assert calls["write"][0] is result
+    resolved_analysis_config = calls["write"][1]
+    assert resolved_analysis_config is not config
+    assert calls["write"][2] == out
+    assert resolved_analysis_config.use_cached_data == ["S", "D"]
+    assert Path(resolved_analysis_config.S_file) == out / "S.txt"
+    assert Path(resolved_analysis_config.D_file) == out / "D.txt"
+    assert config.use_cached_data == []
+    assert config.S_file is False
+    assert config.D_file is False
 
 
 def test_interpolation_outputs_require_points_file(tmp_path):

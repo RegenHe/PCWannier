@@ -4,6 +4,8 @@ from contextlib import contextmanager
 import logging
 from time import perf_counter
 
+from .runtime_info import memory_snapshot
+
 
 @contextmanager
 def timed_step(name: str, logger: logging.Logger | None = None, **details):
@@ -11,14 +13,17 @@ def timed_step(name: str, logger: logging.Logger | None = None, **details):
     suffix = _format_details(details)
     log.info("START %s%s", name, suffix)
     start = perf_counter()
+    start_memory = memory_snapshot()
     try:
         yield
     except Exception:
         elapsed = perf_counter() - start
-        log.exception("FAILED %s after %.3fs%s", name, elapsed, suffix)
+        memory_suffix = _format_memory_delta(start_memory, memory_snapshot())
+        log.exception("FAILED %s after %.3fs%s%s", name, elapsed, suffix, memory_suffix)
         raise
     elapsed = perf_counter() - start
-    log.info("END %s in %.3fs%s", name, elapsed, suffix)
+    memory_suffix = _format_memory_delta(start_memory, memory_snapshot())
+    log.info("END %s in %.3fs%s%s", name, elapsed, suffix, memory_suffix)
 
 
 def _format_details(details: dict) -> str:
@@ -27,3 +32,9 @@ def _format_details(details: dict) -> str:
         return ""
     body = ", ".join(f"{key}={value}" for key, value in clean.items())
     return f" ({body})"
+
+
+def _format_memory_delta(start, end) -> str:
+    if start.rss_mb is None or end.rss_mb is None:
+        return ""
+    return f" (rss_delta={end.rss_mb - start.rss_mb:+.1f} MB, rss={end.rss_mb:.1f} MB)"

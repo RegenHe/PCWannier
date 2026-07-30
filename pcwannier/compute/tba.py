@@ -203,8 +203,6 @@ class TBAModel:
 
     def collect_hoppings(self) -> dict[tuple[int, int, int], np.ndarray]:
         complete_neighbors = self.R_half_rect(self.state.k_shape)
-        if not self.config.neighbor:
-            self.config.neighbor = complete_neighbors[:, : int(self.config.kdim)].tolist()
         self._projected_k_hamiltonians()
 
         r_list = [(0, 0, 0)] + [

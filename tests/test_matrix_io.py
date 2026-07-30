@@ -3,7 +3,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pcwannier.matrix_io import load_cell_matrix, save_cell_matrix
+from pcwannier.matrix_io import (
+    load_cell_matrix,
+    save_cell_matrix,
+)
 from pcwannier.outputs import write_outputs
 
 
@@ -66,7 +69,12 @@ def test_write_outputs_writes_raw_s_in_shared_cell_format(tmp_path):
         band_figure=False,
         composition_of_b=[],
     )
-    result = SimpleNamespace(S=smat, band=None, topology=None, sewing_matrices=None)
+    result = SimpleNamespace(
+        S=smat,
+        band=None,
+        topology=None,
+        sewing_matrices=None,
+    )
 
     write_outputs(result, config)
 

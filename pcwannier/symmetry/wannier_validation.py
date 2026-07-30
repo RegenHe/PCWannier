@@ -238,13 +238,13 @@ def validate_wannier_symmetry(
     if ctx.symmetry_gauge is None:
         raise ValueError("Real-space symmetry validation requires a symmetry-adapted Bloch gauge.")
     state = ctx.state
-    if state.extention_mesh is None or state.extended_metric_material is None:
+    if state.extended_mesh is None or state.extended_metric_material is None:
         raise ValueError("Wannier symmetry validation requires the extended mesh.")
     target_items = tuple(targets)
     if not target_items:
         raise ValueError("Wannier symmetry validation requires at least one target.")
     group = target_items[0].group
-    mesh = state.extention_mesh
+    mesh = state.extended_mesh
     if zero_cell_wanniers is None:
         _, zero_cell_wanniers, _ = generate_wannier(ctx)
     zero_cell = np.asarray(zero_cell_wanniers, dtype=np.complex128)
@@ -297,6 +297,10 @@ def validate_wannier_symmetry(
     if state.extended_inner_product is None:
         raise RuntimeError("Extended metric inner product has not been initialized.")
     full_inner_product = state.extended_inner_product
+    full_wannier_norms = np.asarray(
+        full_inner_product.norms(zero_cell, name="Wannier symmetry source norms"),
+        dtype=float,
+    )
     target_offsets = []
     offset = 0
     for target_index, target in enumerate(target_items):
@@ -304,19 +308,13 @@ def validate_wannier_symmetry(
         offset += target.wannier_dimension
     ordered_entries = []
     for operation_index, operation in enumerate(group.operations):
-        preimage_fractional = (
-            fractional - operation.translation
-        ) @ np.linalg.inv(operation.rotation).T
         if integration_family == "uniform_grid":
-            stencil = interpolator.stencil(preimage_fractional)
-            if not np.any(stencil.valid_vertices):
-                raise RuntimeError(
-                    f"No common interior grid points remain for operation {operation.name}."
-                )
-            valid_inner_product = state.extended_inner_product.restrict_points(
-                stencil.valid_vertices
-            )
+            stencil = None
+            valid_inner_product = None
         else:
+            preimage_fractional = (
+                fractional - operation.translation
+            ) @ np.linalg.inv(operation.rotation).T
             preimage_cartesian = (
                 preimage_fractional
                 @ lattice
@@ -331,7 +329,7 @@ def validate_wannier_symmetry(
                 raise RuntimeError(
                     f"No common interior triangles remain for operation {operation.name}."
                 )
-            valid_inner_product = state.extended_inner_product.restrict_elements(
+            valid_inner_product = state.extended_inner_product.restrict_domain(
                 valid_elements
             )
         component_matrix = np.asarray(
@@ -351,35 +349,47 @@ def validate_wannier_symmetry(
                 site_matrix = target.site_irrep.matrix(action.site_element_index)
                 for irrep_index in range(irrep_dimension):
                     source_index = offset + target.wannier_index(irrep_index, orbit_index)
-                    transformed = stencil.apply(zero_cell[:, source_index])
-                    if operation.antiunitary:
-                        transformed = state.maxwell.apply_time_reversal(transformed)
-                    if transformed.ndim == 1:
-                        transformed = complex(component_matrix[0, 0]) * transformed
-                    else:
-                        transformed = transformed @ component_matrix.T
                     target_indices = tuple(
                         offset + target.wannier_index(row, action.target_index)
                         for row in range(irrep_dimension)
                     )
-                    expected = np.zeros_like(transformed)
-                    for row in range(irrep_dimension):
-                        if cell_fields is None:
-                            target_field = zero_cell[
-                                translated_indices[shift],
-                                target_indices[row],
-                            ]
+                    if integration_family == "uniform_grid":
+                        (
+                            residual_norm,
+                            transformed_norm,
+                            expected_norm,
+                            full_expected_norm,
+                        ) = _uniform_operation_norms(
+                            zero_cell,
+                            fractional,
+                            interpolator,
+                            operation,
+                            component_matrix,
+                            state.maxwell,
+                            source_index,
+                            target_indices,
+                            site_matrix[:, irrep_index],
+                            translated_indices[shift],
+                            full_inner_product,
+                        )
+                    else:
+                        transformed = stencil.apply(zero_cell[:, source_index])
+                        if operation.antiunitary:
+                            transformed = state.maxwell.apply_time_reversal(transformed)
+                        if transformed.ndim == 1:
+                            transformed = complex(component_matrix[0, 0]) * transformed
                         else:
+                            transformed = transformed @ component_matrix.T
+                        expected = np.zeros_like(transformed)
+                        for row in range(irrep_dimension):
                             target_field = cell_fields[shift][:, target_indices[row]]
-                        expected += site_matrix[row, irrep_index] * target_field
-                    residual_field = transformed - expected
-                    residual_norm = _field_norm(valid_inner_product, residual_field)
-                    transformed_norm = _field_norm(valid_inner_product, transformed)
-                    expected_norm = _field_norm(valid_inner_product, expected)
-                    full_source_norm = _field_norm(
-                        full_inner_product, zero_cell[:, source_index]
-                    )
-                    full_expected_norm = _field_norm(full_inner_product, expected)
+                            expected += site_matrix[row, irrep_index] * target_field
+                        residual_field = transformed - expected
+                        residual_norm = _field_norm(valid_inner_product, residual_field)
+                        transformed_norm = _field_norm(valid_inner_product, transformed)
+                        expected_norm = _field_norm(valid_inner_product, expected)
+                        full_expected_norm = _field_norm(full_inner_product, expected)
+                    full_source_norm = float(full_wannier_norms[source_index])
                     denominator = max(np.sqrt(transformed_norm), np.sqrt(expected_norm), 1.0e-15)
                     residual = float(np.sqrt(residual_norm) / denominator)
                     retained = float(
@@ -408,7 +418,8 @@ def validate_wannier_symmetry(
                             ),
                         )
                     )
-        del stencil, valid_inner_product
+        if stencil is not None:
+            del stencil, valid_inner_product
 
     entries = [entry for _, entry in sorted(ordered_entries, key=lambda item: item[0])]
     max_residual = max((entry.residual for entry in entries), default=0.0)
@@ -429,6 +440,68 @@ def validate_wannier_symmetry(
 
 def _field_norm(inner_product, field) -> float:
     return inner_product.norm(field, name="Wannier symmetry norm")
+
+
+def _uniform_operation_norms(
+    zero_cell: np.ndarray,
+    fractional: np.ndarray,
+    interpolator: _RegularGridInterpolator,
+    operation,
+    component_matrix: np.ndarray,
+    maxwell,
+    source_index: int,
+    target_indices: tuple[int, ...],
+    coefficients: np.ndarray,
+    translated_indices: np.ndarray,
+    inner_product,
+) -> tuple[float, float, float, float]:
+    metric = np.asarray(inner_product.metric, dtype=np.complex128)
+    metric_scale = max(float(np.max(np.abs(metric.real), initial=0.0)), 1.0)
+    if float(np.max(np.abs(metric.imag), initial=0.0)) > 1.0e-12 * metric_scale:
+        raise FloatingPointError("Wannier symmetry validation requires a real metric.")
+    inverse_rotation = np.linalg.inv(operation.rotation)
+    point_weight = float(inner_product.point_weight)
+    accumulators = np.zeros(4, dtype=np.float64)
+    valid_count = 0
+    chunk_size = 1 << 14
+    for start in range(0, fractional.shape[0], chunk_size):
+        stop = min(start + chunk_size, fractional.shape[0])
+        preimage = (
+            fractional[start:stop] - operation.translation
+        ) @ inverse_rotation.T
+        stencil = interpolator.stencil(preimage)
+        valid = np.asarray(stencil.valid_vertices, dtype=bool)
+        valid_count += int(np.count_nonzero(valid))
+        transformed = stencil.apply(zero_cell[:, source_index])
+        if operation.antiunitary:
+            transformed = maxwell.apply_time_reversal(transformed)
+        if transformed.ndim == 1:
+            transformed = complex(component_matrix[0, 0]) * transformed
+        else:
+            transformed = transformed @ component_matrix.T
+        expected = np.zeros_like(transformed)
+        local_translation = translated_indices[start:stop]
+        for coefficient, target_index in zip(coefficients, target_indices):
+            expected += coefficient * zero_cell[local_translation, target_index]
+        local_metric = metric.real[start:stop]
+        residual = transformed - expected
+        accumulators[0] += _weighted_samples_norm(residual[valid], local_metric[valid])
+        accumulators[1] += _weighted_samples_norm(transformed[valid], local_metric[valid])
+        accumulators[2] += _weighted_samples_norm(expected[valid], local_metric[valid])
+        accumulators[3] += _weighted_samples_norm(expected, local_metric)
+    if valid_count == 0:
+        raise RuntimeError(
+            f"No common interior grid points remain for operation {operation.name}."
+        )
+    return tuple(float(value * point_weight) for value in accumulators)
+
+
+def _weighted_samples_norm(values: np.ndarray, metric: np.ndarray) -> float:
+    array = np.asarray(values)
+    pointwise = np.abs(array) ** 2
+    if pointwise.ndim > 1:
+        pointwise = np.sum(pointwise, axis=tuple(range(1, pointwise.ndim)))
+    return float(np.dot(np.asarray(metric, dtype=np.float64), pointwise))
 
 
 def _uniform_translation_indices(mesh, shift) -> np.ndarray:

@@ -1,10 +1,12 @@
 import numpy as np
 import pytest
 from types import SimpleNamespace
+from scipy.spatial import cKDTree
 
 from pcwannier import BlochConvention
 import pcwannier.sources as sources_module
-from pcwannier.compute import MetricInnerProduct, is_numba_available
+from pcwannier.compute.backend import is_numba_available
+from pcwannier.compute.integration import MetricInnerProduct
 from pcwannier.compute.integration import numba_parallel_policy
 from pcwannier.data import Mesh, RawData
 from pcwannier.maxwell import FieldComponents
@@ -511,14 +513,30 @@ def _legacy_extension(mesh: Mesh, n, real_lattice_vectors, lattice_const):
             new_elements = original_elements + base_index
             new_vertices = original_vertices + np.array([offset_x, offset_y])
 
-            idx_new, idx_existing = mesh.match(new_vertices, mesh.vertices)
+            tree = cKDTree(new_vertices)
+            dists, idxs = tree.query(mesh.vertices, k=1)
+            idx_existing = np.where(dists < mesh.mindist * 0.5)[0]
+            idx_new = np.asarray([idxs[index] for index in idx_existing], dtype=np.intp)
             for new_idx, old_idx in zip(idx_new, idx_existing):
                 new_elements[new_elements == (new_idx + base_index)] = old_idx
 
             mesh.elements = np.vstack((mesh.elements, new_elements))
             mesh.vertices = np.vstack((mesh.vertices, new_vertices))
             mapping = np.hstack((mapping, np.arange(len(original_vertices), dtype=np.intp)))
-            _, mapping = mesh.rebuild_index(mapping)
+            used_indices = sorted(set(int(value) for value in mesh.elements.flatten()))
+            old_to_new = {
+                old_index: new_index
+                for new_index, old_index in enumerate(used_indices)
+            }
+            mesh.elements = np.asarray(
+                [
+                    [old_to_new[int(value)] for value in element]
+                    for element in mesh.elements
+                ],
+                dtype=np.intp,
+            )
+            mesh.vertices = mesh.vertices[used_indices]
+            mapping = np.asarray(mapping, dtype=np.intp)[used_indices]
 
     offset_x = (
         real_lattice_vectors[0][0] * np.floor((n[0] - 1) / 2)

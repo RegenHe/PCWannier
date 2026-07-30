@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from copy import copy
+from dataclasses import dataclass
 import logging
 import os
 from pathlib import Path
@@ -17,15 +19,23 @@ from .outputs import (
 )
 from .runtime_info import format_elapsed, format_memory, memory_snapshot, now, start_memory_tracking
 from .sources import load_input, load_mesh
-from .symmetry import (
+from .symmetry.crystallography import symmetry_engine_versions
+from .symmetry.io import (
     load_builtin_finite_groups,
     load_finite_group,
     load_point_group_from_spglib,
-    symmetry_engine_versions,
 )
 from .timing import timed_step
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    backend: str | None
+    use_cache: bool
+    analysis_only: bool
+    out_dir: Path | None
 
 
 def parse_args(argv=None):
@@ -102,26 +112,15 @@ def main(argv=None) -> int:
     LOGGER.info("input=%s out_dir=%s log=%s threads=%s backend_override=%s", args.input, out_dir, log_path, args.threads, args.backend)
 
     with timed_step("load config", LOGGER, input=args.input):
-        config = (
+        loaded_config = (
             load_config(args.input, mode="bloch_symmetry")
             if args.analyze_symmetry
             else load_config(args.input)
         )
-    if args.backend is not None:
-        config.compute_backend = args.backend
-    if args.cache:
-        if args.analyze_symmetry:
-            config.use_cached_data = ["S", "D"]
-            _configure_analysis_cache_paths(config, out_dir)
-        else:
-            config.use_cached_data = ["V", "M", "S", "A", "D"]
-            if not config.symmetry_constrained:
-                config.use_cached_data.insert(0, "U")
-        if out_dir is not None and not args.analyze_symmetry:
-            _redirect_cache_paths_to_out_dir(
-                config,
-                out_dir,
-            )
+    config = _apply_run_options(
+        loaded_config,
+        RunOptions(args.backend, args.cache, args.analyze_symmetry, out_dir),
+    )
 
     LOGGER.info(
         "config name=%s dataset_type=%s field=%s primary=%s metric=%s curl=%s "
@@ -231,6 +230,27 @@ def _log_run_summary(started_at: float) -> None:
     LOGGER.info("Done")
 
 
+def _apply_run_options(config, options: RunOptions):
+    """Apply CLI-only overrides without mutating the parsed incar object."""
+
+    resolved = copy(config)
+    if options.backend is not None:
+        resolved.compute_backend = options.backend
+    if not options.use_cache:
+        resolved.use_cached_data = list(getattr(config, "use_cached_data", ()))
+        return resolved
+    if options.analysis_only:
+        resolved.use_cached_data = ["S", "D"]
+        _configure_analysis_cache_paths(resolved, options.out_dir)
+        return resolved
+    resolved.use_cached_data = ["V", "M", "S", "A", "D"]
+    if not resolved.symmetry_constrained:
+        resolved.use_cached_data.insert(0, "U")
+    if options.out_dir is not None:
+        _redirect_cache_paths_to_out_dir(resolved, options.out_dir)
+    return resolved
+
+
 def _redirect_cache_paths_to_out_dir(config, out_dir: Path, *, attrs=None) -> None:
     out_dir = Path(out_dir).expanduser().resolve()
     names = attrs or ("M_file", "A_file", "V_file", "U_file", "S_file", "D_file")
@@ -251,8 +271,6 @@ def _configure_analysis_cache_paths(config, out_dir: Path | None) -> None:
         ("D_file", "D.txt"),
         ("longitudinal_S_file", "S_L.txt"),
         ("longitudinal_D_file", "D_L.txt"),
-        ("pseudoscalar_S_file", "S_phi.txt"),
-        ("pseudoscalar_D_file", "D_phi.txt"),
     ):
         value = getattr(config, attr, None)
         filename = (

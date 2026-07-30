@@ -208,7 +208,7 @@ class StateInitializer:
         if getattr(self.config, "projection_target_bindings", ()):
             self._projection_vector_3d()
             return
-        if self.state.extention_mesh is None or self.state.extended_metric_material is None:
+        if self.state.extended_mesh is None or self.state.extended_metric_material is None:
             raise ValueError("StateCollection must be extended before projection.")
         band_count = int(self.config.band_calc_num)
         min_len, _ = self.get_min_max_len_idx(self.state.E_idx)
@@ -242,7 +242,7 @@ class StateInitializer:
                         rr = r / float(self.config.lattice_const)
                         return StateBases.Radial(_n, _l)(rr, _z) * StateBases.Angular(_l)(phi)
 
-                h_columns.append(self.state.extention_mesh.rfunc(fn, cart_position, projection["xaxis_angluar"]))
+                h_columns.append(self.state.extended_mesh.rfunc(fn, cart_position, projection["xaxis_angluar"]))
 
         hmat = np.column_stack(h_columns)
         if self.state.extended_inner_product is None:
@@ -269,8 +269,8 @@ class StateInitializer:
 
         def calc_idx(idx):
             i, j, k = idx
-            phase = self.state.get_extention_phase(i, j, k)
-            fields = self.state.get_extention_block(i, j, k)
+            phase = self.state.get_extended_phase(i, j, k)
+            fields = self.state.get_extended_block(i, j, k)
             fields *= phase[None, :]
             amat = self.state.extended_inner_product.overlap(
                 fields,

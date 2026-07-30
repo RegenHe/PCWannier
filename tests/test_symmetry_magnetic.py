@@ -22,6 +22,7 @@ from pcwannier.symmetry import (
     resolve_symmetry_file,
     solve_intertwiner_space,
 )
+from pcwannier.symmetry.group import SpaceGroup, SpaceGroupOperation, apply_magnetic_bias
 
 
 def _magnetic_p4mm_model():
@@ -243,3 +244,25 @@ def test_zero_magnetic_bias_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="non-zero"):
         load_config(path)
+
+
+def test_three_dimensional_axial_bias_classifies_improper_operations():
+    identity = SpaceGroupOperation.identity(3)
+    vertical_mirror = SpaceGroupOperation(
+        np.diag([-1, 1, 1]), np.zeros(3), "sigma_x"
+    )
+    inversion = SpaceGroupOperation(
+        -np.eye(3, dtype=int), np.zeros(3), "inversion"
+    )
+    lattice = np.eye(3)
+    bias = [0.0, 0.0, 1.0]
+
+    mirror_group = apply_magnetic_bias(
+        SpaceGroup((identity, vertical_mirror)), lattice, bias
+    )
+    inversion_group = apply_magnetic_bias(
+        SpaceGroup((identity, inversion)), lattice, bias
+    )
+
+    assert mirror_group.operation_by_name("sigma_x").antiunitary
+    assert not inversion_group.operation_by_name("inversion").antiunitary

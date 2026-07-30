@@ -24,7 +24,8 @@ class MSet:
             path = self.config.input_path(self.config.M_file)
             if path is None:
                 raise ValueError("M cache requested, but M_file is disabled.")
-            self.mM0 = load_cell_matrix(path, self.state.k_shape + (b_half,))
+            cache_shape = self.state.k_shape + (b_half,)
+            self.mM0 = load_cell_matrix(path, cache_shape)
             self._validate_cached_m0()
             self.mMInitial = self.state.gen_matrix_on_kmesh(
                 lambda *_: [np.zeros((band_count, band_count), dtype=np.complex128) for _ in range(b_half)]

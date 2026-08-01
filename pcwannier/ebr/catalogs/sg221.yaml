@@ -1,0 +1,58 @@
+name: SG221 Pm-3m
+space_group_number: 221
+hall_number: 517
+
+k_points:
+  - name: Gamma
+    k: [0.0, 0.0, 0.0]
+  - name: R
+    k: [0.5, 0.5, 0.5]
+  - name: M
+    k: [0.5, 0.5, 0.0]
+  - name: X
+    k: [0.0, 0.5, 0.0]
+
+ebrs:
+  - {name: A1g@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: A1g}
+  - {name: A1u@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: A1u}
+  - {name: A2g@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: A2g}
+  - {name: A2u@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: A2u}
+  - {name: Eg@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: Eg}
+  - {name: Eu@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: Eu}
+  - {name: T1g@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: T1g}
+  - {name: T1u@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: T1u}
+  - {name: T2g@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: T2g}
+  - {name: T2u@1a, wyckoff: 1a, center: [0.0, 0.0, 0.0], site_irrep: T2u}
+
+  - {name: A1g@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: A1g}
+  - {name: A1u@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: A1u}
+  - {name: A2g@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: A2g}
+  - {name: A2u@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: A2u}
+  - {name: Eg@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: Eg}
+  - {name: Eu@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: Eu}
+  - {name: T1g@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: T1g}
+  - {name: T1u@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: T1u}
+  - {name: T2g@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: T2g}
+  - {name: T2u@1b, wyckoff: 1b, center: [0.5, 0.5, 0.5], site_irrep: T2u}
+
+  - {name: A1g@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: A1g}
+  - {name: A1u@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: A1u}
+  - {name: A2g@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: A2g}
+  - {name: A2u@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: A2u}
+  - {name: B1g@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: B1g}
+  - {name: B1u@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: B1u}
+  - {name: B2g@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: B2g}
+  - {name: B2u@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: B2u}
+  - {name: Eg@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: Eg}
+  - {name: Eu@3c, wyckoff: 3c, center: [0.5, 0.5, 0.0], site_irrep: Eu}
+
+  - {name: A1g@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: A1g}
+  - {name: A1u@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: A1u}
+  - {name: A2g@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: A2g}
+  - {name: A2u@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: A2u}
+  - {name: B1g@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: B1g}
+  - {name: B1u@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: B1u}
+  - {name: B2g@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: B2g}
+  - {name: B2u@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: B2u}
+  - {name: Eg@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: Eg}
+  - {name: Eu@3d, wyckoff: 3d, center: [0.5, 0.0, 0.0], site_irrep: Eu}

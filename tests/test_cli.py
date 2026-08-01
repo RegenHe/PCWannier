@@ -221,6 +221,66 @@ def test_cli_bloch_symmetry_analysis_stops_before_wannier_and_writes_caches(
     assert config.D_file is False
 
 
+def test_cli_ebr_analysis_reuses_bloch_preanalysis_and_writes_results(
+    tmp_path, monkeypatch
+):
+    config = _config(tmp_path)
+    config.S_file = False
+    config.D_file = False
+    config.wannier_targets = None
+    config.symmetry_constrained = False
+    bundle = object()
+    symmetry = object()
+    preanalysis = SimpleNamespace(symmetry=symmetry)
+    ebr_result = SimpleNamespace(
+        catalog=SimpleNamespace(name="fixture"),
+        mode="regular",
+        regular_decompositions=(object(),),
+        physical_tetb_solutions=(),
+        optimal_auxiliary_dimension=None,
+    )
+    calls = {}
+
+    monkeypatch.setattr(
+        cli_module,
+        "load_config",
+        lambda path, *, mode: calls.setdefault("config", (path, mode)) and config,
+    )
+    monkeypatch.setattr(cli_module, "load_input", lambda actual: bundle)
+    monkeypatch.setattr(
+        cli_module,
+        "run_bloch_symmetry_preanalysis",
+        lambda actual, **kwargs: calls.setdefault("preanalysis", actual) and preanalysis,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "write_bloch_symmetry_outputs",
+        lambda *args: calls.setdefault("symmetry_output", args),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "run_ebr_analysis",
+        lambda actual, actual_symmetry, actual_config: calls.setdefault(
+            "ebr", (actual, actual_symmetry, actual_config)
+        )
+        and ebr_result,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "write_ebr_outputs",
+        lambda *args: calls.setdefault("ebr_output", args),
+    )
+
+    out = (tmp_path / "ebr-analysis").resolve()
+    assert main(["-i", "example-incar", "--analyze-ebr", "--out", str(out)]) == 0
+
+    assert calls["config"] == ("example-incar", "bloch_symmetry")
+    assert calls["preanalysis"] is bundle
+    assert calls["ebr"][:2] == (preanalysis, symmetry)
+    assert calls["ebr_output"][0] is ebr_result
+    assert calls["ebr_output"][2] == out
+
+
 def test_interpolation_outputs_require_points_file(tmp_path):
     with pytest.raises(ValueError, match="--interp is required"):
         main(

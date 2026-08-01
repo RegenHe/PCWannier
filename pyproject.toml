@@ -35,3 +35,4 @@ version = {attr = "pcwannier._version.__version__"}
 
 [tool.setuptools.package-data]
 "pcwannier.symmetry" = ["space_groups/*.yaml", "finite_groups/*.yaml"]
+"pcwannier.ebr" = ["catalogs/*.yaml"]

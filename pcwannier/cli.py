@@ -10,6 +10,7 @@ from pathlib import Path
 from ._version import __version__
 from .config import load_config
 from .compute import run_bloch_symmetry_preanalysis, run_calculation
+from .ebr import run_ebr_analysis, write_ebr_outputs
 from .logging_utils import configure_logging
 from .outputs import (
     write_base_figures,
@@ -66,11 +67,17 @@ def parse_args(argv=None):
         help="Logging level.",
     )
     parser.add_argument("-o", "--out", default=None, help="Output directory override")
-    parser.add_argument(
+    analysis_mode = parser.add_mutually_exclusive_group()
+    analysis_mode.add_argument(
         "-s",
         "--analyze-symmetry",
         action="store_true",
         help="Analyze outer-window Bloch symmetry, write S/D caches, and exit",
+    )
+    analysis_mode.add_argument(
+        "--analyze-ebr",
+        action="store_true",
+        help="Analyze Bloch symmetry, find EBR/TETB decompositions, and exit",
     )
     parser.add_argument("-b", "--base", action="store_true", help="Plot projection base functions and exit")
     parser.add_argument("-c", "--cache", action="store_true", help="Use cached calculation matrices")
@@ -84,18 +91,19 @@ def main(argv=None) -> int:
     started_at = now()
     args = parse_args(argv)
     if args.group is not None:
-        if args.analyze_symmetry:
-            raise ValueError("--analyze-symmetry requires -i/--input and cannot be used with --group.")
+        if args.analyze_symmetry or args.analyze_ebr:
+            raise ValueError("Symmetry/EBR analysis requires -i/--input and cannot be used with --group.")
         print(_format_finite_group_table(_load_cli_finite_group(args.group)))
         return 0
-    if args.analyze_symmetry and (
+    analysis_only = args.analyze_symmetry or args.analyze_ebr
+    if analysis_only and (
         args.base
         or args.interp is not None
         or args.interp_wannier is not None
         or args.interp_metric is not None
     ):
         raise ValueError(
-            "--analyze-symmetry cannot be combined with --base or interpolation outputs."
+            "Analysis-only modes cannot be combined with --base or interpolation outputs."
         )
 
     start_memory_tracking()
@@ -114,12 +122,12 @@ def main(argv=None) -> int:
     with timed_step("load config", LOGGER, input=args.input):
         loaded_config = (
             load_config(args.input, mode="bloch_symmetry")
-            if args.analyze_symmetry
+            if analysis_only
             else load_config(args.input)
         )
     config = _apply_run_options(
         loaded_config,
-        RunOptions(args.backend, args.cache, args.analyze_symmetry, out_dir),
+        RunOptions(args.backend, args.cache, analysis_only, out_dir),
     )
 
     LOGGER.info(
@@ -187,7 +195,7 @@ def main(argv=None) -> int:
 
     with timed_step("load input data", LOGGER, dataset_type=config.dataset_type):
         bundle = load_input(config)
-    if args.analyze_symmetry:
+    if analysis_only:
         if config.wannier_targets or config.symmetry_constrained:
             LOGGER.info(
                 "Bloch symmetry analysis-only mode ignores Wannier targets and constrained-gauge settings."
@@ -205,6 +213,20 @@ def main(argv=None) -> int:
             )
         with timed_step("write Bloch symmetry caches", LOGGER, out_dir=out_dir or config.base_dir):
             write_bloch_symmetry_outputs(result, config, out_dir)
+        if args.analyze_ebr:
+            with timed_step("analyze EBR decomposition", LOGGER):
+                ebr_result = run_ebr_analysis(result, result.symmetry, config)
+            with timed_step("write EBR analysis", LOGGER, out_dir=out_dir or config.base_dir):
+                write_ebr_outputs(ebr_result, config, out_dir)
+            LOGGER.info(
+                "EBR analysis: catalog=%s mode=%s regular_solutions=%s "
+                "physical_tetb_solutions=%s optimal_auxiliary_dimension=%s",
+                ebr_result.catalog.name,
+                ebr_result.mode,
+                len(ebr_result.regular_decompositions),
+                len(ebr_result.physical_tetb_solutions),
+                ebr_result.optimal_auxiliary_dimension,
+            )
         _log_run_summary(started_at)
         return 0
     with timed_step("run calculation", LOGGER, threads=max(1, int(args.threads)), backend=config.compute_backend):

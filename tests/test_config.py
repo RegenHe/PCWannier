@@ -36,6 +36,12 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.wannier_subspace == "T"
     assert cfg.invert_longitudinal_energies is False
     assert cfg.symmetry_report_file == "./sym.txt"
+    assert cfg.ebr_catalog == "auto"
+    assert cfg.ebr_mode == "auto"
+    assert cfg.ebr_max_auxiliary_bands == 6
+    assert cfg.ebr_max_states == 1_000_000
+    assert cfg.ebr_report_file == "./ebr.txt"
+    assert cfg.ebr_data_file == "./ebr.json"
     assert cfg.field_components == FieldComponents.EZ.value
     assert cfg.maxwell_problem.primary_field == PrimaryField.ELECTRIC
     assert cfg.maxwell_problem.metric_material == MaterialKind.EPSILON

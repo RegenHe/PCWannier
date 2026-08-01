@@ -71,6 +71,10 @@ class IncarConfig:
     representation_character_tolerance: float = 1.0e-2
     wannier_targets: list[dict[str, Any]] | None = None
     representation_analysis: list[dict[str, Any]] | None = None
+    ebr_catalog: str = "auto"
+    ebr_mode: str = "auto"
+    ebr_max_auxiliary_bands: int = 6
+    ebr_max_states: int = 1_000_000
     projection_target_bindings: tuple[Any, ...] = field(default=(), init=False, repr=False)
     symmetry_resolved_path: Path | None = field(default=None, init=False)
     symmetry_resolved_reference: str | None = field(default=None, init=False)
@@ -89,6 +93,8 @@ class IncarConfig:
     S_file: str = "./S.txt"
     D_file: str = "./D.txt"
     symmetry_report_file: str | bool = "./sym.txt"
+    ebr_report_file: str | bool = "./ebr.txt"
+    ebr_data_file: str | bool = "./ebr.json"
     band_file: str = "./band.txt"
     hopping_file: str = "./hopping.txt"
     wannier_file: str = "./wannier.txt"
@@ -634,6 +640,8 @@ class IncarParser:
             "wannier_subspace",
             "symmetry_file",
             "symmetry_output_basis",
+            "ebr_catalog",
+            "ebr_mode",
             "dataset_file",
             "left_dataset_file",
             "metric_file",
@@ -644,6 +652,8 @@ class IncarParser:
             "S_file",
             "D_file",
             "symmetry_report_file",
+            "ebr_report_file",
+            "ebr_data_file",
             "U_file",
             "V_file",
             "A_file",
@@ -698,6 +708,8 @@ class IncarParser:
             "DOS_num",
             "eff_order",
             "finite_layer_num",
+            "ebr_max_auxiliary_bands",
+            "ebr_max_states",
         }:
             return int(evaluate_math_expression(value))
         if key == "finite_DOS_num":
@@ -1364,6 +1376,15 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         or cfg.representation_character_tolerance <= 0.0
     ):
         raise ValueError("representation_character_tolerance must be positive and finite.")
+    cfg.ebr_mode = str(cfg.ebr_mode).strip().lower()
+    if cfg.ebr_mode not in {"auto", "regular", "transverse"}:
+        raise ValueError("ebr_mode must be auto, regular, or transverse.")
+    if not str(cfg.ebr_catalog).strip():
+        raise ValueError("ebr_catalog must not be empty.")
+    if cfg.ebr_max_auxiliary_bands < 0:
+        raise ValueError("ebr_max_auxiliary_bands must be non-negative.")
+    if cfg.ebr_max_states <= 0:
+        raise ValueError("ebr_max_states must be positive.")
     if not np.isfinite(cfg.gamma_zero_mode_tolerance) or cfg.gamma_zero_mode_tolerance < 0.0:
         raise ValueError("gamma_zero_mode_tolerance must be finite and non-negative.")
     if cfg.symmetry_max_iter <= 0:

@@ -548,8 +548,50 @@ class SpaceGroupDefinition:
             ):
                 candidates.append(transformed)
         positions = np.asarray(candidates, dtype=float)
+        # A special-position orbit by itself can have an accidental supergroup
+        # (for example, SG 224's 2a orbit also has Im-3m symmetry).  Decorate the
+        # structure with a distinct general-position orbit so spglib resolves
+        # the requested Hall setting instead of that supergroup.
+        generic_candidates = (
+            np.asarray([0.137, 0.219, 0.347]),
+            np.asarray([0.173, 0.281, 0.419]),
+        )
+        generic_orbit = None
+        for generic_point in generic_candidates:
+            orbit = []
+            for rotation, translation in zip(
+                symmetry["rotations"], symmetry["translations"]
+            ):
+                transformed = np.mod(
+                    np.asarray(rotation, dtype=int) @ generic_point + translation,
+                    1.0,
+                )
+                if not any(
+                    np.allclose(
+                        transformed - previous - np.rint(transformed - previous),
+                        0.0,
+                        rtol=0.0,
+                        atol=self.tolerance,
+                    )
+                    for previous in orbit
+                ):
+                    orbit.append(transformed)
+            if len(orbit) == len(symmetry["rotations"]):
+                generic_orbit = np.asarray(orbit, dtype=float)
+                break
+        if generic_orbit is None:
+            raise ValueError(
+                f"Could not construct a general-position orbit for Hall {self.hall_number}."
+            )
+        decorated_positions = np.vstack((positions, generic_orbit))
+        decorated_types = np.concatenate(
+            (
+                np.ones(len(positions), dtype=int),
+                np.full(len(generic_orbit), 2, dtype=int),
+            )
+        )
         dataset = spglib.get_symmetry_dataset(
-            (lattice, positions, np.ones(len(positions), dtype=int)),
+            (lattice, decorated_positions, decorated_types),
             symprec=max(self.tolerance, 1.0e-7),
             hall_number=int(self.hall_number),
         )
@@ -558,7 +600,7 @@ class SpaceGroupDefinition:
                 f"spglib could not identify the Wyckoff orbit at {point.tolist()} "
                 f"for Hall {self.hall_number}."
             )
-        letters = tuple(str(value) for value in dataset.wyckoffs)
+        letters = tuple(str(value) for value in dataset.wyckoffs[: len(positions)])
         if not letters or len(set(letters)) != 1:
             raise ValueError(
                 f"The generated orbit has inconsistent Wyckoff letters: {letters}."
@@ -990,6 +1032,10 @@ def _generated_identification(
     canonical_name = {
         "m-3m": "O_h",
         "4/mmm": "D4h",
+        "-43m": "T_d",
+        "-3m": "D3d",
+        "-42m": "D2d",
+        "222": "D2",
     }.get(point_group.symbol, point_group.symbol)
     definition = FiniteGroupDefinition(
         canonical_name,
@@ -1017,7 +1063,8 @@ def _generated_irrep_labels(
     concrete: ConcreteFiniteGroup,
     representations: tuple[tuple[np.ndarray, ...], ...],
 ) -> tuple[str, ...]:
-    if symbol not in {"m-3m", "4/mmm"}:
+    supported = {"m-3m", "4/mmm", "-43m", "-3m", "-42m", "222"}
+    if symbol not in supported:
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
 
     rotations = concrete.rotations
@@ -1035,18 +1082,68 @@ def _generated_irrep_labels(
         if concrete.table.element_orders[index] == 4
         and int(round(np.linalg.det(rotation))) == 1
     ]
-    if inversion is None or not c4_candidates:
+    c4 = (
+        None
+        if not c4_candidates
+        else min(
+            c4_candidates,
+            key=lambda index: tuple(int(v) for v in rotations[index].reshape(-1)),
+        )
+    )
+    c2_prime = (
+        _perpendicular_twofold(concrete, c4)
+        if symbol == "4/mmm" and c4 is not None
+        else None
+    )
+    s4_candidates = [
+        index
+        for index, rotation in enumerate(rotations)
+        if concrete.table.element_orders[index] == 4
+        and int(round(np.linalg.det(rotation))) == -1
+    ]
+    s4 = (
+        None
+        if not s4_candidates
+        else min(
+            s4_candidates,
+            key=lambda index: tuple(int(v) for v in rotations[index].reshape(-1)),
+        )
+    )
+    proper_twofolds = tuple(
+        index
+        for index, rotation in enumerate(rotations)
+        if concrete.table.element_orders[index] == 2
+        and int(round(np.linalg.det(rotation))) == 1
+    )
+    if symbol in {"m-3m", "4/mmm"} and (inversion is None or c4 is None):
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
-    c4 = min(c4_candidates, key=lambda index: tuple(int(v) for v in rotations[index].reshape(-1)))
-    c2_prime = _perpendicular_twofold(concrete, c4) if symbol == "4/mmm" else None
+    if symbol == "-3m" and (inversion is None or not proper_twofolds):
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+    if symbol in {"-43m", "-42m"} and s4 is None:
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+    d2_axes = tuple(
+        sorted(
+            proper_twofolds,
+            key=lambda index: tuple(int(v) for v in rotations[index].reshape(-1)),
+        )
+    )
+    d2d_c2 = (
+        _perpendicular_twofold_for_improper(concrete, s4)
+        if symbol == "-42m" and s4 is not None
+        else None
+    )
 
     labels = []
     used: set[str] = set()
     for generated_index, matrices in enumerate(representations, start=1):
         dimension = int(matrices[0].shape[0])
-        parity_value = complex(np.trace(matrices[inversion])) / dimension
-        parity = "g" if parity_value.real >= 0.0 else "u"
-        c4_character = complex(np.trace(matrices[c4])).real
+        parity = ""
+        if inversion is not None:
+            parity_value = complex(np.trace(matrices[inversion])) / dimension
+            parity = "g" if parity_value.real >= 0.0 else "u"
+        c4_character = (
+            0.0 if c4 is None else complex(np.trace(matrices[c4])).real
+        )
         if symbol == "m-3m":
             if dimension == 1:
                 base = "A1" if c4_character > 0.0 else "A2"
@@ -1062,14 +1159,61 @@ def _generated_irrep_labels(
             family = "A" if c4_character > 0.0 else "B"
             branch = "1" if complex(np.trace(matrices[c2_prime])).real > 0.0 else "2"
             base = family + branch
+        elif symbol == "-43m":
+            s4_character = complex(np.trace(matrices[s4])).real
+            if dimension == 1:
+                base = "A1" if s4_character > 0.0 else "A2"
+            elif dimension == 3:
+                base = "T1" if s4_character > 0.0 else "T2"
+            else:
+                base = f"U{generated_index}"
+        elif symbol == "-3m" and dimension == 1:
+            branch = "1" if complex(np.trace(matrices[proper_twofolds[0]])).real > 0.0 else "2"
+            base = "A" + branch
+        elif symbol == "-42m" and dimension == 1 and d2d_c2 is not None:
+            family = "A" if complex(np.trace(matrices[s4])).real > 0.0 else "B"
+            branch = "1" if complex(np.trace(matrices[d2d_c2])).real > 0.0 else "2"
+            base = family + branch
+        elif symbol == "222" and dimension == 1 and len(d2_axes) == 3:
+            signs = tuple(
+                1 if complex(np.trace(matrices[index])).real > 0.0 else -1
+                for index in d2_axes
+            )
+            base = {
+                (1, 1, 1): "A",
+                (1, -1, -1): "B1",
+                (-1, 1, -1): "B2",
+                (-1, -1, 1): "B3",
+            }.get(signs, f"U{generated_index}")
         else:
             base = f"U{generated_index}"
-        label = base + parity if not base.startswith("U") else base
+        label = base + parity if parity and not base.startswith("U") else base
         if label in used:
             label = f"U{generated_index}"
         labels.append(label)
         used.add(label)
     return tuple(labels)
+
+
+def _perpendicular_twofold_for_improper(
+    concrete: ConcreteFiniteGroup,
+    improper_index: int,
+) -> int | None:
+    rotation = np.asarray(concrete.rotations[improper_index], dtype=float)
+    _, _, vectors = np.linalg.svd(rotation + np.eye(3))
+    axis = vectors[-1]
+    axis /= np.linalg.norm(axis)
+    candidates = []
+    for index, candidate in enumerate(concrete.rotations):
+        if concrete.table.element_orders[index] != 2 or int(round(np.linalg.det(candidate))) != 1:
+            continue
+        _, _, local_vectors = np.linalg.svd(np.asarray(candidate, dtype=float) - np.eye(3))
+        local_axis = local_vectors[-1]
+        local_axis /= np.linalg.norm(local_axis)
+        if abs(float(np.dot(axis, local_axis))) > 1.0e-7:
+            continue
+        candidates.append((tuple(int(value) for value in candidate.reshape(-1)), index))
+    return None if not candidates else min(candidates)[1]
 
 
 def _perpendicular_twofold(concrete: ConcreteFiniteGroup, c4_index: int) -> int | None:

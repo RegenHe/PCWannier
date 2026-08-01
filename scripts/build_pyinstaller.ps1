@@ -49,6 +49,7 @@ $pyinstallerOptions = @(
     "--collect-submodules", "scipy",
     "--collect-data", "matplotlib",
     "--collect-data", "pcwannier.symmetry",
+    "--collect-data", "pcwannier.ebr",
     "--collect-all", "spglib",
     "--collect-submodules", "spgrep",
     "--collect-all", "h5py"

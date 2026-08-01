@@ -314,7 +314,12 @@ def build_vector_bloch_trials(state, k_index) -> np.ndarray:
                     )
                 columns.append(total)
     values = np.stack(columns, axis=1)
-    norms = state.inner_product.norms(values, name="3D projection Bloch-sum norms")
+    # Trial construction uses (point, trial, component), while the inner-product
+    # column convention is (point, component, column).
+    norms = state.inner_product.norms(
+        np.swapaxes(values, 1, 2),
+        name="3D projection Bloch-sum norms",
+    )
     invalid = np.flatnonzero(~np.isfinite(norms) | (norms <= 0.0))
     if invalid.size:
         raise ValueError(

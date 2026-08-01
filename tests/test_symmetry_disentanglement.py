@@ -122,6 +122,31 @@ def test_covariant_outer_subspace_is_preserved_with_changing_band_ids(tmp_path):
     assert np.allclose(result.optimal_frame[1, 0, 0], [[0.0], [1.0]])
 
 
+def test_outer_window_closure_uses_configured_threads(tmp_path, monkeypatch):
+    context = _c2_context(tmp_path, target_character=1.0)
+    state = _state(context, ((0, 1), (2, 3)))
+    state.configured_threads = 4
+    swap = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    provider = _SyntheticProvider(
+        context, lambda op, *_: np.eye(2) if op == 0 else swap
+    )
+    observed_threads = []
+
+    def recording_map(items, function, threads):
+        observed_threads.append(threads)
+        return map(function, items)
+
+    monkeypatch.setattr(disentanglement_module, "parallel_map", recording_map)
+
+    closure = validate_outer_window_closure(
+        state, context, provider, tolerance=1.0e-12
+    )
+
+    assert closure.max_unitarity_error < 1.0e-12
+    assert observed_threads
+    assert set(observed_threads) == {4}
+
+
 def test_identity_group_update_matches_unconstrained_largest_eigenvector(tmp_path):
     context = _identity_context(tmp_path)
     state = _state(context, ((0, 1),))

@@ -297,8 +297,16 @@ def validate_wannier_symmetry(
     if state.extended_inner_product is None:
         raise RuntimeError("Extended metric inner product has not been initialized.")
     full_inner_product = state.extended_inner_product
+    norm_fields = (
+        np.swapaxes(zero_cell, 1, 2)
+        if zero_cell.ndim == 3
+        else zero_cell
+    )
     full_wannier_norms = np.asarray(
-        full_inner_product.norms(zero_cell, name="Wannier symmetry source norms"),
+        full_inner_product.norms(
+            norm_fields,
+            name="Wannier symmetry source norms",
+        ),
         dtype=float,
     )
     target_offsets = []

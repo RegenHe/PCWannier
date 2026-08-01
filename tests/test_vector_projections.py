@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -14,6 +15,8 @@ from pcwannier.projections import (
     real_spherical_harmonic,
 )
 from pcwannier.symmetry import cartesian_field_matrix
+import pcwannier.compute.vector_trials as vector_trials_module
+from pcwannier.compute.wannier import generate_wannier
 
 
 def test_local_frame_and_fixed_vector_orbitals():
@@ -279,3 +282,98 @@ def test_synthetic_3d_vector_projection_to_wannier_and_hopping(tmp_path):
         result.hoppings[(0, 0, 0)].conj().T,
         atol=1.0e-12,
     )
+
+
+def test_orbit_expanded_vector_trials_normalize_all_six_columns(monkeypatch):
+    point_count = 5
+    operation = SimpleNamespace(antiunitary=False)
+    orbit = SimpleNamespace(
+        points=(
+            SimpleNamespace(position=np.zeros(3), representative_operation=operation),
+            SimpleNamespace(position=np.full(3, 0.5), representative_operation=operation),
+        )
+    )
+    target = SimpleNamespace(orbit=orbit)
+    context = SimpleNamespace(model=SimpleNamespace(target=lambda _name: target))
+    record = SimpleNamespace(states=(1.0, 2.0, 3.0))
+    binding = SimpleNamespace(target_name="T1_2a", projection=record)
+
+    class InnerProduct:
+        def norms(self, values, *, name):
+            assert name == "3D projection Bloch-sum norms"
+            assert values.shape == (point_count, 3, 6)
+            return np.sum(np.abs(values) ** 2, axis=(0, 1), dtype=np.float64)
+
+    state = SimpleNamespace(
+        config=SimpleNamespace(
+            symmetry_context=context,
+            projection_target_bindings=(binding,),
+            real_lattice_vectors=np.eye(3),
+            lattice_const=1.0,
+            k_points=(np.asarray([0.0]),) * 3,
+            extension=(1, 1, 1),
+        ),
+        mesh=SimpleNamespace(vertices=np.zeros((point_count, 3))),
+        bloch_sign=1,
+        inner_product=InnerProduct(),
+    )
+
+    monkeypatch.setattr(
+        vector_trials_module,
+        "_evaluate_transformed_trial",
+        lambda _state, _record, trial, points, _center, _operation: np.full(
+            (points.shape[0], 3), trial, dtype=np.complex128
+        ),
+    )
+
+    values = vector_trials_module.build_vector_bloch_trials(state, (0, 0, 0))
+
+    assert values.shape == (point_count, 6, 3)
+    assert np.allclose(
+        np.sum(np.abs(values) ** 2, axis=(0, 2), dtype=np.float64),
+        np.ones(6),
+    )
+
+
+def test_vector_wannier_norms_follow_six_wannier_columns():
+    point_count = 6
+    base = np.zeros((6, point_count, 3), dtype=np.complex128)
+    for band in range(6):
+        base[band, band, band % 3] = 1.0
+
+    class InnerProduct:
+        def norms(self, values, *, chunk_size, name):
+            assert name == "Wannier norms"
+            assert chunk_size == 2048
+            assert values.shape == (point_count, 3, 6)
+            return np.sum(np.abs(values) ** 2, axis=(0, 1), dtype=np.float64)
+
+    config = SimpleNamespace(
+        real_lattice_vectors=np.eye(3),
+        reciprocal_lattice_vectors=np.eye(3),
+        lattice_const=1.0,
+        kdim=3,
+        k_points=(np.asarray([0.0]),) * 3,
+        extension=(1, 1, 1),
+        band_calc_num=6,
+    )
+    state = SimpleNamespace(
+        extended_mesh=SimpleNamespace(vertices=np.zeros((point_count, 3))),
+        space_to_original_mapping=np.arange(point_count),
+        extended_inner_product=InnerProduct(),
+        bloch_sign=1,
+        k_indices=lambda: iter(((0, 0, 0),)),
+        get_k_num=lambda: 1,
+        get_block=lambda *_: base,
+    )
+    context = SimpleNamespace(
+        config=config,
+        state=state,
+        output_state_coefficients_at=lambda *_: np.eye(6, dtype=np.complex128),
+    )
+
+    _, values, norms = generate_wannier(context)
+
+    assert values.shape == (point_count, 6, 3)
+    assert norms.shape == (6,)
+    assert np.allclose(norms, np.ones(6))

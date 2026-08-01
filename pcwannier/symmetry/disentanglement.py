@@ -6,6 +6,7 @@ import logging
 import numpy as np
 
 from ..compute.kspace import neighbor_reciprocal_lattice_vectors
+from ..compute.parallel import parallel_map
 from .bloch import StateBlochSymmetryProvider
 from .constraints import (
     propagate_physical_frame,
@@ -95,40 +96,60 @@ def validate_outer_window_closure(
     tolerance: float,
 ) -> OuterWindowClosureReport:
     bands = outer_band_grid(state)
+    threads = max(1, int(getattr(state, "configured_threads", 1)))
     errors: list[float] = []
     leakages: list[float] = []
-    for operation_index, mappings in enumerate(context.k_mappings):
+
+    def evaluate_mapping(item):
+        operation_index, mapping = item
         operation = context.model.group.operations[operation_index]
-        for mapping in mappings:
-            source_bands = _bands_at(bands, mapping.source_k_index)
-            target_bands = _bands_at(bands, mapping.target_k_index)
-            if len(source_bands) != len(target_bands):
-                raise RuntimeError(
-                    "Outer window is not symmetry closed: "
-                    f"operation={operation.name or operation_index}, "
-                    f"source_k={mapping.source_k_index} has M={len(source_bands)}, "
-                    f"target_k={mapping.target_k_index} has M={len(target_bands)}."
-                )
-            matrix = provider.sewing_matrix_between_mapping(
-                mapping, source_bands, target_bands
+        source_bands = _bands_at(bands, mapping.source_k_index)
+        target_bands = _bands_at(bands, mapping.target_k_index)
+        if len(source_bands) != len(target_bands):
+            raise RuntimeError(
+                "Outer window is not symmetry closed: "
+                f"operation={operation.name or operation_index}, "
+                f"source_k={mapping.source_k_index} has M={len(source_bands)}, "
+                f"target_k={mapping.target_k_index} has M={len(target_bands)}."
             )
-            source_error = float(
-                np.linalg.norm(matrix.conj().T @ matrix - np.eye(len(source_bands)), ord="fro")
-            )
-            target_error = float(
-                np.linalg.norm(matrix @ matrix.conj().T - np.eye(len(target_bands)), ord="fro")
-            )
-            error = max(source_error, target_error)
+        matrix = provider.sewing_matrix_between_mapping(
+            mapping, source_bands, target_bands
+        )
+        source_error = float(
+            np.linalg.norm(matrix.conj().T @ matrix - np.eye(len(source_bands)), ord="fro")
+        )
+        target_error = float(
+            np.linalg.norm(matrix @ matrix.conj().T - np.eye(len(target_bands)), ord="fro")
+        )
+        error = max(source_error, target_error)
+        leakage = float(
+            np.sqrt(max(0.0, len(source_bands) - np.linalg.norm(matrix, ord="fro") ** 2))
+        )
+        return operation_index, mapping, error, leakage
+
+    for operation_index, mappings in enumerate(context.k_mappings):
+        tasks = tuple((operation_index, mapping) for mapping in mappings)
+        if not tasks:
+            continue
+        # Build the operation's spatial stencil before concurrent read-only use.
+        results = (evaluate_mapping(tasks[0]),)
+        if len(tasks) > 1:
+            results = (*results, *parallel_map(tasks[1:], evaluate_mapping, threads))
+        for resolved_operation_index, mapping, error, leakage in results:
+            operation = context.model.group.operations[resolved_operation_index]
             errors.append(error)
-            leakages.append(float(np.sqrt(max(0.0, len(source_bands) - np.linalg.norm(matrix, ord="fro") ** 2))))
+            leakages.append(leakage)
             if error > tolerance:
                 raise RuntimeError(
                     "Outer window is not closed under symmetry: "
-                    f"operation={operation.name or operation_index}, source_k={mapping.source_k_index}, "
+                    f"operation={operation.name or resolved_operation_index}, "
+                    f"source_k={mapping.source_k_index}, "
                     f"target_k={mapping.target_k_index}, unitarity_residual={error:.6g}."
                 )
 
-    composition = _outer_composition_residual(state, context, provider, bands)
+    composition = _outer_composition_residual(
+        state, context, provider, bands, threads=threads
+    )
     if composition > tolerance:
         raise RuntimeError(
             f"Outer-window sewing composition residual {composition:.6g} exceeds {tolerance:.6g}."
@@ -697,13 +718,14 @@ def _omega_i(initializer, frame) -> float:
     return float(np.real(value))
 
 
-def _outer_composition_residual(state, context, provider, bands) -> float:
+def _outer_composition_residual(state, context, provider, bands, *, threads=1) -> float:
     group = context.model.group
     shape = tuple(len(axis) for axis in context.k_points)
-    maximum = 0.0
-    for source_index in np.ndindex(shape):
+
+    def source_residual(source_index):
         source_k = _fractional_at(context, source_index)
         source_bands = _bands_at(bands, source_index)
+        local_maximum = 0.0
         for right_index, right in enumerate(group.operations):
             right_mapping = provider.mapping(right_index, source_index)
             middle_bands = _bands_at(bands, right_mapping.target_k_index)
@@ -739,10 +761,21 @@ def _outer_composition_residual(state, context, provider, bands) -> float:
                     if left.antiunitary
                     else left_matrix @ right_matrix
                 )
-                maximum = max(
-                    maximum,
+                local_maximum = max(
+                    local_maximum,
                     float(np.linalg.norm(composed - product_matrix, ord="fro")),
                 )
+        return local_maximum
+
+    source_indices = tuple(np.ndindex(shape))
+    if not source_indices:
+        return 0.0
+    # The first source warms exact-product stencils before parallel read-only use.
+    maximum = source_residual(source_indices[0])
+    for residual in parallel_map(
+        source_indices[1:], source_residual, max(1, int(threads))
+    ):
+        maximum = max(maximum, residual)
     return maximum
 
 

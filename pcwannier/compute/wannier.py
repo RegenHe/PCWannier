@@ -55,8 +55,9 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
     wsum /= np.sqrt(float(state.get_k_num()))
     if state.extended_inner_product is None:
         raise RuntimeError("Extended metric inner product has not been initialized.")
+    norm_values = np.swapaxes(wsum, 1, 2) if vector_field else wsum
     norms = state.extended_inner_product.norms(
-        wsum,
+        norm_values,
         chunk_size=2048,
         name="Wannier norms",
     )

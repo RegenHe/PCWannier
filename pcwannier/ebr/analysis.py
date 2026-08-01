@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from functools import reduce
+from math import gcd
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -21,10 +24,17 @@ from .models import (
     BandSymmetryVector,
     EBRAnalysisResult,
     EBRCatalog,
+    EBRDefinition,
     EBRMatrix,
+    EBRSubspaceCandidate,
+    EBRSubspacePointSelection,
     SymmetryVectorKey,
 )
-from .solver import decompose_ebr, enumerate_tetb_decompositions
+from .solver import (
+    decompose_ebr,
+    enumerate_ebr_subspace_solutions,
+    enumerate_tetb_decompositions,
+)
 
 if TYPE_CHECKING:
     from ..config import IncarConfig
@@ -87,6 +97,7 @@ def build_ebr_matrix(
 ) -> EBRMatrix:
     """Generate EBR columns from existing induced target representations."""
 
+    catalog = _catalog_in_context_setting(context, catalog)
     _validate_catalog_context(context, catalog)
     definition = context.model.group_definition
     if definition is None:
@@ -189,7 +200,10 @@ def run_ebr_analysis(
         catalog_reference = infer_builtin_catalog_alias(
             _context_space_group_number(context)
         )
-    catalog = load_ebr_catalog(catalog_reference, base_dir=config.base_dir)
+    catalog = _catalog_in_context_setting(
+        context,
+        load_ebr_catalog(catalog_reference, base_dir=config.base_dir),
+    )
     matrix = build_ebr_matrix(
         context,
         catalog,
@@ -223,6 +237,130 @@ def run_ebr_analysis(
         if hasattr(analysis, "primary")
         else config.maxwell_problem.symmetry_field_kind
     )
+    if mode == "subspace":
+        target_dimension = config.ebr_subspace_dimension
+        if target_dimension is None:
+            raise ValueError("ebr_subspace_dimension is required for ebr_mode=subspace.")
+        fixed_bands = tuple(
+            int(value)
+            for value in (
+                ()
+                if config.ebr_subspace_fixed_bands is None
+                else config.ebr_subspace_fixed_bands
+            )
+        )
+        include_gamma_zero_modes = _validate_subspace_fixed_bands(
+            physical_analysis,
+            context,
+            catalog,
+            fixed_bands=fixed_bands,
+            target_dimension=target_dimension,
+            zero_tolerance=config.gamma_zero_mode_tolerance,
+        )
+        skipped_blocks: list[str] = []
+        inventory = _build_subspace_inventory(
+            physical_analysis,
+            context,
+            catalog,
+            zero_tolerance=config.gamma_zero_mode_tolerance,
+            skipped_blocks=skipped_blocks,
+        ).reordered(matrix.row_keys)
+        diagnostics.extend(skipped_blocks)
+        surrogate = (
+            _transverse_gamma_surrogate(
+                context,
+                catalog,
+                matrix,
+                config.real_lattice_vectors,
+                field_kind,
+            )
+            if include_gamma_zero_modes
+            else np.zeros(len(matrix.row_keys), dtype=np.int64)
+        )
+        auxiliary_rows = _auxiliary_gamma_rows(
+            context,
+            catalog,
+            matrix,
+            config.real_lattice_vectors,
+            field_kind,
+        )
+        algebraic = enumerate_ebr_subspace_solutions(
+            inventory,
+            matrix,
+            gamma_point_name=catalog.gamma_point.name,
+            target_dimension=target_dimension,
+            gamma_surrogate=surrogate,
+            max_auxiliary_bands=config.ebr_max_auxiliary_bands,
+            max_states=config.ebr_max_states,
+            required_auxiliary_gamma_rows=auxiliary_rows,
+        )
+        candidates = []
+        for solution, selected_vector in algebraic:
+            selections = _match_subspace_blocks(
+                physical_analysis,
+                context,
+                catalog,
+                selected_vector,
+                zero_tolerance=config.gamma_zero_mode_tolerance,
+                fixed_band_indices=fixed_bands,
+                include_gamma_zero_modes=include_gamma_zero_modes,
+            )
+            if selections is not None:
+                candidates.append(
+                    EBRSubspaceCandidate(solution, selected_vector, selections)
+                )
+        optimal = min(
+            (candidate.solution.auxiliary_dimension for candidate in candidates),
+            default=None,
+        )
+        if optimal is None:
+            gamma = _matching_analysis_point(
+                physical_analysis, catalog.gamma_point, context.model.tolerance
+            )
+            positive_dimensions = [
+                len(block.band_indices)
+                for block in gamma.degenerate_blocks
+                if not _is_zero_block(block, config.gamma_zero_mode_tolerance)
+            ]
+            diagnostics.append(
+                f"No {target_dimension}-dimensional EBR subspace satisfies the exact "
+                "representation-count and complete-degenerate-block constraints."
+            )
+            dimension_gcd = reduce(gcd, (int(value) for value in matrix.dimensions))
+            if target_dimension % dimension_gcd:
+                diagnostics.append(
+                    f"The EBR generator dimensions have gcd={dimension_gcd}, so a "
+                    f"{target_dimension}-dimensional signed EBR combination is impossible."
+                )
+            elif not algebraic:
+                diagnostics.append(
+                    "No signed EBR combination fits the available high-symmetry irrep "
+                    "multiplicities, even before complete band-block connectivity is imposed."
+                )
+            else:
+                diagnostics.append(
+                    f"{len(algebraic)} algebraic EBR candidate(s) fit the irrep inventory, "
+                    "but none can be assembled from complete numerical degenerate blocks at "
+                    "every catalog k point."
+                )
+            required_positive = target_dimension - (2 if include_gamma_zero_modes else 0)
+            diagnostics.append(
+                "Gamma positive-frequency block dimensions are "
+                f"{positive_dimensions}; the requested subspace needs "
+                f"{required_positive} positive-frequency Gamma states."
+            )
+        return EBRAnalysisResult(
+            mode,
+            catalog,
+            inventory,
+            matrix,
+            subspace_candidates=tuple(candidates),
+            optimal_auxiliary_dimension=optimal,
+            diagnostics=tuple(diagnostics),
+            subspace_fixed_band_indices=fixed_bands,
+            subspace_includes_gamma_zero_modes=include_gamma_zero_modes,
+        )
+
     vector = _build_transverse_symmetry_vector(
         physical_analysis,
         context,
@@ -258,6 +396,206 @@ def run_ebr_analysis(
         tetb_solutions=solutions,
         optimal_auxiliary_dimension=optimal,
         diagnostics=tuple(diagnostics),
+    )
+
+
+def _build_subspace_inventory(
+    analysis: BlochSymmetryAnalysisResult,
+    context: SymmetryContext,
+    catalog: EBRCatalog,
+    *,
+    zero_tolerance: float,
+    skipped_blocks: list[str] | None = None,
+) -> BandSymmetryVector:
+    """Collect exact complete-block irreps available at every catalog point."""
+
+    rows = []
+    values = []
+    dimensions = []
+    for catalog_point in catalog.k_points:
+        point = _matching_analysis_point(analysis, catalog_point, context.model.tolerance)
+        _require_unitary_point(point)
+        resolved = point.resolved_little_group
+        if resolved is None:
+            raise ValueError(f"Representation point {point.name!r} has no little group.")
+        names = tuple(irrep.name for irrep in resolved.require_irreps())
+        counts = {name: 0 for name in names}
+        for block in point.degenerate_blocks:
+            if catalog_point.name == catalog.gamma_point.name and _is_zero_block(
+                block, zero_tolerance
+            ):
+                continue
+            if block.decomposition is None:
+                if skipped_blocks is not None:
+                    reason = block.irrep_unavailable_reason or "no exact irrep decomposition"
+                    skipped_blocks.append(
+                        f"Ignored incomplete block at {point.name}: bands(1-based)="
+                        f"{tuple(band + 1 for band in block.band_indices)}; reason={reason}."
+                    )
+                continue
+            for name, multiplicity in block.decomposition.multiplicities.items():
+                counts[name] = counts.get(name, 0) + int(multiplicity)
+        for name in names:
+            rows.append(SymmetryVectorKey(catalog_point.name, name))
+            values.append(counts[name])
+        dimensions.append(len(point.band_indices))
+    if len(set(dimensions)) != 1:
+        raise ValueError("EBR subspace analysis points must use one common outer dimension.")
+    return BandSymmetryVector(tuple(rows), np.asarray(values), dimensions[0])
+
+
+def _match_subspace_blocks(
+    analysis: BlochSymmetryAnalysisResult,
+    context: SymmetryContext,
+    catalog: EBRCatalog,
+    vector: BandSymmetryVector,
+    *,
+    zero_tolerance: float,
+    fixed_band_indices: tuple[int, ...] = (),
+    include_gamma_zero_modes: bool = False,
+) -> tuple[EBRSubspacePointSelection, ...] | None:
+    positions = {key: index for index, key in enumerate(vector.row_keys)}
+    output = []
+    for catalog_point in catalog.k_points:
+        point = _matching_analysis_point(analysis, catalog_point, context.model.tolerance)
+        resolved = point.resolved_little_group
+        if resolved is None:
+            return None
+        names = tuple(irrep.name for irrep in resolved.require_irreps())
+        target = np.asarray(
+            [vector.multiplicities[positions[SymmetryVectorKey(catalog_point.name, name)]] for name in names],
+            dtype=np.int64,
+        )
+        zero_blocks = tuple(
+            block
+            for block in point.degenerate_blocks
+            if catalog_point.name == catalog.gamma_point.name
+            and _is_zero_block(block, zero_tolerance)
+        )
+        blocks = tuple(
+            block
+            for block in point.degenerate_blocks
+            if not (
+                catalog_point.name == catalog.gamma_point.name
+                and _is_zero_block(block, zero_tolerance)
+            )
+            and block.decomposition is not None
+        )
+        fixed = set(fixed_band_indices)
+        required = tuple(bool(fixed.intersection(block.band_indices)) for block in blocks)
+        contributions = []
+        for block in blocks:
+            contributions.append(
+                np.asarray(
+                    [block.decomposition.multiplicities.get(name, 0) for name in names],
+                    dtype=np.int64,
+                )
+            )
+        matches: list[tuple[int, ...]] = []
+
+        zero_selection = zero_blocks if include_gamma_zero_modes else ()
+        zero_dimension = sum(len(block.band_indices) for block in zero_selection)
+
+        def select(index: int, current: np.ndarray, chosen: tuple[int, ...]) -> None:
+            if np.any(current > target):
+                return
+            if index == len(blocks):
+                selected_dimension = zero_dimension + sum(
+                    len(blocks[item].band_indices) for item in chosen
+                )
+                if (
+                    np.array_equal(current, target)
+                    and selected_dimension == vector.total_dimension
+                ):
+                    matches.append(chosen)
+                return
+            if not required[index]:
+                select(index + 1, current, chosen)
+            select(index + 1, current + contributions[index], chosen + (index,))
+
+        select(0, np.zeros_like(target), ())
+        if not matches:
+            return None
+        chosen = matches[0]
+        output.append(
+            EBRSubspacePointSelection(
+                catalog_point.name,
+                tuple(block.band_indices for block in zero_selection)
+                + tuple(blocks[index].band_indices for index in chosen),
+                tuple((name, int(value)) for name, value in zip(names, target) if value),
+                len(matches),
+            )
+        )
+    return tuple(output)
+
+
+def _validate_subspace_fixed_bands(
+    analysis: BlochSymmetryAnalysisResult,
+    context: SymmetryContext,
+    catalog: EBRCatalog,
+    *,
+    fixed_bands: tuple[int, ...],
+    target_dimension: int,
+    zero_tolerance: float,
+) -> bool:
+    """Validate mandatory bands and decide whether Gamma needs the T-mode surrogate."""
+
+    fixed = set(fixed_bands)
+    include_gamma_zero_modes = False
+    for catalog_point in catalog.k_points:
+        point = _matching_analysis_point(analysis, catalog_point, context.model.tolerance)
+        available = set(int(value) for value in point.band_indices)
+        missing = sorted(fixed - available)
+        if missing:
+            raise ValueError(
+                f"Fixed EBR subspace bands {tuple(value + 1 for value in missing)} are "
+                f"not present at representation point {point.name!r}."
+            )
+        required_dimension = 0
+        for block in point.degenerate_blocks:
+            if not fixed.intersection(block.band_indices):
+                continue
+            is_gamma_zero = (
+                catalog_point.name == catalog.gamma_point.name
+                and _is_zero_block(block, zero_tolerance)
+            )
+            if is_gamma_zero:
+                include_gamma_zero_modes = True
+            elif block.decomposition is None:
+                reason = block.irrep_unavailable_reason or "no exact irrep decomposition"
+                raise ValueError(
+                    f"Fixed EBR subspace band at {point.name!r} belongs to incomplete "
+                    f"block {tuple(value + 1 for value in block.band_indices)}: {reason}."
+                )
+            required_dimension += len(block.band_indices)
+        if required_dimension > target_dimension:
+            raise ValueError(
+                f"Fixed EBR subspace bands require {required_dimension} states at "
+                f"{point.name!r}, exceeding ebr_subspace_dimension={target_dimension}."
+            )
+
+    if include_gamma_zero_modes:
+        gamma = _matching_analysis_point(
+            analysis, catalog.gamma_point, context.model.tolerance
+        )
+        zero_dimension = sum(
+            len(block.band_indices)
+            for block in gamma.degenerate_blocks
+            if _is_zero_block(block, zero_tolerance)
+        )
+        if zero_dimension != 2:
+            raise ValueError(
+                "A fixed band intersects the Gamma zero-frequency subspace, but the "
+                "analysis does not contain exactly two transverse zero modes; found "
+                f"{zero_dimension}."
+            )
+    return include_gamma_zero_modes
+
+
+def _is_zero_block(block, tolerance: float) -> bool:
+    return bool(
+        block.energies
+        and max(abs(complex(value)) for value in block.energies) <= tolerance
     )
 
 
@@ -430,6 +768,47 @@ def _auxiliary_gamma_rows(
     )
 
 
+def _transverse_gamma_surrogate(
+    context: SymmetryContext,
+    catalog: EBRCatalog,
+    matrix: EBRMatrix,
+    lattice_vectors,
+    field_kind: FieldKind,
+) -> np.ndarray:
+    """Return the formal two-transverse-mode Gamma representation T+L - L."""
+
+    elements = little_group(context.model.group, catalog.gamma_point.k_fractional)
+    indices = tuple(element.operation_index for element in elements)
+    resolved = context.model.group_definition.resolve_little_group(
+        indices,
+        catalog.gamma_point.k_fractional,
+        bloch_convention=context.model.bloch_convention,
+    )
+    if field_kind == FieldKind.ELECTRIC_POLAR_VECTOR:
+        auxiliary_kind = FieldKind.SCALAR
+    elif field_kind == FieldKind.MAGNETIC_AXIAL_VECTOR:
+        auxiliary_kind = FieldKind.PSEUDOSCALAR
+    else:
+        raise NotImplementedError(
+            "Transverse EBR subspace search requires a 3D polar-electric or "
+            "axial-magnetic field."
+        )
+    full = _field_representation_decomposition_resolved(
+        resolved, indices, context, field_kind, lattice_vectors
+    )
+    longitudinal = _field_representation_decomposition_resolved(
+        resolved, indices, context, auxiliary_kind, lattice_vectors
+    )
+    output = np.zeros(len(matrix.row_keys), dtype=np.int64)
+    for index, key in enumerate(matrix.row_keys):
+        if key.point_name != catalog.gamma_point.name:
+            continue
+        output[index] = int(full.multiplicities.get(key.irrep_name, 0)) - int(
+            longitudinal.multiplicities.get(key.irrep_name, 0)
+        )
+    return output
+
+
 def _matching_analysis_point(
     analysis: BlochSymmetryAnalysisResult,
     catalog_point,
@@ -474,6 +853,12 @@ def _validate_catalog_context(context: SymmetryContext, catalog: EBRCatalog) -> 
     definition = context.model.group_definition
     if definition is None or definition.hall_number is None:
         raise ValueError("EBR analysis requires a space group with an unambiguous Hall setting.")
+    actual_number = _context_space_group_number(context)
+    if actual_number != catalog.space_group_number:
+        raise ValueError(
+            f"EBR catalog space group {catalog.space_group_number} does not match "
+            f"calculation space group {actual_number}."
+        )
     if int(definition.hall_number) != catalog.hall_number:
         raise ValueError(
             f"EBR catalog Hall {catalog.hall_number} does not match calculation Hall "
@@ -481,12 +866,96 @@ def _validate_catalog_context(context: SymmetryContext, catalog: EBRCatalog) -> 
         )
     if catalog.dimension != context.model.dimension:
         raise ValueError("EBR catalog dimension does not match the symmetry context.")
+
+
+def _catalog_in_context_setting(
+    context: SymmetryContext, catalog: EBRCatalog
+) -> EBRCatalog:
+    """Translate catalog centers between origin choices with identical axes."""
+
+    definition = context.model.group_definition
+    if definition is None or definition.hall_number is None:
+        return catalog
+    target_hall = int(definition.hall_number)
+    if target_hall == catalog.hall_number:
+        return catalog
     actual_number = _context_space_group_number(context)
     if actual_number != catalog.space_group_number:
+        return catalog
+
+    from ..symmetry.io import load_symmetry_from_spglib
+
+    source = load_symmetry_from_spglib(f"hall:{catalog.hall_number}").group
+    shift = _origin_shift_between_groups(
+        source,
+        context.model.group,
+        catalog.dimension,
+        context.model.tolerance,
+    )
+    if shift is None:
         raise ValueError(
-            f"EBR catalog space group {catalog.space_group_number} does not match "
-            f"calculation space group {actual_number}."
+            f"EBR catalog Hall {catalog.hall_number} and calculation Hall {target_hall} "
+            "are not related by a supported pure origin shift. Use a catalog in the "
+            "calculation Hall setting."
         )
+    transformed = tuple(
+        EBRDefinition(
+            ebr.name,
+            ebr.wyckoff,
+            np.mod(ebr.center + shift, 1.0),
+            ebr.site_irrep,
+        )
+        for ebr in catalog.ebrs
+    )
+    source_name = catalog.source or catalog.name
+    return replace(
+        catalog,
+        name=f"{catalog.name} [Hall {target_hall}]",
+        hall_number=target_hall,
+        ebrs=transformed,
+        source=f"{source_name}; origin-shifted from Hall {catalog.hall_number}",
+    )
+
+
+def _origin_shift_between_groups(source, target, dimension: int, tolerance: float):
+    if len(source.operations) != len(target.operations):
+        return None
+    source_rotations = [np.asarray(operation.rotation, dtype=np.int64) for operation in source.operations]
+    target_by_rotation: dict[bytes, list[np.ndarray]] = {}
+    for operation in target.operations:
+        rotation = np.ascontiguousarray(operation.rotation, dtype=np.int64)
+        target_by_rotation.setdefault(rotation.tobytes(), []).append(
+            np.asarray(operation.translation, dtype=float)
+        )
+    if any(
+        np.ascontiguousarray(rotation).tobytes() not in target_by_rotation
+        for rotation in source_rotations
+    ):
+        return None
+
+    threshold = max(float(tolerance), 1.0e-8)
+    for denominator in (24, 48):
+        axes = [np.arange(denominator, dtype=float) / denominator] * dimension
+        candidates = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, dimension)
+        active = np.arange(candidates.shape[0], dtype=np.int64)
+        for operation, rotation in zip(source.operations, source_rotations):
+            if active.size == 0:
+                break
+            transformed = (
+                np.asarray(operation.translation, dtype=float)[None, :]
+                + candidates[active]
+                - candidates[active] @ rotation.T
+            )
+            targets = target_by_rotation[np.ascontiguousarray(rotation).tobytes()]
+            distances = np.full(active.size, np.inf, dtype=float)
+            for translation in targets:
+                delta = transformed - translation[None, :]
+                delta -= np.rint(delta)
+                distances = np.minimum(distances, np.max(np.abs(delta), axis=1))
+            active = active[distances <= threshold]
+        if active.size:
+            return candidates[int(active[0])]
+    return None
 
 
 def _context_space_group_number(context: SymmetryContext) -> int:

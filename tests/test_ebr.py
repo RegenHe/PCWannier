@@ -15,13 +15,21 @@ from pcwannier.ebr import (
     EBRKPoint,
     EBRMatrix,
     EBRSearchLimitError,
+    EBRSubspaceCandidate,
+    EBRSubspacePointSelection,
     SymmetryVectorKey,
     build_band_symmetry_vector,
     build_ebr_matrix,
     decompose_ebr,
     enumerate_tetb_decompositions,
+    enumerate_ebr_subspace_solutions,
     load_ebr_catalog,
     write_ebr_outputs,
+)
+from pcwannier.ebr.analysis import (
+    _build_subspace_inventory,
+    _match_subspace_blocks,
+    _validate_subspace_fixed_bands,
 )
 from pcwannier.symmetry.analysis import (
     BlochSymmetryAnalysisResult,
@@ -229,11 +237,176 @@ def test_sg224_dynamic_matrix_reproduces_published_solution(sg224_matrix):
     )
 
 
-def test_dynamic_matrix_rejects_wrong_hall_setting(sg221_matrix):
+def test_dynamic_matrix_aligns_sg224_origin_choices():
+    model = load_symmetry_from_spglib("hall:521")
+    context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
+    matrix = build_ebr_matrix(
+        context, load_ebr_catalog("sg224"), lattice_vectors=np.eye(3)
+    )
+    names = [column.name for column in matrix.columns]
+    assert np.allclose(matrix.columns[names.index("A1@2a")].center, [0.5, 0.5, 0.5])
+    assert np.allclose(matrix.columns[names.index("A1g@4b")].center, [0.25] * 3)
+    assert np.allclose(matrix.columns[names.index("A1g@4c")].center, [0.75] * 3)
+
+
+def test_dynamic_matrix_rejects_different_space_group(sg221_matrix):
     model = load_symmetry_from_spglib("hall:517")
     context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
-    with pytest.raises(ValueError, match="Hall 522.*Hall 517"):
+    with pytest.raises(ValueError, match="space group 224.*space group 221"):
         build_ebr_matrix(context, load_ebr_catalog("sg224"), lattice_vectors=np.eye(3))
+
+
+def test_subspace_solver_keeps_positive_gamma_constraints_and_zero_mode_surrogate():
+    rows = (
+        SymmetryVectorKey("Gamma", "T"),
+        SymmetryVectorKey("Gamma", "L"),
+        SymmetryVectorKey("X", "A"),
+    )
+    columns = (EBRDefinition("target", "1a", np.zeros(1), "A"),)
+    matrix = EBRMatrix(rows, columns, np.asarray([[1], [1], [1]]), np.asarray([4]))
+    inventory = BandSymmetryVector(rows, np.asarray([1, 0, 1]), 8)
+    solutions = enumerate_ebr_subspace_solutions(
+        inventory,
+        matrix,
+        gamma_point_name="Gamma",
+        target_dimension=4,
+        gamma_surrogate=np.asarray([0, 1, 0]),
+        max_auxiliary_bands=0,
+    )
+    assert len(solutions) == 1
+    solution, selected = solutions[0]
+    assert np.array_equal(solution.n_t, [1])
+    assert np.array_equal(selected.multiplicities, [1, 0, 1])
+
+    unavailable = BandSymmetryVector(rows, np.asarray([0, 0, 1]), 8)
+    assert enumerate_ebr_subspace_solutions(
+        unavailable,
+        matrix,
+        gamma_point_name="Gamma",
+        target_dimension=4,
+        gamma_surrogate=np.asarray([0, 1, 0]),
+        max_auxiliary_bands=0,
+    ) == ()
+
+    two_band_matrix = EBRMatrix(
+        (SymmetryVectorKey("Gamma", "A"),),
+        (_definition("two_band"),),
+        np.asarray([[1]]),
+        np.asarray([2]),
+    )
+    two_band_inventory = BandSymmetryVector(
+        two_band_matrix.row_keys, np.asarray([1]), 2
+    )
+    assert len(
+        enumerate_ebr_subspace_solutions(
+            two_band_inventory,
+            two_band_matrix,
+            gamma_point_name="Gamma",
+            target_dimension=2,
+            gamma_surrogate=np.zeros(1, dtype=int),
+            max_auxiliary_bands=0,
+        )
+    ) == 1
+
+
+def test_subspace_inventory_ignores_incomplete_outer_window_boundary_block():
+    exact = SimpleNamespace(multiplicities={"A": 1})
+    blocks = (
+        SimpleNamespace(
+            band_indices=(0, 1),
+            energies=(0.0, 0.0),
+            decomposition=None,
+            irrep_unavailable_reason="Gamma transverse zero modes",
+        ),
+        SimpleNamespace(
+            band_indices=(2,),
+            energies=(1.0,),
+            decomposition=exact,
+            irrep_unavailable_reason=None,
+        ),
+        SimpleNamespace(
+            band_indices=(3,),
+            energies=(2.0,),
+            decomposition=None,
+            irrep_unavailable_reason="outer-window boundary truncates the representation",
+        ),
+    )
+    resolved = SimpleNamespace(
+        require_irreps=lambda: (SimpleNamespace(name="A"),)
+    )
+    point = SimpleNamespace(
+        name="Gamma",
+        k_fractional=np.zeros(1),
+        requested_k_fractional=np.zeros(1),
+        band_indices=(0, 1, 2, 3),
+        degenerate_blocks=blocks,
+        resolved_little_group=resolved,
+        antiunitary_operation_names=(),
+    )
+    analysis = SimpleNamespace(points=(point,))
+    context = SimpleNamespace(model=SimpleNamespace(tolerance=1.0e-8))
+    catalog_point = SimpleNamespace(name="Gamma", k_fractional=np.zeros(1))
+    catalog = SimpleNamespace(
+        k_points=(catalog_point,),
+        gamma_point=catalog_point,
+    )
+
+    skipped: list[str] = []
+    inventory = _build_subspace_inventory(
+        analysis,
+        context,
+        catalog,
+        zero_tolerance=1.0e-10,
+        skipped_blocks=skipped,
+    )
+
+    assert np.array_equal(inventory.multiplicities, [1])
+    assert len(skipped) == 1
+    assert "bands(1-based)=(4,)" in skipped[0]
+
+    selected = BandSymmetryVector(
+        inventory.row_keys, inventory.multiplicities, total_dimension=1
+    )
+    selections = _match_subspace_blocks(
+        analysis,
+        context,
+        catalog,
+        selected,
+        zero_tolerance=1.0e-10,
+    )
+    assert selections is not None
+    assert len(selections) == 1
+    assert selections[0].band_indices == (2,)
+
+    assert not _validate_subspace_fixed_bands(
+        analysis,
+        context,
+        catalog,
+        fixed_bands=(),
+        target_dimension=1,
+        zero_tolerance=1.0e-10,
+    )
+    assert _validate_subspace_fixed_bands(
+        analysis,
+        context,
+        catalog,
+        fixed_bands=(0, 1),
+        target_dimension=3,
+        zero_tolerance=1.0e-10,
+    )
+    fixed_selection = _match_subspace_blocks(
+        analysis,
+        context,
+        catalog,
+        BandSymmetryVector(
+            inventory.row_keys, inventory.multiplicities, total_dimension=3
+        ),
+        zero_tolerance=1.0e-10,
+        fixed_band_indices=(0, 1),
+        include_gamma_zero_modes=True,
+    )
+    assert fixed_selection is not None
+    assert fixed_selection[0].band_indices == (0, 1, 2)
 
 
 def test_band_vector_rejects_nonexact_physical_decomposition():

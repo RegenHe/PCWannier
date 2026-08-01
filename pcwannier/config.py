@@ -73,6 +73,8 @@ class IncarConfig:
     representation_analysis: list[dict[str, Any]] | None = None
     ebr_catalog: str = "auto"
     ebr_mode: str = "auto"
+    ebr_subspace_dimension: int | None = None
+    ebr_subspace_fixed_bands: np.ndarray | None = None
     ebr_max_auxiliary_bands: int = 6
     ebr_max_states: int = 1_000_000
     projection_target_bindings: tuple[Any, ...] = field(default=(), init=False, repr=False)
@@ -710,7 +712,10 @@ class IncarParser:
             "finite_layer_num",
             "ebr_max_auxiliary_bands",
             "ebr_max_states",
+            "ebr_subspace_dimension",
         }:
+            if key == "ebr_subspace_dimension" and value.strip().lower() == "false":
+                return None
             return int(evaluate_math_expression(value))
         if key == "finite_DOS_num":
             return False if value.lower() == "false" else int(evaluate_math_expression(value))
@@ -754,6 +759,30 @@ class IncarParser:
                 emin, emax = [float(evaluate_math_expression(x.strip())) for x in value.split(",", 1)]
                 return EnergyWindow(min(emin, emax), max(emin, emax))
             raise ValueError(f"Invalid {key} format: {value!r}")
+        if key == "ebr_subspace_fixed_bands":
+            if value.lower() == "false":
+                return None
+            if ":" in value:
+                parts = [part.strip() for part in value.split(":")]
+                if len(parts) not in {2, 3}:
+                    raise ValueError(
+                        "ebr_subspace_fixed_bands uses start:stop[:step] syntax."
+                    )
+                start = int(evaluate_math_expression(parts[0]))
+                stop = int(evaluate_math_expression(parts[1]))
+                step = 1 if len(parts) == 2 else int(
+                    evaluate_math_expression(parts[2])
+                )
+                if step == 0:
+                    raise ValueError("ebr_subspace_fixed_bands step must not be zero.")
+                return np.arange(start, stop, step, dtype=int)
+            return np.asarray(
+                [
+                    int(evaluate_math_expression(part.strip()))
+                    for part in value.split(",")
+                ],
+                dtype=int,
+            )
         if key == "dataset_order":
             return [x.strip() for x in value.split(",")]
         if key == "projections":
@@ -1377,14 +1406,32 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
     ):
         raise ValueError("representation_character_tolerance must be positive and finite.")
     cfg.ebr_mode = str(cfg.ebr_mode).strip().lower()
-    if cfg.ebr_mode not in {"auto", "regular", "transverse"}:
-        raise ValueError("ebr_mode must be auto, regular, or transverse.")
+    if cfg.ebr_mode not in {"auto", "regular", "transverse", "subspace"}:
+        raise ValueError("ebr_mode must be auto, regular, transverse, or subspace.")
     if not str(cfg.ebr_catalog).strip():
         raise ValueError("ebr_catalog must not be empty.")
     if cfg.ebr_max_auxiliary_bands < 0:
         raise ValueError("ebr_max_auxiliary_bands must be non-negative.")
     if cfg.ebr_max_states <= 0:
         raise ValueError("ebr_max_states must be positive.")
+    if cfg.ebr_subspace_dimension is not None and cfg.ebr_subspace_dimension < 2:
+        raise ValueError("ebr_subspace_dimension must be at least two.")
+    if cfg.ebr_mode == "subspace" and cfg.ebr_subspace_dimension is None:
+        raise ValueError("ebr_mode=subspace requires ebr_subspace_dimension.")
+    _validate_band_window(
+        "ebr_subspace_fixed_bands",
+        cfg.ebr_subspace_fixed_bands,
+        allow_false=True,
+    )
+    if (
+        cfg.ebr_subspace_fixed_bands is not None
+        and cfg.ebr_subspace_dimension is not None
+        and len(cfg.ebr_subspace_fixed_bands) > cfg.ebr_subspace_dimension
+    ):
+        raise ValueError(
+            "ebr_subspace_fixed_bands cannot contain more bands than "
+            "ebr_subspace_dimension."
+        )
     if not np.isfinite(cfg.gamma_zero_mode_tolerance) or cfg.gamma_zero_mode_tolerance < 0.0:
         raise ValueError("gamma_zero_mode_tolerance must be finite and non-negative.")
     if cfg.symmetry_max_iter <= 0:

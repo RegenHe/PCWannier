@@ -38,6 +38,8 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.symmetry_report_file == "./sym.txt"
     assert cfg.ebr_catalog == "auto"
     assert cfg.ebr_mode == "auto"
+    assert cfg.ebr_subspace_dimension is None
+    assert cfg.ebr_subspace_fixed_bands is None
     assert cfg.ebr_max_auxiliary_bands == 6
     assert cfg.ebr_max_states == 1_000_000
     assert cfg.ebr_report_file == "./ebr.txt"
@@ -54,6 +56,22 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.symmetry_context.model.bloch_convention.sign == -1
     assert cfg.symmetry_context.model.bloch_convention.name == "comsol"
     assert cfg.symmetry_context.model.boundary_tolerance == pytest.approx(1.0e-6)
+
+
+def test_ebr_subspace_dimension_two_and_fixed_band_slice(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        _minimal_symmetry_incar()
+        + "\nebr_mode = subspace\n"
+        + "ebr_subspace_dimension = 2\n"
+        + "ebr_subspace_fixed_bands = 0:2\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(incar)
+
+    assert cfg.ebr_subspace_dimension == 2
+    assert np.array_equal(cfg.ebr_subspace_fixed_bands, [0, 1])
 
 
 def test_bloch_symmetry_config_mode_does_not_require_wannier_inputs(tmp_path):

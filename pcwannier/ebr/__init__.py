@@ -12,6 +12,8 @@ from .models import (
     EBRDefinition,
     EBRKPoint,
     EBRMatrix,
+    EBRSubspaceCandidate,
+    EBRSubspacePointSelection,
     SymmetryVectorKey,
     TETBSolution,
 )
@@ -19,6 +21,7 @@ from .output import ebr_result_to_dict, format_ebr_report, write_ebr_outputs
 from .solver import (
     EBRSearchLimitError,
     decompose_ebr,
+    enumerate_ebr_subspace_solutions,
     enumerate_tetb_decompositions,
 )
 
@@ -30,6 +33,8 @@ __all__ = [
     "EBRDefinition",
     "EBRKPoint",
     "EBRMatrix",
+    "EBRSubspaceCandidate",
+    "EBRSubspacePointSelection",
     "EBRSearchLimitError",
     "SymmetryVectorKey",
     "TETBSolution",
@@ -37,6 +42,7 @@ __all__ = [
     "build_ebr_matrix",
     "decompose_ebr",
     "ebr_result_to_dict",
+    "enumerate_ebr_subspace_solutions",
     "enumerate_tetb_decompositions",
     "format_ebr_report",
     "infer_builtin_catalog_alias",

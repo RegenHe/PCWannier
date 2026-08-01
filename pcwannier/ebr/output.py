@@ -49,7 +49,7 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
             lines.append(
                 f"  {index}: {_format_combination(decomposition.multiplicities, names)}"
             )
-    else:
+    elif result.mode == "transverse":
         physical = result.physical_tetb_solutions
         lines.extend(
             (
@@ -74,6 +74,54 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
                     ),
                 )
             )
+    else:
+        fixed = (
+            ",".join(str(band + 1) for band in result.subspace_fixed_band_indices)
+            or "none"
+        )
+        gamma_rule = (
+            "include the complete two-mode transverse Gamma singularity and use "
+            "the T+L-L surrogate"
+            if result.subspace_includes_gamma_zero_modes
+            else "exclude the Gamma zero-mode block and match an ordinary finite-frequency subspace"
+        )
+        lines.extend(
+            (
+                "",
+                f"Strict subspace candidates: {len(result.subspace_candidates)}",
+                f"Minimum auxiliary dimension: {result.optimal_auxiliary_dimension}",
+                f"Fixed bands (1-based): {fixed}",
+                f"Gamma rule: {gamma_rule}.",
+            )
+        )
+        for index, candidate in enumerate(result.subspace_candidates, start=1):
+            solution = candidate.solution
+            lines.extend(
+                (
+                    f"  candidate {index}:",
+                    f"    n_T+L = {_format_combination(solution.n_t_plus_l, names)}",
+                    f"    n_L   = {_format_combination(solution.n_l, names)}",
+                    f"    n_T   = {_format_combination(solution.n_t, names, signed=True)}",
+                    f"    auxiliary_dimension = {solution.auxiliary_dimension}",
+                    "    Gamma zero-mode surrogate = "
+                    + _format_symmetry_vector(
+                        result.symmetry_vector.row_keys, solution.gamma_surrogate
+                    ),
+                )
+            )
+            for selection in candidate.point_selections:
+                bands = ",".join(str(band + 1) for band in selection.band_indices) or "none"
+                blocks = "; ".join(
+                    ",".join(str(band + 1) for band in block)
+                    for block in selection.block_band_indices
+                ) or "none"
+                irreps = ", ".join(
+                    f"{name}={value}" for name, value in selection.irrep_multiplicities
+                ) or "none"
+                lines.append(
+                    f"    {selection.point_name}: bands={bands}; blocks={blocks}; "
+                    f"irreps={irreps}; assignments={selection.alternative_count}"
+                )
     if result.diagnostics:
         lines.extend(("", "Diagnostics:"))
         lines.extend(f"  {message}" for message in result.diagnostics)
@@ -135,6 +183,36 @@ def ebr_result_to_dict(result: EBRAnalysisResult) -> dict:
             }
             for item in result.tetb_solutions
         ],
+        "subspace_candidates": [
+            {
+                "n_t_plus_l": item.solution.n_t_plus_l.tolist(),
+                "n_l": item.solution.n_l.tolist(),
+                "n_t": item.solution.n_t.tolist(),
+                "gamma_surrogate": item.solution.gamma_surrogate.tolist(),
+                "auxiliary_dimension": item.solution.auxiliary_dimension,
+                "selected_symmetry_vector": item.selected_symmetry_vector.multiplicities.tolist(),
+                "point_selections": [
+                    {
+                        "point": selection.point_name,
+                        "bands": [band + 1 for band in selection.band_indices],
+                        "blocks": [
+                            [band + 1 for band in block]
+                            for block in selection.block_band_indices
+                        ],
+                        "irreps": dict(selection.irrep_multiplicities),
+                        "alternative_count": selection.alternative_count,
+                    }
+                    for selection in item.point_selections
+                ],
+            }
+            for item in result.subspace_candidates
+        ],
+        "subspace_fixed_bands": [
+            band + 1 for band in result.subspace_fixed_band_indices
+        ],
+        "subspace_includes_gamma_zero_modes": (
+            result.subspace_includes_gamma_zero_modes
+        ),
         "optimal_auxiliary_dimension": result.optimal_auxiliary_dimension,
         "diagnostics": list(result.diagnostics),
     }

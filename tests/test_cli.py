@@ -237,6 +237,7 @@ def test_cli_ebr_analysis_reuses_bloch_preanalysis_and_writes_results(
         mode="regular",
         regular_decompositions=(object(),),
         physical_tetb_solutions=(),
+        subspace_candidates=(),
         optimal_auxiliary_dimension=None,
     )
     calls = {}

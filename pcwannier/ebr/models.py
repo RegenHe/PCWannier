@@ -220,6 +220,50 @@ class TETBSolution:
 
 
 @dataclass(frozen=True)
+class EBRSubspacePointSelection:
+    point_name: str
+    block_band_indices: tuple[tuple[int, ...], ...]
+    irrep_multiplicities: tuple[tuple[str, int], ...]
+    alternative_count: int = 1
+
+    def __post_init__(self) -> None:
+        if not str(self.point_name).strip():
+            raise ValueError("A subspace point selection requires a point name.")
+        blocks = tuple(tuple(int(band) for band in block) for block in self.block_band_indices)
+        if any(not block or len(block) != len(set(block)) or min(block) < 0 for block in blocks):
+            raise ValueError("Subspace selections require non-empty, unique non-negative bands.")
+        flattened = tuple(band for block in blocks for band in block)
+        if len(flattened) != len(set(flattened)):
+            raise ValueError("Subspace selection blocks must not overlap.")
+        multiplicities = tuple(
+            (str(name), int(value)) for name, value in self.irrep_multiplicities
+        )
+        if any(not name.strip() or value <= 0 for name, value in multiplicities):
+            raise ValueError("Selected irrep multiplicities must be positive.")
+        if int(self.alternative_count) <= 0:
+            raise ValueError("alternative_count must be positive.")
+        object.__setattr__(self, "block_band_indices", blocks)
+        object.__setattr__(self, "irrep_multiplicities", multiplicities)
+        object.__setattr__(self, "alternative_count", int(self.alternative_count))
+
+    @property
+    def band_indices(self) -> tuple[int, ...]:
+        return tuple(band for block in self.block_band_indices for band in block)
+
+
+@dataclass(frozen=True)
+class EBRSubspaceCandidate:
+    solution: TETBSolution
+    selected_symmetry_vector: BandSymmetryVector
+    point_selections: tuple[EBRSubspacePointSelection, ...]
+
+    def __post_init__(self) -> None:
+        names = tuple(selection.point_name for selection in self.point_selections)
+        if len(names) != len(set(names)):
+            raise ValueError("A subspace candidate may contain each k point only once.")
+
+
+@dataclass(frozen=True)
 class EBRAnalysisResult:
     mode: str
     catalog: EBRCatalog
@@ -227,14 +271,21 @@ class EBRAnalysisResult:
     ebr_matrix: EBRMatrix
     regular_decompositions: tuple[EBRDecomposition, ...] = ()
     tetb_solutions: tuple[TETBSolution, ...] = ()
+    subspace_candidates: tuple[EBRSubspaceCandidate, ...] = ()
     optimal_auxiliary_dimension: int | None = None
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
+    subspace_fixed_band_indices: tuple[int, ...] = ()
+    subspace_includes_gamma_zero_modes: bool = False
 
     def __post_init__(self) -> None:
-        if self.mode not in {"regular", "transverse"}:
-            raise ValueError("EBR analysis mode must be regular or transverse.")
+        if self.mode not in {"regular", "transverse", "subspace"}:
+            raise ValueError("EBR analysis mode must be regular, transverse, or subspace.")
         if self.symmetry_vector.row_keys != self.ebr_matrix.row_keys:
             raise ValueError("EBR result vector and matrix use different symmetry rows.")
+        fixed = tuple(int(value) for value in self.subspace_fixed_band_indices)
+        if any(value < 0 for value in fixed) or len(fixed) != len(set(fixed)):
+            raise ValueError("Fixed EBR subspace bands must be unique non-negative indices.")
+        object.__setattr__(self, "subspace_fixed_band_indices", fixed)
 
     @property
     def physical_tetb_solutions(self) -> tuple[TETBSolution, ...]:

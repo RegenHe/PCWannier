@@ -152,10 +152,113 @@ def enumerate_tetb_decompositions(
     return tuple(all_solutions)
 
 
+def enumerate_ebr_subspace_solutions(
+    available: BandSymmetryVector,
+    matrix: EBRMatrix,
+    *,
+    gamma_point_name: str,
+    target_dimension: int,
+    gamma_surrogate,
+    max_auxiliary_bands: int = 6,
+    max_states: int = 1_000_000,
+    required_auxiliary_gamma_rows: tuple[int, ...] = (),
+) -> tuple[tuple[TETBSolution, BandSymmetryVector], ...]:
+    """Enumerate signed EBRs whose HSP irreps fit inside an outer-band inventory.
+
+    ``gamma_surrogate`` is nonzero only when the requested subspace includes the
+    two direction-dependent transverse Gamma zero modes.  Otherwise Gamma is
+    matched as an ordinary positive-frequency representation point.
+    """
+
+    inventory = available.reordered(matrix.row_keys)
+    if isinstance(target_dimension, bool) or int(target_dimension) < 2:
+        raise ValueError("target_dimension must be an integer of at least two.")
+    if isinstance(max_auxiliary_bands, bool) or int(max_auxiliary_bands) < 0:
+        raise ValueError("max_auxiliary_bands must be a non-negative integer.")
+    surrogate = _readonly_vector(gamma_surrogate, len(matrix.row_keys), "Gamma surrogate")
+    gamma_mask = np.asarray(
+        [key.point_name == gamma_point_name for key in matrix.row_keys], dtype=bool
+    )
+    if not np.any(gamma_mask):
+        raise ValueError(f"EBR matrix has no Gamma rows named {gamma_point_name!r}.")
+    if np.any(surrogate[~gamma_mask] != 0):
+        raise ValueError("The transverse Gamma surrogate must vanish away from Gamma.")
+    required_rows = tuple(int(value) for value in required_auxiliary_gamma_rows)
+    gamma_indices = set(np.flatnonzero(gamma_mask).tolist())
+    if any(value not in gamma_indices for value in required_rows):
+        raise ValueError("Required auxiliary-irrep rows must belong to Gamma.")
+
+    budget = _validated_budget(max_states)
+    output: list[tuple[TETBSolution, BandSymmetryVector]] = []
+    seen: set[tuple[int, ...]] = set()
+    for auxiliary_dimension in range(int(max_auxiliary_bands) + 1):
+        longitudinal = _enumerate_weighted_vectors(
+            matrix.dimensions, auxiliary_dimension, budget
+        )
+        combined = _enumerate_weighted_vectors(
+            matrix.dimensions, int(target_dimension) + auxiliary_dimension, budget
+        )
+        for n_l in longitudinal:
+            full_longitudinal = matrix.values @ n_l
+            auxiliary_kind_ok = (
+                auxiliary_dimension == 0
+                or not required_rows
+                or any(full_longitudinal[index] > 0 for index in required_rows)
+            )
+            if not auxiliary_kind_ok:
+                continue
+            for n_t_plus_l in combined:
+                n_t = n_t_plus_l - n_l
+                key = tuple(int(value) for value in n_t)
+                if key in seen:
+                    continue
+                formal = matrix.values @ n_t
+                selected = formal - surrogate
+                if np.any(selected < 0) or np.any(selected > inventory.multiplicities):
+                    continue
+                seen.add(key)
+                solution = TETBSolution(
+                    n_t_plus_l,
+                    n_l,
+                    n_t,
+                    surrogate,
+                    auxiliary_dimension,
+                    True,
+                    "fits the outer-window high-symmetry inventory",
+                )
+                output.append(
+                    (
+                        solution,
+                        BandSymmetryVector(
+                            matrix.row_keys,
+                            selected,
+                            int(target_dimension),
+                        ),
+                    )
+                )
+    output.sort(
+        key=lambda item: (
+            item[0].auxiliary_dimension,
+            tuple(int(value) for value in item[0].n_t),
+        )
+    )
+    return tuple(output)
+
+
 def _validated_budget(max_states: int) -> _SearchBudget:
     if isinstance(max_states, bool) or int(max_states) <= 0:
         raise ValueError("max_states must be a positive integer.")
     return _SearchBudget(int(max_states))
+
+
+def _readonly_vector(values, size: int, name: str) -> np.ndarray:
+    raw = np.asarray(values)
+    if raw.shape != (size,) or not np.all(np.isfinite(raw)):
+        raise ValueError(f"{name} must be a finite vector with length {size}.")
+    rounded = np.rint(raw).astype(np.int64)
+    if not np.array_equal(raw, rounded):
+        raise ValueError(f"{name} must contain integers.")
+    return rounded
 
 
 def _enumerate_weighted_vectors(

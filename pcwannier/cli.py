@@ -75,6 +75,7 @@ def parse_args(argv=None):
         help="Analyze outer-window Bloch symmetry, write S/D caches, and exit",
     )
     analysis_mode.add_argument(
+        "-e",
         "--analyze-ebr",
         action="store_true",
         help="Analyze Bloch symmetry, find EBR/TETB decompositions, and exit",
@@ -220,11 +221,13 @@ def main(argv=None) -> int:
                 write_ebr_outputs(ebr_result, config, out_dir)
             LOGGER.info(
                 "EBR analysis: catalog=%s mode=%s regular_solutions=%s "
-                "physical_tetb_solutions=%s optimal_auxiliary_dimension=%s",
+                "physical_tetb_solutions=%s subspace_candidates=%s "
+                "optimal_auxiliary_dimension=%s",
                 ebr_result.catalog.name,
                 ebr_result.mode,
                 len(ebr_result.regular_decompositions),
                 len(ebr_result.physical_tetb_solutions),
+                len(ebr_result.subspace_candidates),
                 ebr_result.optimal_auxiliary_dimension,
             )
         _log_run_summary(started_at)

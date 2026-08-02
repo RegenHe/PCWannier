@@ -26,8 +26,9 @@ from .models import (
     EBRCatalog,
     EBRDefinition,
     EBRMatrix,
+    EBRSearchStatistics,
     EBRSubspaceCandidate,
-    EBRSubspacePointSelection,
+    EBRSubspacePointRepresentation,
     SymmetryVectorKey,
 )
 from .solver import (
@@ -249,7 +250,7 @@ def run_ebr_analysis(
                 else config.ebr_subspace_fixed_bands
             )
         )
-        include_gamma_zero_modes = _validate_subspace_fixed_bands(
+        fixed_include_gamma_zero_modes = _validate_subspace_fixed_bands(
             physical_analysis,
             context,
             catalog,
@@ -266,17 +267,6 @@ def run_ebr_analysis(
             skipped_blocks=skipped_blocks,
         ).reordered(matrix.row_keys)
         diagnostics.extend(skipped_blocks)
-        surrogate = (
-            _transverse_gamma_surrogate(
-                context,
-                catalog,
-                matrix,
-                config.real_lattice_vectors,
-                field_kind,
-            )
-            if include_gamma_zero_modes
-            else np.zeros(len(matrix.row_keys), dtype=np.int64)
-        )
         auxiliary_rows = _auxiliary_gamma_rows(
             context,
             catalog,
@@ -284,31 +274,99 @@ def run_ebr_analysis(
             config.real_lattice_vectors,
             field_kind,
         )
-        algebraic = enumerate_ebr_subspace_solutions(
-            inventory,
-            matrix,
-            gamma_point_name=catalog.gamma_point.name,
-            target_dimension=target_dimension,
-            gamma_surrogate=surrogate,
-            max_auxiliary_bands=config.ebr_max_auxiliary_bands,
-            max_states=config.ebr_max_states,
-            required_auxiliary_gamma_rows=auxiliary_rows,
+        zero_dimension = _gamma_zero_mode_dimension(
+            physical_analysis,
+            context,
+            catalog,
+            config.gamma_zero_mode_tolerance,
+        )
+        gamma_sectors = _subspace_gamma_sectors(
+            fixed_include_gamma_zero_modes, zero_dimension
         )
         candidates = []
-        for solution, selected_vector in algebraic:
-            selections = _match_subspace_blocks(
-                physical_analysis,
-                context,
-                catalog,
-                selected_vector,
-                zero_tolerance=config.gamma_zero_mode_tolerance,
-                fixed_band_indices=fixed_bands,
-                include_gamma_zero_modes=include_gamma_zero_modes,
-            )
-            if selections is not None:
-                candidates.append(
-                    EBRSubspaceCandidate(solution, selected_vector, selections)
+        enumerations = []
+        for include_gamma_zero_modes in gamma_sectors:
+            surrogate = (
+                _transverse_gamma_surrogate(
+                    context,
+                    catalog,
+                    matrix,
+                    config.real_lattice_vectors,
+                    field_kind,
                 )
+                if include_gamma_zero_modes
+                else np.zeros(len(matrix.row_keys), dtype=np.int64)
+            )
+            sector_name = (
+                "include_gamma_zero_modes"
+                if include_gamma_zero_modes
+                else "exclude_gamma_zero_modes"
+            )
+            enumeration = enumerate_ebr_subspace_solutions(
+                inventory,
+                matrix,
+                gamma_point_name=catalog.gamma_point.name,
+                target_dimension=target_dimension,
+                gamma_surrogate=surrogate,
+                max_auxiliary_bands=config.ebr_max_auxiliary_bands,
+                max_states=config.ebr_max_states,
+                required_auxiliary_gamma_rows=auxiliary_rows,
+                gamma_sector=sector_name,
+            )
+            enumerations.append(enumeration)
+            for solution, selected_vector in enumeration.solutions:
+                point_representations = _match_subspace_representations(
+                    physical_analysis,
+                    context,
+                    catalog,
+                    selected_vector,
+                    zero_tolerance=config.gamma_zero_mode_tolerance,
+                    fixed_band_indices=fixed_bands,
+                    include_gamma_zero_modes=include_gamma_zero_modes,
+                )
+                if point_representations is not None:
+                    candidates.append(
+                        EBRSubspaceCandidate(
+                            solution,
+                            selected_vector,
+                            point_representations,
+                            include_gamma_zero_modes,
+                        )
+                    )
+        algebraic_count = sum(
+            len(enumeration.solutions) for enumeration in enumerations
+        )
+        search_statistics = EBRSearchStatistics(
+            complete=all(enumeration.statistics.complete for enumeration in enumerations),
+            gamma_sectors=tuple(
+                sector
+                for enumeration in enumerations
+                for sector in enumeration.statistics.gamma_sectors
+            ),
+            auxiliary_dimensions_examined=tuple(
+                sorted(
+                    {
+                        value
+                        for enumeration in enumerations
+                        for value in enumeration.statistics.auxiliary_dimensions_examined
+                    }
+                )
+            ),
+            weighted_vectors_generated=sum(
+                enumeration.statistics.weighted_vectors_generated
+                for enumeration in enumerations
+            ),
+            signed_combinations_tested=sum(
+                enumeration.statistics.signed_combinations_tested
+                for enumeration in enumerations
+            ),
+            algebraic_solutions=algebraic_count,
+            realizable_candidates=len(candidates),
+            block_realization_count=sum(
+                candidate.block_realization_count for candidate in candidates
+            ),
+            search_limit=config.ebr_max_states,
+        )
         optimal = min(
             (candidate.solution.auxiliary_dimension for candidate in candidates),
             default=None,
@@ -332,14 +390,14 @@ def run_ebr_analysis(
                     f"The EBR generator dimensions have gcd={dimension_gcd}, so a "
                     f"{target_dimension}-dimensional signed EBR combination is impossible."
                 )
-            elif not algebraic:
+            elif algebraic_count == 0:
                 diagnostics.append(
                     "No signed EBR combination fits the available high-symmetry irrep "
                     "multiplicities, even before complete band-block connectivity is imposed."
                 )
             else:
                 diagnostics.append(
-                    f"{len(algebraic)} algebraic EBR candidate(s) fit the irrep inventory, "
+                    f"{algebraic_count} algebraic EBR candidate(s) fit the irrep inventory, "
                     "but none can be assembled from complete numerical degenerate blocks at "
                     "every catalog k point."
                 )
@@ -358,7 +416,7 @@ def run_ebr_analysis(
             optimal_auxiliary_dimension=optimal,
             diagnostics=tuple(diagnostics),
             subspace_fixed_band_indices=fixed_bands,
-            subspace_includes_gamma_zero_modes=include_gamma_zero_modes,
+            search_statistics=search_statistics,
         )
 
     vector = _build_transverse_symmetry_vector(
@@ -429,8 +487,8 @@ def _build_subspace_inventory(
                 if skipped_blocks is not None:
                     reason = block.irrep_unavailable_reason or "no exact irrep decomposition"
                     skipped_blocks.append(
-                        f"Ignored incomplete block at {point.name}: bands(1-based)="
-                        f"{tuple(band + 1 for band in block.band_indices)}; reason={reason}."
+                        f"Ignored incomplete block at {point.name}: bands(0-based)="
+                        f"{tuple(block.band_indices)}; reason={reason}."
                     )
                 continue
             for name, multiplicity in block.decomposition.multiplicities.items():
@@ -444,7 +502,7 @@ def _build_subspace_inventory(
     return BandSymmetryVector(tuple(rows), np.asarray(values), dimensions[0])
 
 
-def _match_subspace_blocks(
+def _match_subspace_representations(
     analysis: BlochSymmetryAnalysisResult,
     context: SymmetryContext,
     catalog: EBRCatalog,
@@ -453,7 +511,7 @@ def _match_subspace_blocks(
     zero_tolerance: float,
     fixed_band_indices: tuple[int, ...] = (),
     include_gamma_zero_modes: bool = False,
-) -> tuple[EBRSubspacePointSelection, ...] | None:
+) -> tuple[EBRSubspacePointRepresentation, ...] | None:
     positions = {key: index for index, key in enumerate(vector.row_keys)}
     output = []
     for catalog_point in catalog.k_points:
@@ -491,39 +549,39 @@ def _match_subspace_blocks(
                     dtype=np.int64,
                 )
             )
-        matches: list[tuple[int, ...]] = []
+        match_count = 0
 
         zero_selection = zero_blocks if include_gamma_zero_modes else ()
         zero_dimension = sum(len(block.band_indices) for block in zero_selection)
 
-        def select(index: int, current: np.ndarray, chosen: tuple[int, ...]) -> None:
+        def select(index: int, current: np.ndarray, selected_dimension: int) -> None:
+            nonlocal match_count
             if np.any(current > target):
                 return
             if index == len(blocks):
-                selected_dimension = zero_dimension + sum(
-                    len(blocks[item].band_indices) for item in chosen
-                )
                 if (
                     np.array_equal(current, target)
-                    and selected_dimension == vector.total_dimension
+                    and zero_dimension + selected_dimension == vector.total_dimension
                 ):
-                    matches.append(chosen)
+                    match_count += 1
                 return
             if not required[index]:
-                select(index + 1, current, chosen)
-            select(index + 1, current + contributions[index], chosen + (index,))
+                select(index + 1, current, selected_dimension)
+            select(
+                index + 1,
+                current + contributions[index],
+                selected_dimension + len(blocks[index].band_indices),
+            )
 
-        select(0, np.zeros_like(target), ())
-        if not matches:
+        select(0, np.zeros_like(target), 0)
+        if match_count == 0:
             return None
-        chosen = matches[0]
         output.append(
-            EBRSubspacePointSelection(
+            EBRSubspacePointRepresentation(
                 catalog_point.name,
-                tuple(block.band_indices for block in zero_selection)
-                + tuple(blocks[index].band_indices for index in chosen),
                 tuple((name, int(value)) for name, value in zip(names, target) if value),
-                len(matches),
+                zero_dimension,
+                match_count,
             )
         )
     return tuple(output)
@@ -548,7 +606,7 @@ def _validate_subspace_fixed_bands(
         missing = sorted(fixed - available)
         if missing:
             raise ValueError(
-                f"Fixed EBR subspace bands {tuple(value + 1 for value in missing)} are "
+                f"Fixed EBR subspace bands {tuple(missing)} are "
                 f"not present at representation point {point.name!r}."
             )
         required_dimension = 0
@@ -565,7 +623,7 @@ def _validate_subspace_fixed_bands(
                 reason = block.irrep_unavailable_reason or "no exact irrep decomposition"
                 raise ValueError(
                     f"Fixed EBR subspace band at {point.name!r} belongs to incomplete "
-                    f"block {tuple(value + 1 for value in block.band_indices)}: {reason}."
+                    f"block {tuple(block.band_indices)}: {reason}."
                 )
             required_dimension += len(block.band_indices)
         if required_dimension > target_dimension:
@@ -590,6 +648,35 @@ def _validate_subspace_fixed_bands(
                 f"{zero_dimension}."
             )
     return include_gamma_zero_modes
+
+
+def _gamma_zero_mode_dimension(
+    analysis: BlochSymmetryAnalysisResult,
+    context: SymmetryContext,
+    catalog: EBRCatalog,
+    zero_tolerance: float,
+) -> int:
+    gamma = _matching_analysis_point(
+        analysis, catalog.gamma_point, context.model.tolerance
+    )
+    return sum(
+        len(block.band_indices)
+        for block in gamma.degenerate_blocks
+        if _is_zero_block(block, zero_tolerance)
+    )
+
+
+def _subspace_gamma_sectors(
+    fixed_include_gamma_zero_modes: bool,
+    zero_mode_dimension: int,
+) -> tuple[bool, ...]:
+    if fixed_include_gamma_zero_modes:
+        if zero_mode_dimension != 2:
+            raise ValueError(
+                "Fixed Gamma zero modes require exactly two transverse zero modes."
+            )
+        return (True,)
+    return (False, True) if zero_mode_dimension == 2 else (False,)
 
 
 def _is_zero_block(block, tolerance: float) -> bool:

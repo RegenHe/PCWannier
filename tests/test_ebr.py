@@ -14,10 +14,12 @@ from pcwannier.ebr import (
     EBRDefinition,
     EBRKPoint,
     EBRMatrix,
+    EBRSearchStatistics,
     EBRSearchLimitError,
     EBRSubspaceCandidate,
-    EBRSubspacePointSelection,
+    EBRSubspacePointRepresentation,
     SymmetryVectorKey,
+    TETBSolution,
     build_band_symmetry_vector,
     build_ebr_matrix,
     decompose_ebr,
@@ -28,7 +30,9 @@ from pcwannier.ebr import (
 )
 from pcwannier.ebr.analysis import (
     _build_subspace_inventory,
-    _match_subspace_blocks,
+    _gamma_zero_mode_dimension,
+    _match_subspace_representations,
+    _subspace_gamma_sectors,
     _validate_subspace_fixed_bands,
 )
 from pcwannier.symmetry.analysis import (
@@ -265,7 +269,7 @@ def test_subspace_solver_keeps_positive_gamma_constraints_and_zero_mode_surrogat
     columns = (EBRDefinition("target", "1a", np.zeros(1), "A"),)
     matrix = EBRMatrix(rows, columns, np.asarray([[1], [1], [1]]), np.asarray([4]))
     inventory = BandSymmetryVector(rows, np.asarray([1, 0, 1]), 8)
-    solutions = enumerate_ebr_subspace_solutions(
+    enumeration = enumerate_ebr_subspace_solutions(
         inventory,
         matrix,
         gamma_point_name="Gamma",
@@ -273,7 +277,11 @@ def test_subspace_solver_keeps_positive_gamma_constraints_and_zero_mode_surrogat
         gamma_surrogate=np.asarray([0, 1, 0]),
         max_auxiliary_bands=0,
     )
+    solutions = enumeration.solutions
     assert len(solutions) == 1
+    assert enumeration.statistics.complete
+    assert enumeration.statistics.weighted_vectors_generated > 0
+    assert enumeration.statistics.signed_combinations_tested > 0
     solution, selected = solutions[0]
     assert np.array_equal(solution.n_t, [1])
     assert np.array_equal(selected.multiplicities, [1, 0, 1])
@@ -286,7 +294,7 @@ def test_subspace_solver_keeps_positive_gamma_constraints_and_zero_mode_surrogat
         target_dimension=4,
         gamma_surrogate=np.asarray([0, 1, 0]),
         max_auxiliary_bands=0,
-    ) == ()
+    ).solutions == ()
 
     two_band_matrix = EBRMatrix(
         (SymmetryVectorKey("Gamma", "A"),),
@@ -305,8 +313,68 @@ def test_subspace_solver_keeps_positive_gamma_constraints_and_zero_mode_surrogat
             target_dimension=2,
             gamma_surrogate=np.zeros(1, dtype=int),
             max_auxiliary_bands=0,
-        )
+        ).solutions
     ) == 1
+
+
+def test_subspace_search_covers_both_gamma_zero_mode_sectors_and_sg224_target(
+    sg224_matrix,
+):
+    assert _subspace_gamma_sectors(False, 2) == (False, True)
+    assert _subspace_gamma_sectors(True, 2) == (True,)
+    assert _subspace_gamma_sectors(False, 0) == (False,)
+
+    zero_blocks = (
+        SimpleNamespace(band_indices=(0, 1), energies=(0.0, 0.0)),
+        SimpleNamespace(band_indices=(2,), energies=(1.0,)),
+    )
+    gamma_point = SimpleNamespace(
+        name="Gamma",
+        requested_k_fractional=np.zeros(1),
+        degenerate_blocks=zero_blocks,
+    )
+    analysis = SimpleNamespace(points=(gamma_point,))
+    context = SimpleNamespace(model=SimpleNamespace(tolerance=1.0e-8))
+    catalog_point = SimpleNamespace(name="Gamma", k_fractional=np.zeros(1))
+    catalog = SimpleNamespace(gamma_point=catalog_point)
+    assert _gamma_zero_mode_dimension(
+        analysis, context, catalog, 1.0e-10
+    ) == 2
+
+    matrix = sg224_matrix
+    names = [column.name for column in matrix.columns]
+    signed = np.zeros(len(names), dtype=np.int64)
+    signed[names.index("A2g@4b")] = 1
+    signed[names.index("A2g@4c")] = 1
+    signed[names.index("A2@2a")] = -1
+    formal = matrix.values @ signed
+    surrogate = np.zeros(len(matrix.row_keys), dtype=np.int64)
+    required_row = None
+    for index, key in enumerate(matrix.row_keys):
+        if key.point_name != "Gamma":
+            continue
+        if key.irrep_name == "T1g":
+            surrogate[index] = 1
+        elif key.irrep_name == "A1u":
+            surrogate[index] = -1
+            required_row = index
+    assert required_row is not None
+    selected = formal - surrogate
+    assert np.all(selected >= 0)
+    inventory = BandSymmetryVector(matrix.row_keys, selected, 30)
+    enumeration = enumerate_ebr_subspace_solutions(
+        inventory,
+        matrix,
+        gamma_point_name="Gamma",
+        target_dimension=6,
+        gamma_surrogate=surrogate,
+        max_auxiliary_bands=2,
+        required_auxiliary_gamma_rows=(required_row,),
+        gamma_sector="include_gamma_zero_modes",
+    )
+    assert enumeration.statistics.complete
+    assert enumeration.statistics.gamma_sectors == ("include_gamma_zero_modes",)
+    assert any(np.array_equal(solution.n_t, signed) for solution, _ in enumeration.solutions)
 
 
 def test_subspace_inventory_ignores_incomplete_outer_window_boundary_block():
@@ -362,21 +430,23 @@ def test_subspace_inventory_ignores_incomplete_outer_window_boundary_block():
 
     assert np.array_equal(inventory.multiplicities, [1])
     assert len(skipped) == 1
-    assert "bands(1-based)=(4,)" in skipped[0]
+    assert "bands(0-based)=(3,)" in skipped[0]
 
     selected = BandSymmetryVector(
         inventory.row_keys, inventory.multiplicities, total_dimension=1
     )
-    selections = _match_subspace_blocks(
+    representations = _match_subspace_representations(
         analysis,
         context,
         catalog,
         selected,
         zero_tolerance=1.0e-10,
     )
-    assert selections is not None
-    assert len(selections) == 1
-    assert selections[0].band_indices == (2,)
+    assert representations is not None
+    assert len(representations) == 1
+    assert representations[0].irrep_multiplicities == (("A", 1),)
+    assert representations[0].unresolved_dimension == 0
+    assert representations[0].alternative_count == 1
 
     assert not _validate_subspace_fixed_bands(
         analysis,
@@ -394,7 +464,7 @@ def test_subspace_inventory_ignores_incomplete_outer_window_boundary_block():
         target_dimension=3,
         zero_tolerance=1.0e-10,
     )
-    fixed_selection = _match_subspace_blocks(
+    fixed_representation = _match_subspace_representations(
         analysis,
         context,
         catalog,
@@ -405,8 +475,9 @@ def test_subspace_inventory_ignores_incomplete_outer_window_boundary_block():
         fixed_band_indices=(0, 1),
         include_gamma_zero_modes=True,
     )
-    assert fixed_selection is not None
-    assert fixed_selection[0].band_indices == (0, 1, 2)
+    assert fixed_representation is not None
+    assert fixed_representation[0].irrep_multiplicities == (("A", 1),)
+    assert fixed_representation[0].unresolved_dimension == 2
 
 
 def test_band_vector_rejects_nonexact_physical_decomposition():
@@ -463,3 +534,80 @@ def test_ebr_json_output_round_trip(tmp_path):
     assert "Regular decompositions: 1" in (tmp_path / "ebr.txt").read_text(
         encoding="utf-8"
     )
+
+
+def test_subspace_output_reports_representations_without_arbitrary_band_assignment(
+    tmp_path,
+):
+    rows = (
+        SymmetryVectorKey("Gamma", "A1u"),
+        SymmetryVectorKey("Gamma", "T1g"),
+    )
+    columns = (
+        EBRDefinition("negative", "1a", np.zeros(1), "A1u"),
+        EBRDefinition("positive", "1b", np.zeros(1), "T1g"),
+    )
+    matrix = EBRMatrix(
+        rows,
+        columns,
+        np.asarray([[1, 0], [0, 1]]),
+        np.asarray([1, 3]),
+    )
+    selected = BandSymmetryVector(rows, np.asarray([0, 1]), 5)
+    solution = TETBSolution(
+        np.asarray([0, 1]),
+        np.asarray([1, 0]),
+        np.asarray([-1, 1]),
+        np.asarray([-1, 1]),
+        1,
+        True,
+        "fixture",
+    )
+    candidate = EBRSubspaceCandidate(
+        solution,
+        selected,
+        (
+            EBRSubspacePointRepresentation(
+                "Gamma", (("T1g", 1),), unresolved_dimension=2, alternative_count=3
+            ),
+        ),
+        includes_gamma_zero_modes=True,
+    )
+    result = EBRAnalysisResult(
+        "subspace",
+        EBRCatalog(
+            "fixture",
+            1,
+            1,
+            (EBRKPoint("Gamma", np.zeros(1)),),
+            columns,
+        ),
+        selected,
+        matrix,
+        subspace_candidates=(candidate,),
+        search_statistics=EBRSearchStatistics(
+            complete=True,
+            realizable_candidates=1,
+            block_realization_count=3,
+        ),
+    )
+    config = SimpleNamespace(
+        ebr_report_file="ebr.txt",
+        ebr_data_file="ebr.json",
+        base_dir=tmp_path,
+    )
+
+    write_ebr_outputs(result, config, tmp_path)
+
+    report = (tmp_path / "ebr.txt").read_text(encoding="utf-8")
+    assert "physical=2 unresolved transverse zero modes + T1g" in report
+    assert "formal_signed=-A1u + T1g" in report
+    assert "bands=" not in report
+    assert "blocks=" not in report
+    payload = json.loads((tmp_path / "ebr.json").read_text(encoding="utf-8"))
+    point = payload["subspace_candidates"][0]["point_representations"][0]
+    assert point["physical_irreps"] == {"T1g": 1}
+    assert point["formal_signed_irreps"] == {"A1u": -1, "T1g": 1}
+    assert point["unresolved_dimension"] == 2
+    assert "bands" not in point
+    assert "blocks" not in point

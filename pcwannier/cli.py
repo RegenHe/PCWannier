@@ -222,13 +222,29 @@ def main(argv=None) -> int:
             LOGGER.info(
                 "EBR analysis: catalog=%s mode=%s regular_solutions=%s "
                 "physical_tetb_solutions=%s subspace_candidates=%s "
-                "optimal_auxiliary_dimension=%s",
+                "optimal_auxiliary_dimension=%s search_complete=%s "
+                "algebraic_solutions=%s block_realizations=%s",
                 ebr_result.catalog.name,
                 ebr_result.mode,
                 len(ebr_result.regular_decompositions),
                 len(ebr_result.physical_tetb_solutions),
                 len(ebr_result.subspace_candidates),
                 ebr_result.optimal_auxiliary_dimension,
+                (
+                    None
+                    if ebr_result.search_statistics is None
+                    else ebr_result.search_statistics.complete
+                ),
+                (
+                    None
+                    if ebr_result.search_statistics is None
+                    else ebr_result.search_statistics.algebraic_solutions
+                ),
+                (
+                    None
+                    if ebr_result.search_statistics is None
+                    else ebr_result.search_statistics.block_realization_count
+                ),
             )
         _log_run_summary(started_at)
         return 0

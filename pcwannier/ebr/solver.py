@@ -9,6 +9,8 @@ from .models import (
     BandSymmetryVector,
     EBRDecomposition,
     EBRMatrix,
+    EBRSearchStatistics,
+    EBRSubspaceEnumeration,
     TETBSolution,
 )
 
@@ -21,14 +23,21 @@ class EBRSearchLimitError(RuntimeError):
 class _SearchBudget:
     limit: int
     visited: int = 0
+    signed_combinations: int = 0
 
     def consume(self) -> None:
         self.visited += 1
         if self.visited > self.limit:
             raise EBRSearchLimitError(
                 f"EBR enumeration exceeded ebr_max_states={self.limit}; "
-                "reduce the catalog or increase the explicit search limit."
+                f"generated_vectors={self.visited}, "
+                f"signed_combinations_tested={self.signed_combinations}. "
+                "The search is incomplete; reduce the catalog or increase the explicit "
+                "search limit."
             )
+
+    def consume_signed_combination(self) -> None:
+        self.signed_combinations += 1
 
 
 def decompose_ebr(
@@ -162,7 +171,8 @@ def enumerate_ebr_subspace_solutions(
     max_auxiliary_bands: int = 6,
     max_states: int = 1_000_000,
     required_auxiliary_gamma_rows: tuple[int, ...] = (),
-) -> tuple[tuple[TETBSolution, BandSymmetryVector], ...]:
+    gamma_sector: str = "requested",
+) -> EBRSubspaceEnumeration:
     """Enumerate signed EBRs whose HSP irreps fit inside an outer-band inventory.
 
     ``gamma_surrogate`` is nonzero only when the requested subspace includes the
@@ -208,6 +218,7 @@ def enumerate_ebr_subspace_solutions(
             if not auxiliary_kind_ok:
                 continue
             for n_t_plus_l in combined:
+                budget.consume_signed_combination()
                 n_t = n_t_plus_l - n_l
                 key = tuple(int(value) for value in n_t)
                 if key in seen:
@@ -242,7 +253,21 @@ def enumerate_ebr_subspace_solutions(
             tuple(int(value) for value in item[0].n_t),
         )
     )
-    return tuple(output)
+    solutions = tuple(output)
+    return EBRSubspaceEnumeration(
+        solutions,
+        EBRSearchStatistics(
+            complete=True,
+            gamma_sectors=(gamma_sector,),
+            auxiliary_dimensions_examined=tuple(
+                range(int(max_auxiliary_bands) + 1)
+            ),
+            weighted_vectors_generated=budget.visited,
+            signed_combinations_tested=budget.signed_combinations,
+            algebraic_solutions=len(solutions),
+            search_limit=budget.limit,
+        ),
+    )
 
 
 def _validated_budget(max_states: int) -> _SearchBudget:

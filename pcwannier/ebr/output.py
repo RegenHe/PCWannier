@@ -76,26 +76,45 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
             )
     else:
         fixed = (
-            ",".join(str(band + 1) for band in result.subspace_fixed_band_indices)
+            ",".join(str(band) for band in result.subspace_fixed_band_indices)
             or "none"
-        )
-        gamma_rule = (
-            "include the complete two-mode transverse Gamma singularity and use "
-            "the T+L-L surrogate"
-            if result.subspace_includes_gamma_zero_modes
-            else "exclude the Gamma zero-mode block and match an ordinary finite-frequency subspace"
         )
         lines.extend(
             (
                 "",
                 f"Strict subspace candidates: {len(result.subspace_candidates)}",
                 f"Minimum auxiliary dimension: {result.optimal_auxiliary_dimension}",
-                f"Fixed bands (1-based): {fixed}",
-                f"Gamma rule: {gamma_rule}.",
+                f"Fixed bands (0-based): {fixed}",
             )
         )
+        statistics = result.search_statistics
+        if statistics is not None:
+            lines.extend(
+                (
+                    "",
+                    "Search statistics:",
+                    f"  complete: {str(statistics.complete).lower()}",
+                    f"  gamma_sectors: {', '.join(statistics.gamma_sectors) or 'none'}",
+                    "  auxiliary_dimensions_examined: "
+                    + (",".join(str(value) for value in statistics.auxiliary_dimensions_examined) or "none"),
+                    f"  weighted_vectors_generated: {statistics.weighted_vectors_generated}",
+                    f"  signed_combinations_tested: {statistics.signed_combinations_tested}",
+                    f"  algebraic_solutions: {statistics.algebraic_solutions}",
+                    f"  realizable_ebr_candidates: {statistics.realizable_candidates}",
+                    f"  complete_block_realizations: {statistics.block_realization_count}",
+                    f"  max_states_per_sector: {statistics.search_limit}",
+                    "  completeness_scope: EBR coefficients and independent complete "
+                    "high-symmetry-point block realizations; global band connectivity is not tested",
+                )
+            )
         for index, candidate in enumerate(result.subspace_candidates, start=1):
             solution = candidate.solution
+            gamma_rule = (
+                "include the complete two-mode transverse Gamma singularity and use "
+                "the T+L-L surrogate"
+                if candidate.includes_gamma_zero_modes
+                else "exclude the Gamma zero-mode block"
+            )
             lines.extend(
                 (
                     f"  candidate {index}:",
@@ -103,24 +122,29 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
                     f"    n_L   = {_format_combination(solution.n_l, names)}",
                     f"    n_T   = {_format_combination(solution.n_t, names, signed=True)}",
                     f"    auxiliary_dimension = {solution.auxiliary_dimension}",
+                    f"    Gamma rule = {gamma_rule}",
+                    f"    complete_block_realizations = {candidate.block_realization_count}",
                     "    Gamma zero-mode surrogate = "
                     + _format_symmetry_vector(
                         result.symmetry_vector.row_keys, solution.gamma_surrogate
                     ),
                 )
             )
-            for selection in candidate.point_selections:
-                bands = ",".join(str(band + 1) for band in selection.band_indices) or "none"
-                blocks = "; ".join(
-                    ",".join(str(band + 1) for band in block)
-                    for block in selection.block_band_indices
-                ) or "none"
-                irreps = ", ".join(
-                    f"{name}={value}" for name, value in selection.irrep_multiplicities
-                ) or "none"
+            formal_vector = result.ebr_matrix.values @ solution.n_t
+            for point in candidate.point_representations:
+                physical = _format_physical_point_representation(
+                    point.irrep_multiplicities,
+                    unresolved_dimension=point.unresolved_dimension,
+                )
+                formal = _format_point_symmetry_vector(
+                    result.ebr_matrix.row_keys,
+                    formal_vector,
+                    point.point_name,
+                )
                 lines.append(
-                    f"    {selection.point_name}: bands={bands}; blocks={blocks}; "
-                    f"irreps={irreps}; assignments={selection.alternative_count}"
+                    f"    {point.point_name}: physical={physical}; "
+                    f"formal_signed={formal}; "
+                    f"block_realizations={point.alternative_count}"
                 )
     if result.diagnostics:
         lines.extend(("", "Diagnostics:"))
@@ -191,27 +215,42 @@ def ebr_result_to_dict(result: EBRAnalysisResult) -> dict:
                 "gamma_surrogate": item.solution.gamma_surrogate.tolist(),
                 "auxiliary_dimension": item.solution.auxiliary_dimension,
                 "selected_symmetry_vector": item.selected_symmetry_vector.multiplicities.tolist(),
-                "point_selections": [
+                "point_representations": [
                     {
-                        "point": selection.point_name,
-                        "bands": [band + 1 for band in selection.band_indices],
-                        "blocks": [
-                            [band + 1 for band in block]
-                            for block in selection.block_band_indices
-                        ],
-                        "irreps": dict(selection.irrep_multiplicities),
-                        "alternative_count": selection.alternative_count,
+                        "point": point.point_name,
+                        "physical_irreps": dict(point.irrep_multiplicities),
+                        "formal_signed_irreps": _point_symmetry_multiplicities(
+                            result.ebr_matrix.row_keys,
+                            result.ebr_matrix.values @ item.solution.n_t,
+                            point.point_name,
+                        ),
+                        "unresolved_dimension": point.unresolved_dimension,
+                        "alternative_count": point.alternative_count,
                     }
-                    for selection in item.point_selections
+                    for point in item.point_representations
                 ],
+                "includes_gamma_zero_modes": item.includes_gamma_zero_modes,
+                "block_realization_count": item.block_realization_count,
             }
             for item in result.subspace_candidates
         ],
-        "subspace_fixed_bands": [
-            band + 1 for band in result.subspace_fixed_band_indices
-        ],
-        "subspace_includes_gamma_zero_modes": (
-            result.subspace_includes_gamma_zero_modes
+        "subspace_fixed_bands": list(result.subspace_fixed_band_indices),
+        "search_statistics": (
+            None
+            if result.search_statistics is None
+            else {
+                "complete": result.search_statistics.complete,
+                "gamma_sectors": list(result.search_statistics.gamma_sectors),
+                "auxiliary_dimensions_examined": list(
+                    result.search_statistics.auxiliary_dimensions_examined
+                ),
+                "weighted_vectors_generated": result.search_statistics.weighted_vectors_generated,
+                "signed_combinations_tested": result.search_statistics.signed_combinations_tested,
+                "algebraic_solutions": result.search_statistics.algebraic_solutions,
+                "realizable_candidates": result.search_statistics.realizable_candidates,
+                "block_realization_count": result.search_statistics.block_realization_count,
+                "search_limit": result.search_statistics.search_limit,
+            }
         ),
         "optimal_auxiliary_dimension": result.optimal_auxiliary_dimension,
         "diagnostics": list(result.diagnostics),
@@ -244,6 +283,35 @@ def _format_symmetry_vector(keys, values) -> str:
         if int(value) != 0
     ]
     return ", ".join(entries) or "0"
+
+
+def _format_physical_point_representation(
+    multiplicities, *, unresolved_dimension: int = 0
+) -> str:
+    terms = []
+    if unresolved_dimension:
+        terms.append(f"{int(unresolved_dimension)} unresolved transverse zero modes")
+    for name, raw in multiplicities:
+        value = int(raw)
+        terms.append(str(name) if value == 1 else f"{value} {name}")
+    return " + ".join(terms) or "0"
+
+
+def _point_symmetry_multiplicities(keys, values, point_name: str) -> dict[str, int]:
+    return {
+        key.irrep_name: int(value)
+        for key, value in zip(keys, values)
+        if key.point_name == point_name and int(value) != 0
+    }
+
+
+def _format_point_symmetry_vector(keys, values, point_name: str) -> str:
+    multiplicities = _point_symmetry_multiplicities(keys, values, point_name)
+    return _format_combination(
+        tuple(multiplicities.values()),
+        tuple(multiplicities),
+        signed=True,
+    )
 
 
 def _resolve_output(value, base_dir, out_dir) -> Path | None:

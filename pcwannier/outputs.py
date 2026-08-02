@@ -270,7 +270,7 @@ def write_interpolation_outputs(
                             mesh, wmat[:, band], points, tile_count
                         )
                     )
-                    labels.append(f"W[{cell_label},{band + 1}]")
+                    labels.append(f"W[{cell_label},{band}]")
             elif wmat.ndim == 3 and wmat.shape[2] == dimension:
                 for band in range(wmat.shape[1]):
                     interpolated = _interpolate_complex_mesh(
@@ -281,7 +281,7 @@ def write_interpolation_outputs(
                         for component in range(dimension)
                     )
                     labels.extend(
-                        f"W[{cell_label},{band + 1}].{axis}"
+                        f"W[{cell_label},{band}].{axis}"
                         for axis in ("x", "y", "z")[:dimension]
                     )
             else:

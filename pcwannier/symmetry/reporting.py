@@ -16,12 +16,12 @@ LOGGER = logging.getLogger(__name__)
 
 def log_gamma_zero_regularization(result: GammaZeroRegularizationAnalysis) -> None:
     LOGGER.info(
-        "Gamma T+L regularization %s: physical_T_bands(1-based)=%s "
-        "longitudinal_zero_bands(1-based)=%s irrep=%s unitarity=%.6g "
+        "Gamma T+L regularization %s: physical_T_bands(0-based)=%s "
+        "longitudinal_zero_bands(0-based)=%s irrep=%s unitarity=%.6g "
         "twisted_composition=%.6g note=%s",
         result.point_name,
-        tuple(value + 1 for value in result.transverse_band_indices),
-        tuple(value + 1 for value in result.longitudinal_zero_band_indices),
+        tuple(result.transverse_band_indices),
+        tuple(result.longitudinal_zero_band_indices),
         (
             "unavailable"
             if result.decomposition is None
@@ -36,14 +36,14 @@ def log_gamma_zero_regularization(result: GammaZeroRegularizationAnalysis) -> No
 def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
     for point in result.points:
         blocks = tuple(
-            tuple(band + 1 for band in block.band_indices)
+            tuple(block.band_indices)
             for block in point.degenerate_blocks
         )
         factor = point.factor_system
         LOGGER.info(
             "Bloch symmetry point %s: little_co_group=%s unitary_subgroup=%s "
             "unitary_operations=%s antiunitary_operations=%s classes=%s mapping=%s k=%s "
-            "outer_bands(1-based)=%s analyzed_bands(1-based)=%s blocks=%s "
+            "outer_bands(0-based)=%s analyzed_bands(0-based)=%s blocks=%s "
             "unitarity=%.6g outer_unitarity=%.6g leakage=%.6g "
             "outer_exact_composition=%.6g selected_twisted_composition=%.6g "
             "factor_phase=%.6g factor_cocycle=%.6g "
@@ -57,8 +57,8 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             point.conjugacy_classes,
             point.finite_group_mapping,
             point.sampled_k_fractional.tolist(),
-            tuple(band + 1 for band in point.outer_band_indices),
-            tuple(band + 1 for band in point.band_indices),
+            tuple(point.outer_band_indices),
+            tuple(point.band_indices),
             blocks,
             point.diagnostics.unitarity_error,
             point.outer_unitarity_error,
@@ -83,20 +83,20 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
         for block in point.degenerate_blocks:
             label = _format_block_irrep(block, include_unavailable_reason=True)
             LOGGER.info(
-                "Bloch symmetry block %s bands(1-based)=%s eigenvalues=%s degeneracy=%s "
+                "Bloch symmetry block %s bands(0-based)=%s eigenvalues=%s degeneracy=%s "
                 "irrep=%s class_character_summary=%s "
-                "unitary_characters=%s coupled_outer_bands(1-based)=%s "
-                "candidate_excluded_bands(1-based)=%s unitarity=%.6g leakage=%.6g "
+                "unitary_characters=%s coupled_outer_bands(0-based)=%s "
+                "candidate_excluded_bands(0-based)=%s unitarity=%.6g leakage=%.6g "
                 "twisted_composition=%.6g character_fit_error=%s",
                 point.name,
-                tuple(band + 1 for band in block.band_indices),
+                tuple(block.band_indices),
                 tuple(complex(value) for value in block.energies),
                 len(block.band_indices),
                 label,
                 _class_character_entries(point, block),
                 {name: complex(value) for name, value in block.unitary_characters.items()},
-                tuple(band + 1 for band in block.coupled_outer_bands),
-                tuple(band + 1 for band in block.candidate_excluded_bands),
+                tuple(block.coupled_outer_bands),
+                tuple(block.candidate_excluded_bands),
                 block.unitarity_error,
                 block.leakage,
                 block.twisted_composition_residual,
@@ -104,10 +104,10 @@ def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
             )
             for diagnostic in block.antiunitary_diagnostics:
                 LOGGER.info(
-                    "Bloch antiunitary block %s bands(1-based)=%s operation=%s square=%s "
+                    "Bloch antiunitary block %s bands(0-based)=%s operation=%s square=%s "
                     "square_eigenvalues=%s square_residual=%.6g",
                     point.name,
-                    tuple(band + 1 for band in block.band_indices),
+                    tuple(block.band_indices),
                     diagnostic.operation_name,
                     diagnostic.square_operation_name,
                     diagnostic.square_eigenvalues,
@@ -315,7 +315,7 @@ def _class_character_entries(point, block):
 
 
 def _format_bands(indices) -> str:
-    values = tuple(int(value) + 1 for value in indices)
+    values = tuple(int(value) for value in indices)
     return ",".join(str(value) for value in values) or "none"
 
 

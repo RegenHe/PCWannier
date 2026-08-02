@@ -239,6 +239,7 @@ def test_cli_ebr_analysis_reuses_bloch_preanalysis_and_writes_results(
         physical_tetb_solutions=(),
         subspace_candidates=(),
         optimal_auxiliary_dimension=None,
+        search_statistics=None,
     )
     calls = {}
 

@@ -220,47 +220,89 @@ class TETBSolution:
 
 
 @dataclass(frozen=True)
-class EBRSubspacePointSelection:
+class EBRSubspacePointRepresentation:
     point_name: str
-    block_band_indices: tuple[tuple[int, ...], ...]
     irrep_multiplicities: tuple[tuple[str, int], ...]
+    unresolved_dimension: int = 0
     alternative_count: int = 1
 
     def __post_init__(self) -> None:
         if not str(self.point_name).strip():
-            raise ValueError("A subspace point selection requires a point name.")
-        blocks = tuple(tuple(int(band) for band in block) for block in self.block_band_indices)
-        if any(not block or len(block) != len(set(block)) or min(block) < 0 for block in blocks):
-            raise ValueError("Subspace selections require non-empty, unique non-negative bands.")
-        flattened = tuple(band for block in blocks for band in block)
-        if len(flattened) != len(set(flattened)):
-            raise ValueError("Subspace selection blocks must not overlap.")
+            raise ValueError("A subspace point representation requires a point name.")
         multiplicities = tuple(
             (str(name), int(value)) for name, value in self.irrep_multiplicities
         )
         if any(not name.strip() or value <= 0 for name, value in multiplicities):
-            raise ValueError("Selected irrep multiplicities must be positive.")
+            raise ValueError("Physical irrep multiplicities must be positive.")
+        if len({name for name, _ in multiplicities}) != len(multiplicities):
+            raise ValueError("Physical irrep names must be unique at each k point.")
+        if int(self.unresolved_dimension) < 0:
+            raise ValueError("unresolved_dimension must be non-negative.")
         if int(self.alternative_count) <= 0:
             raise ValueError("alternative_count must be positive.")
-        object.__setattr__(self, "block_band_indices", blocks)
         object.__setattr__(self, "irrep_multiplicities", multiplicities)
+        object.__setattr__(self, "unresolved_dimension", int(self.unresolved_dimension))
         object.__setattr__(self, "alternative_count", int(self.alternative_count))
-
-    @property
-    def band_indices(self) -> tuple[int, ...]:
-        return tuple(band for block in self.block_band_indices for band in block)
 
 
 @dataclass(frozen=True)
 class EBRSubspaceCandidate:
     solution: TETBSolution
     selected_symmetry_vector: BandSymmetryVector
-    point_selections: tuple[EBRSubspacePointSelection, ...]
+    point_representations: tuple[EBRSubspacePointRepresentation, ...]
+    includes_gamma_zero_modes: bool = False
 
     def __post_init__(self) -> None:
-        names = tuple(selection.point_name for selection in self.point_selections)
+        names = tuple(item.point_name for item in self.point_representations)
         if len(names) != len(set(names)):
             raise ValueError("A subspace candidate may contain each k point only once.")
+
+    @property
+    def block_realization_count(self) -> int:
+        count = 1
+        for item in self.point_representations:
+            count *= item.alternative_count
+        return count
+
+
+@dataclass(frozen=True)
+class EBRSearchStatistics:
+    complete: bool
+    gamma_sectors: tuple[str, ...] = ()
+    auxiliary_dimensions_examined: tuple[int, ...] = ()
+    weighted_vectors_generated: int = 0
+    signed_combinations_tested: int = 0
+    algebraic_solutions: int = 0
+    realizable_candidates: int = 0
+    block_realization_count: int = 0
+    search_limit: int = 0
+
+    def __post_init__(self) -> None:
+        counters = (
+            self.weighted_vectors_generated,
+            self.signed_combinations_tested,
+            self.algebraic_solutions,
+            self.realizable_candidates,
+            self.block_realization_count,
+            self.search_limit,
+        )
+        if any(isinstance(value, bool) or int(value) < 0 for value in counters):
+            raise ValueError("EBR search counters must be non-negative integers.")
+        object.__setattr__(
+            self,
+            "gamma_sectors",
+            tuple(str(value).strip() for value in self.gamma_sectors),
+        )
+        auxiliary = tuple(int(value) for value in self.auxiliary_dimensions_examined)
+        if any(value < 0 for value in auxiliary) or len(auxiliary) != len(set(auxiliary)):
+            raise ValueError("Examined auxiliary dimensions must be unique non-negative integers.")
+        object.__setattr__(self, "auxiliary_dimensions_examined", auxiliary)
+
+
+@dataclass(frozen=True)
+class EBRSubspaceEnumeration:
+    solutions: tuple[tuple[TETBSolution, BandSymmetryVector], ...]
+    statistics: EBRSearchStatistics
 
 
 @dataclass(frozen=True)
@@ -275,7 +317,7 @@ class EBRAnalysisResult:
     optimal_auxiliary_dimension: int | None = None
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
     subspace_fixed_band_indices: tuple[int, ...] = ()
-    subspace_includes_gamma_zero_modes: bool = False
+    search_statistics: EBRSearchStatistics | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"regular", "transverse", "subspace"}:

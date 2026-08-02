@@ -233,12 +233,12 @@ def regularize_gamma_zero_modes(
     if len(transverse_bands) != 2:
         raise ValueError(
             "Gamma zero regularization requires exactly two physical transverse zero modes; "
-            f"found bands {tuple(value + 1 for value in transverse_bands)}."
+            f"found bands(0-based) {tuple(transverse_bands)}."
         )
     if len(longitudinal_bands) != 1:
         raise ValueError(
             "Gamma zero regularization requires exactly one auxiliary longitudinal zero mode; "
-            f"found bands {tuple(value + 1 for value in longitudinal_bands)}."
+            f"found bands(0-based) {tuple(longitudinal_bands)}."
         )
     resolved = gamma.resolved_little_group
     if resolved is None:
@@ -878,20 +878,20 @@ def _analyze_bloch_point(
     if diagnostics.leakage > leakage_tolerance:
         LOGGER.warning(
             "Selected Bloch symmetry subspace at %s is not closed: "
-            "bands(1-based)=%s leakage=%.6g coupled_outer_bands(1-based)=%s",
+            "bands(0-based)=%s leakage=%.6g coupled_outer_bands(0-based)=%s",
             point.name,
-            tuple(band + 1 for band in bands),
+            tuple(bands),
             diagnostics.leakage,
-            tuple(band + 1 for block in block_results for band in block.coupled_outer_bands),
+            tuple(band for block in block_results for band in block.coupled_outer_bands),
         )
     if outer_unitarity > leakage_tolerance:
         LOGGER.warning(
-            "Outer Bloch window at %s is not closed: outer_bands(1-based)=%s "
-            "unitarity=%.6g candidate_excluded_bands(1-based)=%s",
+            "Outer Bloch window at %s is not closed: outer_bands(0-based)=%s "
+            "unitarity=%.6g candidate_excluded_bands(0-based)=%s",
             point.name,
-            tuple(band + 1 for band in available),
+            tuple(available),
             outer_unitarity,
-            tuple(band + 1 for band in outer_candidates),
+            tuple(outer_candidates),
         )
     return BlochSymmetryPointAnalysis(
         name=point.name,

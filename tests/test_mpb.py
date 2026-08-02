@@ -125,7 +125,7 @@ def test_three_dimensional_wannier_and_metric_interpolation_outputs(tmp_path):
     assert np.allclose(wannier[:, 5], -expected_scalar)
     assert np.allclose(metric_output[:, :3], query)
     assert np.allclose(metric_output[:, 3], 4.0 + query[:, 2])
-    assert "W[0_0_0,1].x" in (
+    assert "W[0_0_0,0].x" in (
         tmp_path / "wannier-interp.txt"
     ).read_text(encoding="utf-8").splitlines()[0]
     assert "mu" in (

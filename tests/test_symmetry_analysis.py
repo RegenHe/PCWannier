@@ -879,7 +879,7 @@ def test_bloch_preanalysis_writes_reusable_s_and_d_text_caches(tmp_path):
     assert len(loaded_d.entries) == len(model.group.operations)
     assert "[physical]" in report
     assert "Gamma: k=(0, 0)" in report
-    assert "bands 1,2:" in report
+    assert "bands 0,1:" in report
     assert "irrep=E" in report
 
 

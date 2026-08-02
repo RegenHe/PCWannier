@@ -163,13 +163,13 @@ def _analyze_bundle_channel(
         )
         LOGGER.info(
             "Vector-field diagnostic: channel=%s quantity=%s max=%.6g mean=%.6g "
-            "worst_k=%s worst_band(1-based)=%s",
+            "worst_k=%s worst_band(0-based)=%s",
             channel_name,
             differential_diagnostics.quantity,
             differential_diagnostics.max_residual,
             differential_diagnostics.mean_residual,
             differential_diagnostics.worst_k_index,
-            differential_diagnostics.worst_band_index + 1,
+            differential_diagnostics.worst_band_index,
         )
     state, report = _prepare_state(
         bundle,
@@ -660,11 +660,11 @@ def _log_output_spectrum_diagnostics(result, config) -> None:
     for splitting in result.degeneracy_splittings:
         if splitting.broken:
             LOGGER.warning(
-                "Output basis %s breaks FEM degeneracy at %s bands(actual,1-based)=%s: "
+                "Output basis %s breaks FEM degeneracy at %s bands(actual,0-based)=%s: "
                 "raw_gap=%.6g output_gap=%.6g tolerance=%.6g",
                 result.basis,
                 splitting.point_name,
-                tuple(index + 1 for index in splitting.band_indices),
+                tuple(splitting.band_indices),
                 splitting.reference_gap,
                 splitting.output_gap,
                 splitting.tolerance,
@@ -682,10 +682,10 @@ def _log_hopping_reconstruction_diagnostics(result) -> None:
     for splitting in result.degeneracy_splittings:
         if splitting.broken:
             LOGGER.warning(
-                "Configured hopping set breaks output degeneracy at %s bands(actual,1-based)=%s: "
+                "Configured hopping set breaks output degeneracy at %s bands(actual,0-based)=%s: "
                 "direct_output_gap=%.6g reconstructed_gap=%.6g tolerance=%.6g",
                 splitting.point_name,
-                tuple(index + 1 for index in splitting.band_indices),
+                tuple(splitting.band_indices),
                 splitting.reference_gap,
                 splitting.output_gap,
                 splitting.tolerance,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import reduce
+from functools import lru_cache, reduce
+from itertools import product
 from math import gcd
 from typing import TYPE_CHECKING
 
@@ -199,7 +200,7 @@ def run_ebr_analysis(
     catalog_reference = str(config.ebr_catalog).strip()
     if catalog_reference.casefold() == "auto":
         catalog_reference = infer_builtin_catalog_alias(
-            _context_space_group_number(context)
+            _context_catalog_identifier(context)
         )
     catalog = _catalog_in_context_setting(
         context,
@@ -210,9 +211,7 @@ def run_ebr_analysis(
         catalog,
         lattice_vectors=config.real_lattice_vectors,
     )
-    mode = str(config.ebr_mode).strip().lower()
-    if mode == "auto":
-        mode = "regular" if config.wannier_subspace == "T+L" else "transverse"
+    mode = _resolve_ebr_mode(config, context)
     diagnostics = []
     if mode == "regular":
         vector = build_band_symmetry_vector(physical_analysis, catalog)
@@ -239,6 +238,9 @@ def run_ebr_analysis(
         else config.maxwell_problem.symmetry_field_kind
     )
     if mode == "subspace":
+        singular_gamma_zero_modes = _has_transverse_gamma_singularity(
+            context, field_kind
+        )
         target_dimension = config.ebr_subspace_dimension
         if target_dimension is None:
             raise ValueError("ebr_subspace_dimension is required for ebr_mode=subspace.")
@@ -257,6 +259,7 @@ def run_ebr_analysis(
             fixed_bands=fixed_bands,
             target_dimension=target_dimension,
             zero_tolerance=config.gamma_zero_mode_tolerance,
+            singular_gamma_zero_modes=singular_gamma_zero_modes,
         )
         skipped_blocks: list[str] = []
         inventory = _build_subspace_inventory(
@@ -265,24 +268,31 @@ def run_ebr_analysis(
             catalog,
             zero_tolerance=config.gamma_zero_mode_tolerance,
             skipped_blocks=skipped_blocks,
+            singular_gamma_zero_modes=singular_gamma_zero_modes,
         ).reordered(matrix.row_keys)
         diagnostics.extend(skipped_blocks)
-        auxiliary_rows = _auxiliary_gamma_rows(
-            context,
-            catalog,
-            matrix,
-            config.real_lattice_vectors,
-            field_kind,
-        )
-        zero_dimension = _gamma_zero_mode_dimension(
-            physical_analysis,
-            context,
-            catalog,
-            config.gamma_zero_mode_tolerance,
-        )
-        gamma_sectors = _subspace_gamma_sectors(
-            fixed_include_gamma_zero_modes, zero_dimension
-        )
+        if singular_gamma_zero_modes:
+            auxiliary_rows = _auxiliary_gamma_rows(
+                context,
+                catalog,
+                matrix,
+                config.real_lattice_vectors,
+                field_kind,
+            )
+            zero_dimension = _gamma_zero_mode_dimension(
+                physical_analysis,
+                context,
+                catalog,
+                config.gamma_zero_mode_tolerance,
+            )
+            gamma_sectors = _subspace_gamma_sectors(
+                fixed_include_gamma_zero_modes, zero_dimension
+            )
+            max_auxiliary_bands = config.ebr_max_auxiliary_bands
+        else:
+            auxiliary_rows = ()
+            gamma_sectors = (False,)
+            max_auxiliary_bands = 0
         candidates = []
         enumerations = []
         for include_gamma_zero_modes in gamma_sectors:
@@ -300,7 +310,11 @@ def run_ebr_analysis(
             sector_name = (
                 "include_gamma_zero_modes"
                 if include_gamma_zero_modes
-                else "exclude_gamma_zero_modes"
+                else (
+                    "exclude_gamma_zero_modes"
+                    if singular_gamma_zero_modes
+                    else "ordinary"
+                )
             )
             enumeration = enumerate_ebr_subspace_solutions(
                 inventory,
@@ -308,7 +322,7 @@ def run_ebr_analysis(
                 gamma_point_name=catalog.gamma_point.name,
                 target_dimension=target_dimension,
                 gamma_surrogate=surrogate,
-                max_auxiliary_bands=config.ebr_max_auxiliary_bands,
+                max_auxiliary_bands=max_auxiliary_bands,
                 max_states=config.ebr_max_states,
                 required_auxiliary_gamma_rows=auxiliary_rows,
                 gamma_sector=sector_name,
@@ -323,6 +337,7 @@ def run_ebr_analysis(
                     zero_tolerance=config.gamma_zero_mode_tolerance,
                     fixed_band_indices=fixed_bands,
                     include_gamma_zero_modes=include_gamma_zero_modes,
+                    singular_gamma_zero_modes=singular_gamma_zero_modes,
                 )
                 if point_representations is not None:
                     candidates.append(
@@ -333,6 +348,69 @@ def run_ebr_analysis(
                             include_gamma_zero_modes,
                         )
                     )
+        if singular_gamma_zero_modes:
+            for include_gamma_zero_modes, enumeration in zip(
+                gamma_sectors, enumerations, strict=True
+            ):
+                realizable = sum(
+                    candidate.includes_gamma_zero_modes == include_gamma_zero_modes
+                    for candidate in candidates
+                )
+                sector = (
+                    "including the two singular Gamma zero modes"
+                    if include_gamma_zero_modes
+                    else "excluding only the two singular Gamma zero modes"
+                )
+                diagnostics.append(
+                    f"Gamma sector {sector}: "
+                    f"{len(enumeration.solutions)} algebraic signed-EBR solution(s), "
+                    f"{realizable} symmetry-subspace candidate(s). Positive-frequency "
+                    "Gamma irreps are enforced in both sectors."
+                )
+            include_enumeration = next(
+                (
+                    enumeration
+                    for include, enumeration in zip(
+                        gamma_sectors, enumerations, strict=True
+                    )
+                    if include
+                ),
+                None,
+            )
+            if include_enumeration is not None and not include_enumeration.solutions:
+                gamma = _matching_analysis_point(
+                    physical_analysis, catalog.gamma_point, context.model.tolerance
+                )
+                resolved = gamma.resolved_little_group
+                if resolved is not None:
+                    positions = {key: index for index, key in enumerate(inventory.row_keys)}
+                    available = []
+                    possible_dimensions = {0}
+                    for irrep in resolved.require_irreps():
+                        count = int(
+                            inventory.multiplicities[
+                                positions[
+                                    SymmetryVectorKey(catalog.gamma_point.name, irrep.name)
+                                ]
+                            ]
+                        )
+                        if count <= 0:
+                            continue
+                        available.append(f"{count} {irrep.name}(dim={irrep.dimension})")
+                        for _ in range(count):
+                            possible_dimensions.update(
+                                value + int(irrep.dimension)
+                                for value in tuple(possible_dimensions)
+                            )
+                    required_positive = target_dimension - zero_dimension
+                    if required_positive not in possible_dimensions:
+                        diagnostics.append(
+                            "A subspace containing the two singular Gamma zero modes "
+                            f"needs {required_positive} positive-frequency Gamma state(s), "
+                            "but the exact available irreps "
+                            f"[{', '.join(available) or 'none'}] can realize dimensions "
+                            f"{sorted(value for value in possible_dimensions if value <= target_dimension)}."
+                        )
         algebraic_count = sum(
             len(enumeration.solutions) for enumeration in enumerations
         )
@@ -378,11 +456,12 @@ def run_ebr_analysis(
             positive_dimensions = [
                 len(block.band_indices)
                 for block in gamma.degenerate_blocks
-                if not _is_zero_block(block, config.gamma_zero_mode_tolerance)
+                if not singular_gamma_zero_modes
+                or not _is_zero_block(block, config.gamma_zero_mode_tolerance)
             ]
             diagnostics.append(
                 f"No {target_dimension}-dimensional EBR subspace satisfies the exact "
-                "representation-count and complete-degenerate-block constraints."
+                "representation-count and symmetry-invariant-subspace constraints."
             )
             dimension_gcd = reduce(gcd, (int(value) for value in matrix.dimensions))
             if target_dimension % dimension_gcd:
@@ -398,14 +477,16 @@ def run_ebr_analysis(
             else:
                 diagnostics.append(
                     f"{algebraic_count} algebraic EBR candidate(s) fit the irrep inventory, "
-                    "but none can be assembled from complete numerical degenerate blocks at "
-                    "every catalog k point."
+                    "but none can be assembled from invariant irrep subspaces of the "
+                    "analyzed numerical blocks at every catalog k point."
                 )
-            required_positive = target_dimension - (2 if include_gamma_zero_modes else 0)
+            required_positive = target_dimension - (
+                2 if singular_gamma_zero_modes else 0
+            )
             diagnostics.append(
-                "Gamma positive-frequency block dimensions are "
+                "Gamma eligible block dimensions are "
                 f"{positive_dimensions}; the requested subspace needs "
-                f"{required_positive} positive-frequency Gamma states."
+                f"{required_positive} represented Gamma states."
             )
         return EBRAnalysisResult(
             mode,
@@ -464,6 +545,7 @@ def _build_subspace_inventory(
     *,
     zero_tolerance: float,
     skipped_blocks: list[str] | None = None,
+    singular_gamma_zero_modes: bool = True,
 ) -> BandSymmetryVector:
     """Collect exact complete-block irreps available at every catalog point."""
 
@@ -479,8 +561,10 @@ def _build_subspace_inventory(
         names = tuple(irrep.name for irrep in resolved.require_irreps())
         counts = {name: 0 for name in names}
         for block in point.degenerate_blocks:
-            if catalog_point.name == catalog.gamma_point.name and _is_zero_block(
-                block, zero_tolerance
+            if (
+                singular_gamma_zero_modes
+                and catalog_point.name == catalog.gamma_point.name
+                and _is_zero_block(block, zero_tolerance)
             ):
                 continue
             if block.decomposition is None:
@@ -511,6 +595,7 @@ def _match_subspace_representations(
     zero_tolerance: float,
     fixed_band_indices: tuple[int, ...] = (),
     include_gamma_zero_modes: bool = False,
+    singular_gamma_zero_modes: bool = True,
 ) -> tuple[EBRSubspacePointRepresentation, ...] | None:
     positions = {key: index for index, key in enumerate(vector.row_keys)}
     output = []
@@ -519,7 +604,11 @@ def _match_subspace_representations(
         resolved = point.resolved_little_group
         if resolved is None:
             return None
-        names = tuple(irrep.name for irrep in resolved.require_irreps())
+        irreps = tuple(resolved.require_irreps())
+        names = tuple(irrep.name for irrep in irreps)
+        irrep_dimensions = np.asarray(
+            [int(irrep.dimension) for irrep in irreps], dtype=np.int64
+        )
         target = np.asarray(
             [vector.multiplicities[positions[SymmetryVectorKey(catalog_point.name, name)]] for name in names],
             dtype=np.int64,
@@ -527,53 +616,69 @@ def _match_subspace_representations(
         zero_blocks = tuple(
             block
             for block in point.degenerate_blocks
-            if catalog_point.name == catalog.gamma_point.name
+            if singular_gamma_zero_modes
+            and catalog_point.name == catalog.gamma_point.name
             and _is_zero_block(block, zero_tolerance)
         )
         blocks = tuple(
             block
             for block in point.degenerate_blocks
             if not (
-                catalog_point.name == catalog.gamma_point.name
+                singular_gamma_zero_modes
+                and catalog_point.name == catalog.gamma_point.name
                 and _is_zero_block(block, zero_tolerance)
             )
             and block.decomposition is not None
         )
         fixed = set(fixed_band_indices)
-        required = tuple(bool(fixed.intersection(block.band_indices)) for block in blocks)
-        contributions = []
+        options = []
         for block in blocks:
-            contributions.append(
-                np.asarray(
-                    [block.decomposition.multiplicities.get(name, 0) for name in names],
-                    dtype=np.int64,
-                )
+            full = np.asarray(
+                [block.decomposition.multiplicities.get(name, 0) for name in names],
+                dtype=np.int64,
             )
-        match_count = 0
+            represented_dimension = int(full @ irrep_dimensions)
+            if represented_dimension != len(block.band_indices):
+                raise ValueError(
+                    f"Block {tuple(block.band_indices)} at {point.name!r} has irrep "
+                    f"dimension {represented_dimension}, expected {len(block.band_indices)}."
+                )
+            if fixed.intersection(block.band_indices):
+                options.append(((tuple(int(value) for value in full), represented_dimension),))
+                continue
+            block_options = []
+            for values in product(*(range(int(value) + 1) for value in full)):
+                contribution = np.asarray(values, dtype=np.int64)
+                block_options.append(
+                    (values, int(contribution @ irrep_dimensions))
+                )
+            options.append(tuple(block_options))
 
         zero_selection = zero_blocks if include_gamma_zero_modes else ()
         zero_dimension = sum(len(block.band_indices) for block in zero_selection)
+        represented_target_dimension = vector.total_dimension - zero_dimension
 
-        def select(index: int, current: np.ndarray, selected_dimension: int) -> None:
-            nonlocal match_count
-            if np.any(current > target):
-                return
+        @lru_cache(maxsize=None)
+        def select(index: int, current_values: tuple[int, ...], selected_dimension: int) -> int:
+            current = np.asarray(current_values, dtype=np.int64)
+            if np.any(current > target) or selected_dimension > represented_target_dimension:
+                return 0
             if index == len(blocks):
-                if (
+                return int(
                     np.array_equal(current, target)
-                    and zero_dimension + selected_dimension == vector.total_dimension
-                ):
-                    match_count += 1
-                return
-            if not required[index]:
-                select(index + 1, current, selected_dimension)
-            select(
-                index + 1,
-                current + contributions[index],
-                selected_dimension + len(blocks[index].band_indices),
-            )
+                    and selected_dimension == represented_target_dimension
+                )
+            count = 0
+            for contribution_values, contribution_dimension in options[index]:
+                contribution = np.asarray(contribution_values, dtype=np.int64)
+                count += select(
+                    index + 1,
+                    tuple(int(value) for value in current + contribution),
+                    selected_dimension + contribution_dimension,
+                )
+            return count
 
-        select(0, np.zeros_like(target), 0)
+        match_count = select(0, tuple(0 for _ in target), 0)
         if match_count == 0:
             return None
         output.append(
@@ -595,6 +700,7 @@ def _validate_subspace_fixed_bands(
     fixed_bands: tuple[int, ...],
     target_dimension: int,
     zero_tolerance: float,
+    singular_gamma_zero_modes: bool = True,
 ) -> bool:
     """Validate mandatory bands and decide whether Gamma needs the T-mode surrogate."""
 
@@ -614,7 +720,8 @@ def _validate_subspace_fixed_bands(
             if not fixed.intersection(block.band_indices):
                 continue
             is_gamma_zero = (
-                catalog_point.name == catalog.gamma_point.name
+                singular_gamma_zero_modes
+                and catalog_point.name == catalog.gamma_point.name
                 and _is_zero_block(block, zero_tolerance)
             )
             if is_gamma_zero:
@@ -938,8 +1045,25 @@ def _require_unitary_point(point: BlochSymmetryPointAnalysis) -> None:
 
 def _validate_catalog_context(context: SymmetryContext, catalog: EBRCatalog) -> None:
     definition = context.model.group_definition
-    if definition is None or definition.hall_number is None:
-        raise ValueError("EBR analysis requires a space group with an unambiguous Hall setting.")
+    if definition is None:
+        raise ValueError("EBR analysis requires a resolved space-group definition.")
+    if catalog.dimension != context.model.dimension:
+        raise ValueError("EBR catalog dimension does not match the symmetry context.")
+    if definition.hall_number is None:
+        if catalog.space_group_name is None:
+            raise ValueError(
+                "This non-Hall symmetry context requires a named EBR catalog."
+            )
+        if _normalized_group_name(catalog.space_group_name) != _normalized_group_name(
+            definition.name
+        ):
+            raise ValueError(
+                f"EBR catalog space group {catalog.space_group_name!r} does not match "
+                f"calculation space group {definition.name!r}."
+            )
+        return
+    if catalog.space_group_number is None or catalog.hall_number is None:
+        raise ValueError("A 3D Hall-setting calculation requires a Hall-setting EBR catalog.")
     actual_number = _context_space_group_number(context)
     if actual_number != catalog.space_group_number:
         raise ValueError(
@@ -951,8 +1075,6 @@ def _validate_catalog_context(context: SymmetryContext, catalog: EBRCatalog) -> 
             f"EBR catalog Hall {catalog.hall_number} does not match calculation Hall "
             f"{definition.hall_number}."
         )
-    if catalog.dimension != context.model.dimension:
-        raise ValueError("EBR catalog dimension does not match the symmetry context.")
 
 
 def _catalog_in_context_setting(
@@ -1055,6 +1177,37 @@ def _context_space_group_number(context: SymmetryContext) -> int:
     if group_type is None:
         raise ValueError(f"spglib could not resolve Hall {definition.hall_number}.")
     return int(group_type.number)
+
+
+def _context_catalog_identifier(context: SymmetryContext) -> int | str:
+    definition = context.model.group_definition
+    if definition is None:
+        raise ValueError("Automatic EBR catalog selection requires a space-group definition.")
+    if definition.hall_number is None:
+        return definition.name
+    return _context_space_group_number(context)
+
+
+def _resolve_ebr_mode(config, context: SymmetryContext) -> str:
+    mode = str(config.ebr_mode).strip().lower()
+    if mode != "auto":
+        return mode
+    if context.model.dimension == 2:
+        return "regular"
+    return "regular" if config.wannier_subspace == "T+L" else "transverse"
+
+
+def _has_transverse_gamma_singularity(
+    context: SymmetryContext, field_kind: FieldKind
+) -> bool:
+    return context.model.dimension == 3 and field_kind in {
+        FieldKind.ELECTRIC_POLAR_VECTOR,
+        FieldKind.MAGNETIC_AXIAL_VECTOR,
+    }
+
+
+def _normalized_group_name(value: str) -> str:
+    return "".join(character for character in str(value).casefold() if character.isalnum())
 
 
 def _wyckoff_multiplicity(label: str) -> int:

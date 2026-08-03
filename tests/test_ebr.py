@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from importlib import resources
 from types import SimpleNamespace
 
 import numpy as np
@@ -32,6 +34,7 @@ from pcwannier.ebr.analysis import (
     _build_subspace_inventory,
     _gamma_zero_mode_dimension,
     _match_subspace_representations,
+    _resolve_ebr_mode,
     _subspace_gamma_sectors,
     _validate_subspace_fixed_bands,
 )
@@ -41,6 +44,7 @@ from pcwannier.symmetry.analysis import (
     SewingDiagnostics,
 )
 from pcwannier.symmetry.io import load_symmetry_from_spglib
+from pcwannier.symmetry import load_symmetry
 from pcwannier.symmetry.representation import build_symmetry_context
 
 
@@ -85,6 +89,22 @@ def sg224_matrix() -> EBRMatrix:
     )
 
 
+@pytest.fixture(scope="module")
+def p4mm_matrix() -> EBRMatrix:
+    path = resources.files("pcwannier.symmetry").joinpath(
+        "space_groups", "p4mm.yaml"
+    )
+    model = load_symmetry(path)
+    context = build_symmetry_context(
+        model, [np.asarray([-0.5, 0.0]), np.asarray([-0.5, 0.0])]
+    )
+    return build_ebr_matrix(
+        context,
+        load_ebr_catalog("p4mm"),
+        lattice_vectors=np.eye(2),
+    )
+
+
 def test_catalog_alias_and_strict_custom_schema(tmp_path):
     builtin = load_ebr_catalog("221")
     assert builtin.space_group_number == 221
@@ -114,6 +134,48 @@ def test_catalog_alias_and_strict_custom_schema(tmp_path):
     custom.write_text(custom.read_text(encoding="utf-8") + "unknown: true\n", encoding="utf-8")
     with pytest.raises(ValueError, match="forbidden"):
         load_ebr_catalog(custom)
+
+
+def test_p4mm_catalog_and_dynamic_2d_ebr_matrix(p4mm_matrix):
+    catalog = load_ebr_catalog("p4mm")
+    assert catalog.dimension == 2
+    assert catalog.space_group_name == "p4mm"
+    assert catalog.space_group_number is None
+    assert catalog.hall_number is None
+    assert len(catalog.ebrs) == 14
+
+    matrix = p4mm_matrix
+    assert matrix.values.shape == (14, 14)
+    names = tuple(column.name for column in matrix.columns)
+    expected = (
+        matrix.values[:, names.index("A1@1a")]
+        + matrix.values[:, names.index("E@1a")]
+    )
+    vector = BandSymmetryVector(matrix.row_keys, expected, 3)
+    solutions = decompose_ebr(vector, matrix)
+    assert len(solutions) == 1
+    assert np.array_equal(
+        solutions[0].multiplicities,
+        np.asarray([int(name in {"A1@1a", "E@1a"}) for name in names]),
+    )
+
+    assert _resolve_ebr_mode(
+        SimpleNamespace(ebr_mode="auto", wannier_subspace="T"),
+        SimpleNamespace(model=SimpleNamespace(dimension=2)),
+    ) == "regular"
+
+
+def test_named_2d_catalog_rejects_a_different_space_group():
+    path = resources.files("pcwannier.symmetry").joinpath(
+        "space_groups", "p4mm.yaml"
+    )
+    model = load_symmetry(path)
+    context = build_symmetry_context(
+        model, [np.asarray([-0.5, 0.0]), np.asarray([-0.5, 0.0])]
+    )
+    wrong = replace(load_ebr_catalog("p4mm"), space_group_name="p4gm")
+    with pytest.raises(ValueError, match="does not match"):
+        build_ebr_matrix(context, wrong, lattice_vectors=np.eye(2))
 
 
 def test_regular_solver_unique_multiple_and_no_solution():
@@ -400,7 +462,7 @@ def test_subspace_inventory_ignores_incomplete_outer_window_boundary_block():
         ),
     )
     resolved = SimpleNamespace(
-        require_irreps=lambda: (SimpleNamespace(name="A"),)
+        require_irreps=lambda: (SimpleNamespace(name="A", dimension=1),)
     )
     point = SimpleNamespace(
         name="Gamma",
@@ -478,6 +540,123 @@ def test_subspace_inventory_ignores_incomplete_outer_window_boundary_block():
     assert fixed_representation is not None
     assert fixed_representation[0].irrep_multiplicities == (("A", 1),)
     assert fixed_representation[0].unresolved_dimension == 2
+
+
+def test_subspace_can_select_an_irrep_from_a_reducible_numerical_block():
+    block = SimpleNamespace(
+        band_indices=(0, 1, 2, 3, 4, 5),
+        energies=(1.0,) * 6,
+        decomposition=SimpleNamespace(multiplicities={"T1": 1, "T2": 1}),
+        irrep_unavailable_reason=None,
+    )
+    resolved = SimpleNamespace(
+        require_irreps=lambda: (
+            SimpleNamespace(name="T1", dimension=3),
+            SimpleNamespace(name="T2", dimension=3),
+        )
+    )
+    point = SimpleNamespace(
+        name="Gamma",
+        requested_k_fractional=np.zeros(3),
+        band_indices=block.band_indices,
+        degenerate_blocks=(block,),
+        resolved_little_group=resolved,
+    )
+    analysis = SimpleNamespace(points=(point,))
+    context = SimpleNamespace(model=SimpleNamespace(tolerance=1.0e-8))
+    catalog_point = SimpleNamespace(name="Gamma", k_fractional=np.zeros(3))
+    catalog = SimpleNamespace(k_points=(catalog_point,), gamma_point=catalog_point)
+    selected = BandSymmetryVector(
+        (
+            SymmetryVectorKey("Gamma", "T1"),
+            SymmetryVectorKey("Gamma", "T2"),
+        ),
+        np.asarray([1, 0]),
+        total_dimension=3,
+    )
+
+    representations = _match_subspace_representations(
+        analysis,
+        context,
+        catalog,
+        selected,
+        zero_tolerance=1.0e-10,
+        singular_gamma_zero_modes=False,
+    )
+    assert representations is not None
+    assert representations[0].irrep_multiplicities == (("T1", 1),)
+    assert representations[0].alternative_count == 1
+
+    # Fixing any raw numerical eigenvector keeps the entire reducible block mandatory;
+    # an irrep projector generally does not preserve that individual eigenvector.
+    assert (
+        _match_subspace_representations(
+            analysis,
+            context,
+            catalog,
+            selected,
+            zero_tolerance=1.0e-10,
+            fixed_band_indices=(0,),
+            singular_gamma_zero_modes=False,
+        )
+        is None
+    )
+
+
+def test_2d_subspace_treats_a_zero_frequency_scalar_irrep_as_regular():
+    exact = SimpleNamespace(multiplicities={"A": 1})
+    zero_block = SimpleNamespace(
+        band_indices=(0,),
+        energies=(0.0,),
+        decomposition=exact,
+        irrep_unavailable_reason=None,
+    )
+    resolved = SimpleNamespace(
+        require_irreps=lambda: (SimpleNamespace(name="A", dimension=1),)
+    )
+    point = SimpleNamespace(
+        name="Gamma",
+        k_fractional=np.zeros(2),
+        requested_k_fractional=np.zeros(2),
+        band_indices=(0,),
+        degenerate_blocks=(zero_block,),
+        resolved_little_group=resolved,
+        antiunitary_operation_names=(),
+    )
+    analysis = SimpleNamespace(points=(point,))
+    context = SimpleNamespace(model=SimpleNamespace(tolerance=1.0e-8))
+    catalog_point = SimpleNamespace(name="Gamma", k_fractional=np.zeros(2))
+    catalog = SimpleNamespace(k_points=(catalog_point,), gamma_point=catalog_point)
+
+    inventory = _build_subspace_inventory(
+        analysis,
+        context,
+        catalog,
+        zero_tolerance=1.0e-10,
+        singular_gamma_zero_modes=False,
+    )
+    assert np.array_equal(inventory.multiplicities, [1])
+    assert not _validate_subspace_fixed_bands(
+        analysis,
+        context,
+        catalog,
+        fixed_bands=(0,),
+        target_dimension=1,
+        zero_tolerance=1.0e-10,
+        singular_gamma_zero_modes=False,
+    )
+    representations = _match_subspace_representations(
+        analysis,
+        context,
+        catalog,
+        inventory,
+        zero_tolerance=1.0e-10,
+        fixed_band_indices=(0,),
+        singular_gamma_zero_modes=False,
+    )
+    assert representations is not None
+    assert representations[0].irrep_multiplicities == (("A", 1),)
+    assert representations[0].unresolved_dimension == 0
 
 
 def test_band_vector_rejects_nonexact_physical_decomposition():

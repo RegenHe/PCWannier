@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pcwannier.symmetry import (
     BlochSymmetryAnalysisResult,
@@ -37,6 +38,22 @@ def test_spglib_point_group_catalog_supports_hm_and_schoenflies_names():
         "T1u",
         "T2u",
     }
+
+
+def test_spglib_space_group_requires_explicit_hall_for_origin_choices():
+    with pytest.raises(ValueError, match=r"hall:521.*hall:522"):
+        load_symmetry_from_spglib("Pn-3m")
+
+    choice_one = load_symmetry_from_spglib("hall:521")
+    choice_two = load_symmetry_from_spglib("hall:522")
+    assert any(
+        not np.allclose(left.translation, right.translation)
+        for left, right in zip(
+            choice_one.group.operations,
+            choice_two.group.operations,
+            strict=True,
+        )
+    )
 
 
 def test_pm3m_database_and_little_groups():

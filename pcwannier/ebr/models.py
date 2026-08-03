@@ -69,25 +69,41 @@ class EBRDefinition:
 @dataclass(frozen=True)
 class EBRCatalog:
     name: str
-    space_group_number: int
-    hall_number: int
+    space_group_number: int | None
+    hall_number: int | None
     k_points: tuple[EBRKPoint, ...]
     ebrs: tuple[EBRDefinition, ...]
     source: str | None = None
+    space_group_name: str | None = None
 
     def __post_init__(self) -> None:
         if not str(self.name).strip():
             raise ValueError("EBR catalog name must not be empty.")
-        if not 1 <= int(self.space_group_number) <= 230:
-            raise ValueError("EBR catalog space_group_number must lie in [1, 230].")
-        if not 1 <= int(self.hall_number) <= 530:
-            raise ValueError("EBR catalog hall_number must lie in [1, 530].")
         if not self.k_points or not self.ebrs:
             raise ValueError("EBR catalog must define k_points and ebrs.")
         dimensions = {point.k_fractional.size for point in self.k_points}
         dimensions.update(ebr.center.size for ebr in self.ebrs)
         if len(dimensions) != 1:
             raise ValueError("EBR catalog k points and centers must use one common dimension.")
+        number = self.space_group_number
+        hall = self.hall_number
+        group_name = None if self.space_group_name is None else str(self.space_group_name).strip()
+        if (number is None) != (hall is None):
+            raise ValueError(
+                "EBR catalog space_group_number and hall_number must be provided together."
+            )
+        if number is not None:
+            if not 1 <= int(number) <= 230:
+                raise ValueError("EBR catalog space_group_number must lie in [1, 230].")
+            if not 1 <= int(hall) <= 530:
+                raise ValueError("EBR catalog hall_number must lie in [1, 530].")
+            object.__setattr__(self, "space_group_number", int(number))
+            object.__setattr__(self, "hall_number", int(hall))
+        elif not group_name:
+            raise ValueError(
+                "A non-Hall EBR catalog requires space_group_name."
+            )
+        object.__setattr__(self, "space_group_name", group_name)
         point_names = [point.name for point in self.k_points]
         ebr_names = [ebr.name for ebr in self.ebrs]
         if len(point_names) != len(set(point_names)):

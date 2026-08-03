@@ -103,14 +103,15 @@ def _hall_number_for_symbol(symbol: str) -> int:
         raise FileNotFoundError(
             f"{requested!r} is neither a symmetry YAML file nor a recognized spglib space-group symbol."
         )
-    settings = {
-        spglib.get_spacegroup_type(value).international_short for value in matches
-    }
-    if len(matches) != 1 and len(settings) != 1:
-        raise ValueError(
-            f"Space-group symbol {requested!r} is setting-dependent; use hall:<number>."
+    if len(matches) != 1:
+        choices = ", ".join(
+            f"hall:{value} (choice {spglib.get_spacegroup_type(value).choice or 'default'})"
+            for value in matches
         )
-    # Prefer the first standard Hall setting. Pm-3m resolves uniquely to Hall 517.
+        raise ValueError(
+            f"Space-group symbol {requested!r} has multiple Hall settings: {choices}. "
+            "Use hall:<number> to select the setting explicitly."
+        )
     return int(matches[0])
 
 

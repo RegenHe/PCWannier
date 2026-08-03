@@ -15,6 +15,8 @@ _BUILTIN_ALIASES = {
     "sg221": "sg221.yaml",
     "224": "sg224.yaml",
     "sg224": "sg224.yaml",
+    "p4mm": "p4mm.yaml",
+    "wp11": "p4mm.yaml",
 }
 
 
@@ -53,14 +55,14 @@ def load_ebr_catalog(
     return _parse_catalog(raw, source)
 
 
-def infer_builtin_catalog_alias(space_group_number: int) -> str:
-    key = str(int(space_group_number))
+def infer_builtin_catalog_alias(space_group: int | str) -> str:
+    key = str(space_group).strip().casefold()
     if key not in _BUILTIN_ALIASES:
         raise ValueError(
-            f"No built-in EBR catalog is available for space group {space_group_number}; "
+            f"No built-in EBR catalog is available for space group {space_group!r}; "
             "set ebr_catalog to a custom YAML file."
         )
-    return f"sg{key}"
+    return Path(_BUILTIN_ALIASES[key]).stem
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -76,8 +78,27 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 def _parse_catalog(raw: Any, source: str) -> EBRCatalog:
     if not isinstance(raw, dict):
         raise ValueError("EBR catalog must contain a YAML mapping.")
-    required = {"name", "space_group_number", "hall_number", "k_points", "ebrs"}
-    _require_keys(raw, required, "EBR catalog")
+    common = {"name", "k_points", "ebrs"}
+    identity_keys = {"space_group_number", "hall_number", "space_group_name"}
+    missing = sorted(common - set(raw))
+    unknown = sorted(set(raw) - common - identity_keys)
+    if missing or unknown:
+        raise ValueError(
+            f"EBR catalog keys are invalid; missing={missing}, forbidden={unknown}."
+        )
+    has_hall_identity = "space_group_number" in raw or "hall_number" in raw
+    has_named_identity = "space_group_name" in raw
+    if has_hall_identity and (
+        "space_group_number" not in raw or "hall_number" not in raw
+    ):
+        raise ValueError(
+            "EBR catalog space_group_number and hall_number must be provided together."
+        )
+    if has_hall_identity == has_named_identity:
+        raise ValueError(
+            "EBR catalog must define exactly one identity: "
+            "space_group_number+hall_number or space_group_name."
+        )
     points_raw = raw["k_points"]
     ebrs_raw = raw["ebrs"]
     if not isinstance(points_raw, list) or not points_raw:
@@ -109,11 +130,18 @@ def _parse_catalog(raw: Any, source: str) -> EBRCatalog:
         )
     return EBRCatalog(
         _text(raw["name"], "catalog name"),
-        _integer(raw["space_group_number"], "space_group_number"),
-        _integer(raw["hall_number"], "hall_number"),
+        (
+            _integer(raw["space_group_number"], "space_group_number")
+            if has_hall_identity
+            else None
+        ),
+        _integer(raw["hall_number"], "hall_number") if has_hall_identity else None,
         tuple(points),
         tuple(ebrs),
         source,
+        _text(raw["space_group_name"], "space_group_name")
+        if has_named_identity
+        else None,
     )
 
 

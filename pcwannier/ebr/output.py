@@ -27,7 +27,7 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
     lines = [
         "PCWannier EBR analysis",
         f"catalog: {result.catalog.name} ({result.catalog.source or 'unknown'})",
-        f"space_group: {result.catalog.space_group_number}; hall: {result.catalog.hall_number}",
+        _format_catalog_group(result.catalog),
         f"mode: {result.mode}",
         f"band_dimension: {result.symmetry_vector.total_dimension}",
         "",
@@ -82,7 +82,7 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
         lines.extend(
             (
                 "",
-                f"Strict subspace candidates: {len(result.subspace_candidates)}",
+                f"Symmetry-subspace candidates: {len(result.subspace_candidates)}",
                 f"Minimum auxiliary dimension: {result.optimal_auxiliary_dimension}",
                 f"Fixed bands (0-based): {fixed}",
             )
@@ -101,19 +101,21 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
                     f"  signed_combinations_tested: {statistics.signed_combinations_tested}",
                     f"  algebraic_solutions: {statistics.algebraic_solutions}",
                     f"  realizable_ebr_candidates: {statistics.realizable_candidates}",
-                    f"  complete_block_realizations: {statistics.block_realization_count}",
+                    f"  hsp_invariant_subspace_realizations: {statistics.block_realization_count}",
                     f"  max_states_per_sector: {statistics.search_limit}",
-                    "  completeness_scope: EBR coefficients and independent complete "
-                    "high-symmetry-point block realizations; global band connectivity is not tested",
+                    "  completeness_scope: EBR coefficients and independent high-symmetry-point "
+                    "invariant irrep subspaces; global band connectivity and smooth projectors "
+                    "are not tested",
                 )
             )
         for index, candidate in enumerate(result.subspace_candidates, start=1):
             solution = candidate.solution
             gamma_rule = (
-                "include the complete two-mode transverse Gamma singularity and use "
-                "the T+L-L surrogate"
+                "include the two singular Gamma zero modes through the T+L-L surrogate; "
+                "enforce all selected positive-frequency Gamma irreps"
                 if candidate.includes_gamma_zero_modes
-                else "exclude the Gamma zero-mode block"
+                else "exclude only the two singular Gamma zero modes; enforce all selected "
+                "positive-frequency Gamma irreps"
             )
             lines.extend(
                 (
@@ -123,7 +125,7 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
                     f"    n_T   = {_format_combination(solution.n_t, names, signed=True)}",
                     f"    auxiliary_dimension = {solution.auxiliary_dimension}",
                     f"    Gamma rule = {gamma_rule}",
-                    f"    complete_block_realizations = {candidate.block_realization_count}",
+                    f"    hsp_invariant_subspace_realizations = {candidate.block_realization_count}",
                     "    Gamma zero-mode surrogate = "
                     + _format_symmetry_vector(
                         result.symmetry_vector.row_keys, solution.gamma_surrogate
@@ -144,7 +146,7 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
                 lines.append(
                     f"    {point.point_name}: physical={physical}; "
                     f"formal_signed={formal}; "
-                    f"block_realizations={point.alternative_count}"
+                    f"invariant_subspace_realizations={point.alternative_count}"
                 )
     if result.diagnostics:
         lines.extend(("", "Diagnostics:"))
@@ -161,6 +163,7 @@ def ebr_result_to_dict(result: EBRAnalysisResult) -> dict:
             "source": result.catalog.source,
             "space_group_number": result.catalog.space_group_number,
             "hall_number": result.catalog.hall_number,
+            "space_group_name": result.catalog.space_group_name,
             "k_points": [
                 {"name": point.name, "k": point.k_fractional.tolist()}
                 for point in result.catalog.k_points
@@ -274,6 +277,12 @@ def _format_combination(values, names, *, signed: bool = False) -> str:
     if not signed and any(int(value) < 0 for value in values):
         raise ValueError("A non-signed EBR combination contains negative multiplicities.")
     return "".join(terms)
+
+
+def _format_catalog_group(catalog) -> str:
+    if catalog.hall_number is not None:
+        return f"space_group: {catalog.space_group_number}; hall: {catalog.hall_number}"
+    return f"space_group: {catalog.space_group_name}; dimension: {catalog.dimension}"
 
 
 def _format_symmetry_vector(keys, values) -> str:

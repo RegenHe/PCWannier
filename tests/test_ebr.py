@@ -30,6 +30,7 @@ from pcwannier.ebr import (
     load_ebr_catalog,
     write_ebr_outputs,
 )
+from pcwannier.ebr.catalog import infer_builtin_catalog_alias
 from pcwannier.ebr.analysis import (
     _build_subspace_inventory,
     _gamma_zero_mode_dimension,
@@ -46,6 +47,38 @@ from pcwannier.symmetry.analysis import (
 from pcwannier.symmetry.io import load_symmetry_from_spglib
 from pcwannier.symmetry import load_symmetry
 from pcwannier.symmetry.representation import build_symmetry_context
+
+
+WALLPAPER_CATALOGS = (
+    "p1",
+    "p2",
+    "pm",
+    "pg",
+    "c1m1",
+    "p2mm",
+    "p2mg",
+    "p2gg",
+    "c2mm",
+    "p4",
+    "p4mm",
+    "p4gm",
+    "p3",
+    "p3m1",
+    "p31m",
+    "p6",
+    "p6mm",
+)
+
+SHORT_WALLPAPER_ALIASES = {
+    "cm": "c1m1",
+    "pmm": "p2mm",
+    "pmg": "p2mg",
+    "pgg": "p2gg",
+    "cmm": "c2mm",
+    "p4m": "p4mm",
+    "p4g": "p4gm",
+    "p6m": "p6mm",
+}
 
 
 def _definition(name: str) -> EBRDefinition:
@@ -74,6 +107,17 @@ def sg221_matrix() -> EBRMatrix:
     return build_ebr_matrix(
         context,
         load_ebr_catalog("sg221"),
+        lattice_vectors=np.eye(3),
+    )
+
+
+@pytest.fixture(scope="module")
+def sg213_matrix() -> EBRMatrix:
+    model = load_symmetry_from_spglib("hall:509")
+    context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
+    return build_ebr_matrix(
+        context,
+        load_ebr_catalog("sg213"),
         lattice_vectors=np.eye(3),
     )
 
@@ -136,6 +180,22 @@ def test_catalog_alias_and_strict_custom_schema(tmp_path):
         load_ebr_catalog(custom)
 
 
+def test_sg213_catalog_uses_maximal_wyckoff_positions(sg213_matrix):
+    catalog = load_ebr_catalog("213")
+    assert catalog.space_group_number == 213
+    assert catalog.hall_number == 509
+    assert tuple(column.name for column in catalog.ebrs) == (
+        "A1@4a",
+        "A2@4a",
+        "E@4a",
+        "A1@4b",
+        "A2@4b",
+        "E@4b",
+    )
+    assert np.array_equal(sg213_matrix.dimensions, [4, 4, 8, 4, 4, 8])
+    assert np.all(sg213_matrix.values >= 0)
+
+
 def test_p4mm_catalog_and_dynamic_2d_ebr_matrix(p4mm_matrix):
     catalog = load_ebr_catalog("p4mm")
     assert catalog.dimension == 2
@@ -163,6 +223,57 @@ def test_p4mm_catalog_and_dynamic_2d_ebr_matrix(p4mm_matrix):
         SimpleNamespace(ebr_mode="auto", wannier_subspace="T"),
         SimpleNamespace(model=SimpleNamespace(dimension=2)),
     ) == "regular"
+
+
+@pytest.mark.parametrize("name", WALLPAPER_CATALOGS)
+def test_all_wallpaper_catalogs_load_by_name_and_generate_ebr_matrices(name):
+    catalog = load_ebr_catalog(name)
+    model = load_symmetry(
+        resources.files("pcwannier.symmetry").joinpath(
+            "space_groups", f"{name}.yaml"
+        )
+    )
+    context = build_symmetry_context(
+        model, [np.asarray([0.0])] * model.dimension
+    )
+
+    matrix = build_ebr_matrix(context, catalog, lattice_vectors=np.eye(2))
+
+    assert catalog.space_group_name == name
+    assert matrix.values.shape[1] == len(catalog.ebrs)
+    assert matrix.values.shape[0] == len(matrix.row_keys)
+    assert np.all(matrix.values >= 0)
+    assert np.all(matrix.dimensions > 0)
+    assert infer_builtin_catalog_alias(name) == name
+
+
+@pytest.mark.parametrize(("alias", "canonical"), SHORT_WALLPAPER_ALIASES.items())
+def test_short_wallpaper_catalog_aliases_resolve(alias, canonical):
+    catalog = load_ebr_catalog(alias)
+    assert catalog.space_group_name == canonical
+    assert infer_builtin_catalog_alias(alias) == canonical
+
+
+def test_wallpaper_number_aliases_follow_international_order():
+    for number, canonical in enumerate(WALLPAPER_CATALOGS, start=1):
+        assert load_ebr_catalog(f"wp{number}").space_group_name == canonical
+        assert load_ebr_catalog(f"wp{number:02d}").space_group_name == canonical
+
+
+def test_hexagonal_catalogs_parse_exact_fractional_coordinates():
+    p3 = load_ebr_catalog("p3")
+    points = {point.name: point.k_fractional for point in p3.k_points}
+    assert np.allclose(points["K"], [1.0 / 3.0, 1.0 / 3.0])
+    assert np.allclose(points["K_prime"], [-1.0 / 3.0, -1.0 / 3.0])
+    assert np.allclose(p3.ebrs[3].center, [1.0 / 3.0, 2.0 / 3.0])
+
+    p31m = load_ebr_catalog("p31m")
+    assert {point.name for point in p31m.k_points} == {
+        "Gamma",
+        "K",
+        "K_prime",
+        "M",
+    }
 
 
 def test_named_2d_catalog_rejects_a_different_space_group():

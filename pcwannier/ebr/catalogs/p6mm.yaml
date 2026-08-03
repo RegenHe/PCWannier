@@ -1,0 +1,28 @@
+name: Wallpaper group p6mm
+space_group_name: p6mm
+
+k_points:
+  - name: Gamma
+    k: [0.0, 0.0]
+  - name: K
+    k: [1/3, 1/3]
+  - name: M
+    k: [0.5, 0.0]
+
+# EBR generators induced from the maximal Wyckoff positions of p6mm.
+ebrs:
+  - {name: A1@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: A1}
+  - {name: A2@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: A2}
+  - {name: B1@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: B1}
+  - {name: B2@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: B2}
+  - {name: E1@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: E1}
+  - {name: E2@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: E2}
+
+  - {name: A1@2b, wyckoff: 2b, center: [1/3, 2/3], site_irrep: A1}
+  - {name: A2@2b, wyckoff: 2b, center: [1/3, 2/3], site_irrep: A2}
+  - {name: E@2b, wyckoff: 2b, center: [1/3, 2/3], site_irrep: E}
+
+  - {name: A1@3c, wyckoff: 3c, center: [0.5, 0.0], site_irrep: A1}
+  - {name: A2@3c, wyckoff: 3c, center: [0.5, 0.0], site_irrep: A2}
+  - {name: B1@3c, wyckoff: 3c, center: [0.5, 0.0], site_irrep: B1}
+  - {name: B2@3c, wyckoff: 3c, center: [0.5, 0.0], site_irrep: B2}

@@ -1,0 +1,24 @@
+name: SG213 P4_132
+space_group_number: 213
+hall_number: 509
+
+k_points:
+  - name: Gamma
+    k: [0.0, 0.0, 0.0]
+  - name: R
+    k: [0.5, 0.5, 0.5]
+  - name: M
+    k: [0.5, 0.5, 0.0]
+  - name: X
+    k: [0.0, 0.5, 0.0]
+
+# The maximal Wyckoff positions of this Hall setting are 4a and 4b.
+# Their site-symmetry group is 32 (D3), with irreps A1, A2, and E.
+ebrs:
+  - {name: A1@4a, wyckoff: 4a, center: [0.125, 0.625, 0.875], site_irrep: A1}
+  - {name: A2@4a, wyckoff: 4a, center: [0.125, 0.625, 0.875], site_irrep: A2}
+  - {name: E@4a,  wyckoff: 4a, center: [0.125, 0.625, 0.875], site_irrep: E}
+
+  - {name: A1@4b, wyckoff: 4b, center: [0.125, 0.375, 0.625], site_irrep: A1}
+  - {name: A2@4b, wyckoff: 4b, center: [0.125, 0.375, 0.625], site_irrep: A2}
+  - {name: E@4b,  wyckoff: 4b, center: [0.125, 0.375, 0.625], site_irrep: E}

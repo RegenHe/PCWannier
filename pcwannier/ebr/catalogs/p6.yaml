@@ -1,0 +1,26 @@
+name: Wallpaper group p6
+space_group_name: p6
+
+k_points:
+  - name: Gamma
+    k: [0.0, 0.0]
+  - name: K
+    k: [1/3, 1/3]
+  - name: M
+    k: [0.5, 0.0]
+
+# EBR generators induced from the maximal Wyckoff positions of p6.
+ebrs:
+  - {name: A@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: A}
+  - {name: B@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: B}
+  - {name: E1_plus@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: E1_plus}
+  - {name: E1_minus@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: E1_minus}
+  - {name: E2_plus@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: E2_plus}
+  - {name: E2_minus@1a, wyckoff: 1a, center: [0.0, 0.0], site_irrep: E2_minus}
+
+  - {name: A@2b, wyckoff: 2b, center: [1/3, 2/3], site_irrep: A}
+  - {name: E_plus@2b, wyckoff: 2b, center: [1/3, 2/3], site_irrep: E_plus}
+  - {name: E_minus@2b, wyckoff: 2b, center: [1/3, 2/3], site_irrep: E_minus}
+
+  - {name: A@3c, wyckoff: 3c, center: [0.5, 0.0], site_irrep: A}
+  - {name: B@3c, wyckoff: 3c, center: [0.5, 0.0], site_irrep: B}

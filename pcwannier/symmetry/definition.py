@@ -1031,9 +1031,11 @@ def _generated_identification(
         )
     canonical_name = {
         "m-3m": "O_h",
+        "432": "O",
         "4/mmm": "D4h",
         "-43m": "T_d",
         "-3m": "D3d",
+        "32": "D3",
         "-42m": "D2d",
         "222": "D2",
     }.get(point_group.symbol, point_group.symbol)
@@ -1063,7 +1065,7 @@ def _generated_irrep_labels(
     concrete: ConcreteFiniteGroup,
     representations: tuple[tuple[np.ndarray, ...], ...],
 ) -> tuple[str, ...]:
-    supported = {"m-3m", "4/mmm", "-43m", "-3m", "-42m", "222"}
+    supported = {"m-3m", "432", "4/mmm", "-43m", "-3m", "32", "-42m", "222"}
     if symbol not in supported:
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
 
@@ -1117,7 +1119,11 @@ def _generated_irrep_labels(
     )
     if symbol in {"m-3m", "4/mmm"} and (inversion is None or c4 is None):
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+    if symbol == "432" and c4 is None:
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
     if symbol == "-3m" and (inversion is None or not proper_twofolds):
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+    if symbol == "32" and not proper_twofolds:
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
     if symbol in {"-43m", "-42m"} and s4 is None:
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
@@ -1144,7 +1150,7 @@ def _generated_irrep_labels(
         c4_character = (
             0.0 if c4 is None else complex(np.trace(matrices[c4])).real
         )
-        if symbol == "m-3m":
+        if symbol in {"m-3m", "432"}:
             if dimension == 1:
                 base = "A1" if c4_character > 0.0 else "A2"
             elif dimension == 2:
@@ -1167,7 +1173,7 @@ def _generated_irrep_labels(
                 base = "T1" if s4_character > 0.0 else "T2"
             else:
                 base = f"U{generated_index}"
-        elif symbol == "-3m" and dimension == 1:
+        elif symbol in {"-3m", "32"} and dimension == 1:
             branch = "1" if complex(np.trace(matrices[proper_twofolds[0]])).real > 0.0 else "2"
             base = "A" + branch
         elif symbol == "-42m" and dimension == 1 and d2d_c2 is not None:

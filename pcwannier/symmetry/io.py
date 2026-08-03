@@ -627,7 +627,7 @@ def _vector(value: Any, dimension: int, description: str) -> np.ndarray:
     if not isinstance(value, list) or len(value) != dimension:
         raise ValueError(f"{description} must be a finite vector with length {dimension}.")
     array = np.asarray(
-        [_real_scalar(entry, f"{description}[{index}]") for index, entry in enumerate(value)],
+        [parse_real_scalar(entry, f"{description}[{index}]") for index, entry in enumerate(value)],
         dtype=float,
     )
     return array
@@ -641,7 +641,7 @@ def _real_matrix(value: Any, dimension: int, description: str) -> np.ndarray:
         if not isinstance(row, list) or len(row) != dimension:
             raise ValueError(f"{description} must have shape {(dimension, dimension)}.")
         for column_index, scalar in enumerate(row):
-            matrix[row_index, column_index] = _real_scalar(
+            matrix[row_index, column_index] = parse_real_scalar(
                 scalar, f"{description}[{row_index},{column_index}]"
             )
     return matrix
@@ -682,7 +682,9 @@ def _complex_scalar(value: Any, description: str) -> complex:
     return result
 
 
-def _real_scalar(value: Any, description: str) -> float:
+def parse_real_scalar(value: Any, description: str) -> float:
+    """Parse a finite real scalar, including exact YAML expressions such as ``1/3``."""
+
     result = _complex_scalar(value, description)
     if abs(result.imag) > 1.0e-12:
         raise ValueError(f"{description} must evaluate to a real number, got {result!r}.")

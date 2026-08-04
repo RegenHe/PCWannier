@@ -85,6 +85,8 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
                 f"Symmetry-subspace candidates: {len(result.subspace_candidates)}",
                 f"Minimum auxiliary dimension: {result.optimal_auxiliary_dimension}",
                 f"Fixed bands (0-based): {fixed}",
+                "n_L convention: the subtracted auxiliary EBR in n_T = n_T+L - n_L; "
+                "it is not the number of selected L-channel numerical bands.",
             )
         )
         statistics = result.search_statistics
@@ -110,13 +112,20 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
             )
         for index, candidate in enumerate(result.subspace_candidates, start=1):
             solution = candidate.solution
-            gamma_rule = (
-                "include the two singular Gamma zero modes through the T+L-L surrogate; "
-                "enforce all selected positive-frequency Gamma irreps"
-                if candidate.includes_gamma_zero_modes
-                else "exclude only the two singular Gamma zero modes; enforce all selected "
-                "positive-frequency Gamma irreps"
-            )
+            gamma_rule = {
+                "ordinary": (
+                    "ordinary T+L Gamma representation; enforce complete zero- and "
+                    "positive-frequency irreps"
+                ),
+                "include_gamma_zero_modes": (
+                    "include the two singular Gamma zero modes through the T+L-L "
+                    "surrogate; enforce all selected positive-frequency Gamma irreps"
+                ),
+                "exclude_gamma_zero_modes": (
+                    "exclude only the two singular Gamma zero modes; enforce all selected "
+                    "positive-frequency Gamma irreps"
+                ),
+            }[candidate.gamma_sector]
             lines.extend(
                 (
                     f"  candidate {index}:",
@@ -147,6 +156,7 @@ def format_ebr_report(result: EBRAnalysisResult) -> str:
                     f"    {point.point_name}: physical={physical}; "
                     f"formal_signed={formal}; "
                     f"invariant_subspace_realizations={point.alternative_count}"
+                    + _format_channel_realizations(point)
                 )
     if result.diagnostics:
         lines.extend(("", "Diagnostics:"))
@@ -229,10 +239,16 @@ def ebr_result_to_dict(result: EBRAnalysisResult) -> dict:
                         ),
                         "unresolved_dimension": point.unresolved_dimension,
                         "alternative_count": point.alternative_count,
+                        "channel_dimension_realizations": [
+                            dict(realization)
+                            for realization in point.channel_dimension_realizations
+                        ],
+                        "channel_assignment_complete": point.channel_assignment_complete,
                     }
                     for point in item.point_representations
                 ],
                 "includes_gamma_zero_modes": item.includes_gamma_zero_modes,
+                "gamma_sector": item.gamma_sector,
                 "block_realization_count": item.block_realization_count,
             }
             for item in result.subspace_candidates
@@ -277,6 +293,17 @@ def _format_combination(values, names, *, signed: bool = False) -> str:
     if not signed and any(int(value) < 0 for value in values):
         raise ValueError("A non-signed EBR combination contains negative multiplicities.")
     return "".join(terms)
+
+
+def _format_channel_realizations(point) -> str:
+    if not point.channel_dimension_realizations:
+        return ""
+    realizations = " | ".join(
+        ",".join(f"{name}:{value}" for name, value in realization)
+        for realization in point.channel_dimension_realizations
+    )
+    suffix = "" if point.channel_assignment_complete else " (partial diagnostics)"
+    return f"; channel_dimensions={realizations}{suffix}"
 
 
 def _format_catalog_group(catalog) -> str:

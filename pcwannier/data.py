@@ -545,3 +545,4 @@ class BlochSymmetryRunResult:
     primary: BlochSymmetryChannelResult
     auxiliary_channels: dict[str, BlochSymmetryChannelResult] = field(default_factory=dict)
     gamma_zero_regularization: "GammaZeroRegularizationAnalysis | None" = None
+    band_channels: dict[int, BandChannelReference] = field(default_factory=dict)

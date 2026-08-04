@@ -141,6 +141,51 @@ def test_pm3m_wyckoff_projection_target_binding(tmp_path):
     )
 
 
+def test_3d_projection_target_center_is_reduced_modulo_lattice(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
+                "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+                "k_points = 0:1:1, 0:1:1, 0:1:1",
+                "composition_of_b = 1 0 0, 0 1 0, 0 0 1",
+                "dataset_type = mpb",
+                "field_components = full_vector",
+                "primary_field = magnetic",
+                "dataset_file = H.h5",
+                "mesh_file = grid.h5",
+                "E_file = E.h5",
+                "metric_file = false",
+                "band_window = 0:8",
+                "extension = 1,1,1",
+                "wannier_figures = false",
+                "symmetry_file = hall:509",
+                "projections",
+                "4b; [-0.125,-0.125,-0.125]; (z=[1,1,1], x=[1,-1,0]); "
+                "[1,0,0,5]@[1,-1,0]; [1,0,0,5]@[1,1,-2]",
+                "end",
+                "wannier_targets",
+                "center_E_4b; 4b; E",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(incar)
+
+    record = config.projection_target_bindings[0].projection
+    target = config.symmetry_context.model.target("center_E_4b")
+    assert np.allclose(record.frac_position, [-0.125, -0.125, -0.125])
+    assert any(
+        np.allclose(point.position, [0.875, 0.875, 0.875])
+        for point in target.orbit.points
+    )
+    assert target.multiplicity == 4
+
+
 def _write_pm3m_vector_binding_incar(
     path: Path,
     projection_lines: list[str],

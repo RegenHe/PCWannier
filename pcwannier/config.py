@@ -506,9 +506,20 @@ class IncarParser:
                                 f"Projection Wyckoff label {projection.wyckoff!r} does not match "
                                 f"target {item['name']!r} label {wyckoff!r}."
                             )
+                        target_center = np.mod(
+                            np.asarray(projection.frac_position, dtype=float), 1.0
+                        )
+                        target_center[
+                            np.isclose(
+                                target_center,
+                                1.0,
+                                rtol=0.0,
+                                atol=max(cfg.symmetry_tolerance, 1.0e-12),
+                            )
+                        ] = 0.0
                         specs.append(
                             WannierTargetSpec(
-                                item["name"], projection.frac_position, item["site_irrep"], projection.wyckoff
+                                item["name"], target_center, item["site_irrep"], projection.wyckoff
                             )
                         )
                         bindings.append(

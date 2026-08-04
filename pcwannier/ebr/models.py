@@ -241,6 +241,10 @@ class EBRSubspacePointRepresentation:
     irrep_multiplicities: tuple[tuple[str, int], ...]
     unresolved_dimension: int = 0
     alternative_count: int = 1
+    channel_dimension_realizations: tuple[
+        tuple[tuple[str, int], ...], ...
+    ] = ()
+    channel_assignment_complete: bool = True
 
     def __post_init__(self) -> None:
         if not str(self.point_name).strip():
@@ -256,9 +260,27 @@ class EBRSubspacePointRepresentation:
             raise ValueError("unresolved_dimension must be non-negative.")
         if int(self.alternative_count) <= 0:
             raise ValueError("alternative_count must be positive.")
+        channel_realizations = tuple(
+            tuple((str(name), int(value)) for name, value in realization)
+            for realization in self.channel_dimension_realizations
+        )
+        for realization in channel_realizations:
+            names = tuple(name for name, _ in realization)
+            if any(not name.strip() or value < 0 for name, value in realization):
+                raise ValueError("Channel dimensions must be named non-negative integers.")
+            if len(names) != len(set(names)):
+                raise ValueError("A channel realization may contain each channel only once.")
+        if len(channel_realizations) != len(set(channel_realizations)):
+            raise ValueError("Channel dimension realizations must be unique.")
         object.__setattr__(self, "irrep_multiplicities", multiplicities)
         object.__setattr__(self, "unresolved_dimension", int(self.unresolved_dimension))
         object.__setattr__(self, "alternative_count", int(self.alternative_count))
+        object.__setattr__(
+            self, "channel_dimension_realizations", channel_realizations
+        )
+        object.__setattr__(
+            self, "channel_assignment_complete", bool(self.channel_assignment_complete)
+        )
 
 
 @dataclass(frozen=True)
@@ -267,11 +289,20 @@ class EBRSubspaceCandidate:
     selected_symmetry_vector: BandSymmetryVector
     point_representations: tuple[EBRSubspacePointRepresentation, ...]
     includes_gamma_zero_modes: bool = False
+    gamma_sector: str = "ordinary"
 
     def __post_init__(self) -> None:
         names = tuple(item.point_name for item in self.point_representations)
         if len(names) != len(set(names)):
             raise ValueError("A subspace candidate may contain each k point only once.")
+        sector = str(self.gamma_sector).strip()
+        if sector not in {
+            "ordinary",
+            "include_gamma_zero_modes",
+            "exclude_gamma_zero_modes",
+        }:
+            raise ValueError(f"Unknown EBR Gamma sector {sector!r}.")
+        object.__setattr__(self, "gamma_sector", sector)
 
     @property
     def block_realization_count(self) -> int:

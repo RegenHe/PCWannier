@@ -195,6 +195,7 @@ def run_ebr_analysis(
     physical_analysis = (
         analysis.primary.analysis if hasattr(analysis, "primary") else analysis
     )
+    band_channels = dict(getattr(analysis, "band_channels", {}))
     if not isinstance(physical_analysis, BlochSymmetryAnalysisResult):
         raise TypeError("run_ebr_analysis expects a Bloch symmetry analysis result.")
     catalog_reference = str(config.ebr_catalog).strip()
@@ -239,7 +240,9 @@ def run_ebr_analysis(
     )
     if mode == "subspace":
         singular_gamma_zero_modes = _has_transverse_gamma_singularity(
-            context, field_kind
+            context,
+            field_kind,
+            wannier_subspace=config.wannier_subspace,
         )
         target_dimension = config.ebr_subspace_dimension
         if target_dimension is None:
@@ -338,6 +341,7 @@ def run_ebr_analysis(
                     fixed_band_indices=fixed_bands,
                     include_gamma_zero_modes=include_gamma_zero_modes,
                     singular_gamma_zero_modes=singular_gamma_zero_modes,
+                    band_channels=band_channels,
                 )
                 if point_representations is not None:
                     candidates.append(
@@ -346,6 +350,7 @@ def run_ebr_analysis(
                             selected_vector,
                             point_representations,
                             include_gamma_zero_modes,
+                            sector_name,
                         )
                     )
         if singular_gamma_zero_modes:
@@ -596,7 +601,38 @@ def _match_subspace_representations(
     fixed_band_indices: tuple[int, ...] = (),
     include_gamma_zero_modes: bool = False,
     singular_gamma_zero_modes: bool = True,
+    band_channels=None,
 ) -> tuple[EBRSubspacePointRepresentation, ...] | None:
+    band_channels = {} if band_channels is None else dict(band_channels)
+    channel_names = tuple(
+        dict.fromkeys(
+            str(reference.channel)
+            for _, reference in sorted(band_channels.items())
+        )
+    )
+
+    def block_channel_profile(block, selected_dimension: int):
+        if not channel_names:
+            return (), True
+        zero = tuple(0 for _ in channel_names)
+        if selected_dimension == 0:
+            return zero, True
+        counts = {name: 0 for name in channel_names}
+        for band_index in block.band_indices:
+            reference = band_channels.get(int(band_index))
+            if reference is None or str(reference.channel) not in counts:
+                return zero, False
+            counts[str(reference.channel)] += 1
+        active = tuple(name for name, value in counts.items() if value)
+        if selected_dimension == len(block.band_indices):
+            return tuple(counts[name] for name in channel_names), True
+        if len(active) == 1:
+            return tuple(
+                selected_dimension if name == active[0] else 0
+                for name in channel_names
+            ), True
+        return zero, False
+
     positions = {key: index for index, key in enumerate(vector.row_keys)}
     output = []
     for catalog_point in catalog.k_points:
@@ -644,13 +680,22 @@ def _match_subspace_representations(
                     f"dimension {represented_dimension}, expected {len(block.band_indices)}."
                 )
             if fixed.intersection(block.band_indices):
-                options.append(((tuple(int(value) for value in full), represented_dimension),))
+                profile, profile_known = block_channel_profile(
+                    block, represented_dimension
+                )
+                options.append(
+                    ((tuple(int(value) for value in full), represented_dimension, profile, profile_known),)
+                )
                 continue
             block_options = []
             for values in product(*(range(int(value) + 1) for value in full)):
                 contribution = np.asarray(values, dtype=np.int64)
+                contribution_dimension = int(contribution @ irrep_dimensions)
+                profile, profile_known = block_channel_profile(
+                    block, contribution_dimension
+                )
                 block_options.append(
-                    (values, int(contribution @ irrep_dimensions))
+                    (values, contribution_dimension, profile, profile_known)
                 )
             options.append(tuple(block_options))
 
@@ -659,34 +704,85 @@ def _match_subspace_representations(
         represented_target_dimension = vector.total_dimension - zero_dimension
 
         @lru_cache(maxsize=None)
-        def select(index: int, current_values: tuple[int, ...], selected_dimension: int) -> int:
+        def select(index: int, current_values: tuple[int, ...], selected_dimension: int):
             current = np.asarray(current_values, dtype=np.int64)
             if np.any(current > target) or selected_dimension > represented_target_dimension:
-                return 0
+                return 0, (), True
             if index == len(blocks):
-                return int(
+                matches = int(
                     np.array_equal(current, target)
                     and selected_dimension == represented_target_dimension
                 )
+                profiles = (tuple(0 for _ in channel_names),) if matches and channel_names else ()
+                return matches, profiles, True
             count = 0
-            for contribution_values, contribution_dimension in options[index]:
+            profiles = set()
+            complete = True
+            for (
+                contribution_values,
+                contribution_dimension,
+                contribution_profile,
+                profile_known,
+            ) in options[index]:
                 contribution = np.asarray(contribution_values, dtype=np.int64)
-                count += select(
+                child_count, child_profiles, child_complete = select(
                     index + 1,
                     tuple(int(value) for value in current + contribution),
                     selected_dimension + contribution_dimension,
                 )
-            return count
+                if child_count == 0:
+                    continue
+                count += child_count
+                complete = complete and child_complete and profile_known
+                if profile_known:
+                    profiles.update(
+                        tuple(
+                            int(left + right)
+                            for left, right in zip(contribution_profile, child)
+                        )
+                        for child in child_profiles
+                    )
+            return count, tuple(sorted(profiles)), complete
 
-        match_count = select(0, tuple(0 for _ in target), 0)
+        match_count, raw_profiles, channel_assignment_complete = select(
+            0, tuple(0 for _ in target), 0
+        )
         if match_count == 0:
             return None
+        channel_realizations = ()
+        if channel_names:
+            zero_profile = tuple(0 for _ in channel_names)
+            zero_profile_known = True
+            for block in zero_selection:
+                profile, known = block_channel_profile(block, len(block.band_indices))
+                zero_profile = tuple(
+                    int(left + right) for left, right in zip(zero_profile, profile)
+                )
+                zero_profile_known = zero_profile_known and known
+            channel_assignment_complete = (
+                channel_assignment_complete and zero_profile_known
+            )
+            channel_realizations = tuple(
+                tuple(
+                    (name, int(value))
+                    for name, value in zip(
+                        channel_names,
+                        (
+                            int(left + right)
+                            for left, right in zip(profile, zero_profile)
+                        ),
+                    )
+                )
+                for profile in raw_profiles
+            )
         output.append(
             EBRSubspacePointRepresentation(
                 catalog_point.name,
                 tuple((name, int(value)) for name, value in zip(names, target) if value),
                 zero_dimension,
                 match_count,
+                channel_realizations,
+                channel_assignment_complete,
             )
         )
     return tuple(output)
@@ -1198,12 +1294,21 @@ def _resolve_ebr_mode(config, context: SymmetryContext) -> str:
 
 
 def _has_transverse_gamma_singularity(
-    context: SymmetryContext, field_kind: FieldKind
+    context: SymmetryContext,
+    field_kind: FieldKind,
+    *,
+    wannier_subspace: str = "T",
 ) -> bool:
-    return context.model.dimension == 3 and field_kind in {
-        FieldKind.ELECTRIC_POLAR_VECTOR,
-        FieldKind.MAGNETIC_AXIAL_VECTOR,
-    }
+    subspace = str(wannier_subspace).replace(" ", "").upper()
+    return (
+        subspace == "T"
+        and context.model.dimension == 3
+        and field_kind
+        in {
+            FieldKind.ELECTRIC_POLAR_VECTOR,
+            FieldKind.MAGNETIC_AXIAL_VECTOR,
+        }
+    )
 
 
 def _normalized_group_name(value: str) -> str:

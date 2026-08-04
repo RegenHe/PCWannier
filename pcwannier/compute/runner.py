@@ -117,6 +117,7 @@ def run_bloch_symmetry_preanalysis(
                 primary=physical,
                 auxiliary_channels=auxiliary_channels,
                 gamma_zero_regularization=gamma_regularization,
+                band_channels=dict(bundle.band_channels),
             )
 
 

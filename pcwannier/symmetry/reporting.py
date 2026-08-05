@@ -16,9 +16,7 @@ LOGGER = logging.getLogger(__name__)
 
 def log_gamma_zero_regularization(result: GammaZeroRegularizationAnalysis) -> None:
     LOGGER.info(
-        "Gamma T+L regularization %s: physical_T_bands(0-based)=%s "
-        "longitudinal_zero_bands(0-based)=%s irrep=%s unitarity=%.6g "
-        "twisted_composition=%.6g note=%s",
+        "Gamma T+L regularization %s: T=%s L=%s irrep=%s residuals(U/C)=%.3g/%.3g",
         result.point_name,
         tuple(result.transverse_band_indices),
         tuple(result.longitudinal_zero_band_indices),
@@ -29,101 +27,110 @@ def log_gamma_zero_regularization(result: GammaZeroRegularizationAnalysis) -> No
         ),
         result.unitarity_error,
         result.twisted_composition_residual,
-        result.note,
     )
+    LOGGER.debug("Gamma T+L regularization note: %s", result.note)
 
 
 def log_bloch_symmetry_analysis(result: BlochSymmetryAnalysisResult) -> None:
+    blocks = tuple(
+        block
+        for point in result.points
+        for block in point.degenerate_blocks
+    )
+    labeled = sum(block.decomposition is not None for block in blocks)
+    approximate = sum(
+        block.decomposition is None and block.approximate_decomposition is not None
+        for block in blocks
+    )
+    LOGGER.info(
+        "Bloch symmetry: points=%s blocks=%s labeled=%s approximate=%s unavailable=%s",
+        len(result.points),
+        len(blocks),
+        labeled,
+        approximate,
+        len(blocks) - labeled - approximate,
+    )
     for point in result.points:
-        blocks = tuple(
-            tuple(block.band_indices)
-            for block in point.degenerate_blocks
-        )
         factor = point.factor_system
+        block_summary = ", ".join(
+            f"{_format_bands(block.band_indices)}:{_format_block_irrep(block)}"
+            for block in point.degenerate_blocks
+        ) or "none"
         LOGGER.info(
-            "Bloch symmetry point %s: little_co_group=%s unitary_subgroup=%s "
-            "unitary_operations=%s antiunitary_operations=%s classes=%s mapping=%s k=%s "
-            "outer_bands(0-based)=%s analyzed_bands(0-based)=%s blocks=%s "
-            "unitarity=%.6g outer_unitarity=%.6g leakage=%.6g "
-            "outer_exact_composition=%.6g selected_twisted_composition=%.6g "
-            "factor_phase=%.6g factor_cocycle=%.6g "
-            "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s "
-            "small_representations=%s unitary_characters=%s",
+            "Symmetry %s: k=%s group=%s factor=%s blocks=[%s] "
+            "residuals(U/L/C)=%.3g/%.3g/%.3g",
             point.name,
+            _format_vector(point.sampled_k_fractional),
             point.little_group_name or "unresolved",
-            point.unitary_subgroup_name or point.little_group_name or "unresolved",
-            point.unitary_operation_names,
-            point.antiunitary_operation_names,
-            point.conjugacy_classes,
-            point.finite_group_mapping,
-            point.sampled_k_fractional.tolist(),
-            tuple(point.outer_band_indices),
-            tuple(point.band_indices),
-            blocks,
+            _factor_kind(factor),
+            block_summary,
             point.diagnostics.unitarity_error,
-            point.outer_unitarity_error,
             point.diagnostics.leakage,
-            point.diagnostics.outer_composition_residual,
             point.diagnostics.selected_twisted_composition_residual,
-            0.0 if factor is None else factor.phase_residual,
-            0.0 if factor is None else factor.cocycle_residual,
-            True if factor is None else factor.raw_trivial,
-            True if factor is None else factor.cohomologically_trivial,
-            1 if factor is None else factor.bloch_sign,
-            (
-                ()
-                if point.resolved_little_group is None
-                else tuple(
-                    (irrep.name, irrep.dimension, irrep.label_source)
-                    for irrep in point.resolved_little_group.irreps
-                )
-            ),
-            {name: complex(value) for name, value in point.unitary_characters.items()},
         )
-        for block in point.degenerate_blocks:
-            label = _format_block_irrep(block, include_unavailable_reason=True)
-            LOGGER.info(
-                "Bloch symmetry block %s bands(0-based)=%s eigenvalues=%s degeneracy=%s "
-                "irrep=%s class_character_summary=%s "
-                "unitary_characters=%s coupled_outer_bands(0-based)=%s "
-                "candidate_excluded_bands(0-based)=%s unitarity=%.6g leakage=%.6g "
-                "twisted_composition=%.6g character_fit_error=%s",
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            _log_bloch_symmetry_point_details(point)
+
+
+def _log_bloch_symmetry_point_details(point) -> None:
+    factor = point.factor_system
+    LOGGER.debug(
+        "Symmetry details %s: unitary_operations=%s antiunitary_operations=%s "
+        "classes=%s mapping=%s outer_bands=%s analyzed_bands=%s outer_unitarity=%.6g "
+        "outer_composition=%.6g factor_phase=%.6g factor_cocycle=%.6g "
+        "factor_raw_trivial=%s factor_coboundary_trivial=%s factor_sign=%s "
+        "small_representations=%s unitary_characters=%s",
+        point.name,
+        point.unitary_operation_names,
+        point.antiunitary_operation_names,
+        point.conjugacy_classes,
+        point.finite_group_mapping,
+        tuple(point.outer_band_indices),
+        tuple(point.band_indices),
+        point.outer_unitarity_error,
+        point.diagnostics.outer_composition_residual,
+        0.0 if factor is None else factor.phase_residual,
+        0.0 if factor is None else factor.cocycle_residual,
+        True if factor is None else factor.raw_trivial,
+        True if factor is None else factor.cohomologically_trivial,
+        1 if factor is None else factor.bloch_sign,
+        (
+            ()
+            if point.resolved_little_group is None
+            else tuple(
+                (irrep.name, irrep.dimension, irrep.label_source)
+                for irrep in point.resolved_little_group.irreps
+            )
+        ),
+        {name: complex(value) for name, value in point.unitary_characters.items()},
+    )
+    for block in point.degenerate_blocks:
+        LOGGER.debug(
+            "Symmetry block details %s bands=%s eigenvalues=%s class_characters=%s "
+            "unitary_characters=%s coupled_outer_bands=%s candidate_excluded_bands=%s "
+            "unitarity=%.6g leakage=%.6g twisted_composition=%.6g character_fit_error=%s",
+            point.name,
+            tuple(block.band_indices),
+            tuple(complex(value) for value in block.energies),
+            _class_character_entries(point, block),
+            {name: complex(value) for name, value in block.unitary_characters.items()},
+            tuple(block.coupled_outer_bands),
+            tuple(block.candidate_excluded_bands),
+            block.unitarity_error,
+            block.leakage,
+            block.twisted_composition_residual,
+            block.character_fit_error,
+        )
+        for diagnostic in block.antiunitary_diagnostics:
+            LOGGER.debug(
+                "Antiunitary block details %s bands=%s operation=%s square=%s "
+                "square_eigenvalues=%s square_residual=%.6g",
                 point.name,
                 tuple(block.band_indices),
-                tuple(complex(value) for value in block.energies),
-                len(block.band_indices),
-                label,
-                _class_character_entries(point, block),
-                {name: complex(value) for name, value in block.unitary_characters.items()},
-                tuple(block.coupled_outer_bands),
-                tuple(block.candidate_excluded_bands),
-                block.unitarity_error,
-                block.leakage,
-                block.twisted_composition_residual,
-                block.character_fit_error,
-            )
-            for diagnostic in block.antiunitary_diagnostics:
-                LOGGER.info(
-                    "Bloch antiunitary block %s bands(0-based)=%s operation=%s square=%s "
-                    "square_eigenvalues=%s square_residual=%.6g",
-                    point.name,
-                    tuple(block.band_indices),
-                    diagnostic.operation_name,
-                    diagnostic.square_operation_name,
-                    diagnostic.square_eigenvalues,
-                    diagnostic.square_residual,
-                )
-        if factor is not None and any(factor.antiunitary_flags):
-            LOGGER.info(
-                "Symmetry point %s contains antiunitary operations: ordinary irrep labels "
-                "unavailable (magnetic corepresentation database is not implemented)",
-                point.name,
-            )
-        elif factor is not None and not factor.cohomologically_trivial:
-            LOGGER.info(
-                "Symmetry point %s uses a non-trivial projective factor: "
-                "small-representation labels are generated in the fixed PCWannier factor gauge",
-                point.name,
+                diagnostic.operation_name,
+                diagnostic.square_operation_name,
+                diagnostic.square_eigenvalues,
+                diagnostic.square_residual,
             )
 
 
@@ -131,22 +138,23 @@ def log_target_compatibilities(
     results: tuple[TargetCompatibilityAnalysis, ...],
 ) -> None:
     for result in results:
+        target_irreps = (
+            "unavailable"
+            if result.target_decomposition is None
+            else _format_irrep_decomposition(result.target_decomposition)
+        )
         LOGGER.info(
-            "Target compatibility %s: targets=%s target_unitary_characters=%s "
-            "target_irreps=%s compatible=%s direct_intertwiner_dimension=%s",
+            "Target %s: names=%s irreps=%s compatible=%s dim_Hom=%s",
             result.point_name,
-            result.target_names,
-            {
-                name: complex(value)
-                for name, value in result.target_unitary_characters.items()
-            },
-            (
-                {}
-                if result.target_decomposition is None
-                else result.target_decomposition.multiplicities
-            ),
+            ",".join(result.target_names),
+            target_irreps,
             None if result.compatibility is None else result.compatibility.compatible,
             result.intertwiner_dimension,
+        )
+        LOGGER.debug(
+            "Target details %s: unitary_characters=%s",
+            result.point_name,
+            {name: complex(value) for name, value in result.target_unitary_characters.items()},
         )
 
 
@@ -268,6 +276,16 @@ def _format_irrep_decomposition(decomposition) -> str:
             continue
         terms.append(name if multiplicity == 1 else f"{multiplicity}{name}")
     return " + ".join(terms) or "none"
+
+
+def _factor_kind(factor) -> str:
+    if factor is None:
+        return "ordinary"
+    if any(factor.antiunitary_flags):
+        return "antiunitary"
+    if factor.cohomologically_trivial:
+        return "ordinary"
+    return "projective"
 
 
 def _format_block_irrep(block, *, include_unavailable_reason: bool = False) -> str:

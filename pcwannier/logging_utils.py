@@ -5,6 +5,9 @@ import logging
 import sys
 
 
+DEFAULT_PROGRESS_INTERVAL = 25
+
+
 def configure_logging(log_file: str | Path | None = "log.txt", level: int = logging.INFO) -> None:
     root = logging.getLogger()
     root.setLevel(level)
@@ -25,3 +28,19 @@ def configure_logging(log_file: str | Path | None = "log.txt", level: int = logg
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
+
+
+def should_log_progress(
+    iteration: int,
+    *,
+    total: int | None = None,
+    finished: bool = False,
+    interval: int = DEFAULT_PROGRESS_INTERVAL,
+) -> bool:
+    """Return whether an iterative diagnostic belongs in the concise INFO log."""
+
+    if iteration <= 1 or finished:
+        return True
+    if total is not None and iteration >= total:
+        return True
+    return interval > 0 and iteration % interval == 0

@@ -5,6 +5,7 @@ import logging
 import numpy as np
 import scipy.linalg
 
+from ..logging_utils import should_log_progress
 from ..matrix_io import load_cell_matrix
 from .matrix import MSet
 from .parallel import parallel_map
@@ -81,7 +82,11 @@ class Gradient:
                 continue
 
             err = abs(last_omega - total)
-            LOGGER.info(
+            finished = err <= err_diff and gradient_norm <= gradient_tolerance
+            log = LOGGER.info if should_log_progress(
+                iteration + 1, total=max_iter, finished=finished
+            ) else LOGGER.debug
+            log(
                 "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
                 "max_gradient_norm=%s epsilon=%s",
                 iteration + 1,
@@ -94,7 +99,7 @@ class Gradient:
                 self.epsilon,
             )
             last_omega = total
-            if err <= err_diff and gradient_norm <= gradient_tolerance:
+            if finished:
                 converged = True
                 break
         if not converged:

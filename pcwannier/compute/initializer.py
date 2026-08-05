@@ -4,6 +4,7 @@ import logging
 
 import numpy as np
 
+from ..logging_utils import should_log_progress
 from ..matrix_io import load_cell_matrix
 from .integration import validated_real
 from .kspace import neighbor_reciprocal_lattice_vectors
@@ -187,8 +188,13 @@ class StateInitializer:
             self.update_Z()
             self.sort_Z()
             omega = self.get_omega_I()
-            LOGGER.info("initializer iter %s omega=%s err=%s", idx, abs(omega), abs(omega - last_omega))
-            if abs(omega - last_omega) < err_diff:
+            err = abs(omega - last_omega)
+            finished = err < err_diff
+            log = LOGGER.info if should_log_progress(
+                idx + 1, total=max_iter, finished=finished
+            ) else LOGGER.debug
+            log("initializer iter %s omega=%s err=%s", idx + 1, abs(omega), err)
+            if finished:
                 break
             last_omega = omega
 

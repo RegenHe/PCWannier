@@ -7,6 +7,7 @@ from typing import Sequence
 import numpy as np
 import scipy.linalg
 
+from ..logging_utils import should_log_progress
 from .bloch import StateBlochSymmetryProvider
 from .constraints import propagate_target_gauge as _propagate_target_matrix
 from .gauge import GaugeResidualReport, SymmetryGaugeResult, evaluate_symmetry_gauge
@@ -428,7 +429,11 @@ def localize_symmetry_constrained(
                 step_epsilon,
             )
         )
-        LOGGER.info(
+        finished = err <= err_diff and gradient_norm <= gradient_tolerance
+        log = LOGGER.info if should_log_progress(
+            iteration, total=max_iter, finished=finished
+        ) else LOGGER.debug
+        log(
             "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
             "max_gradient_norm=%s symmetry_max=%s symmetry_mean=%s unitarity=%s path=%s epsilon=%s",
             iteration,
@@ -445,7 +450,7 @@ def localize_symmetry_constrained(
             gradient.epsilon,
         )
         last_omega = total
-        if err <= err_diff and gradient_norm <= gradient_tolerance:
+        if finished:
             converged = True
             break
         gradient.calc(is_update=False)

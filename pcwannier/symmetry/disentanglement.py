@@ -7,6 +7,7 @@ import numpy as np
 
 from ..compute.kspace import neighbor_reciprocal_lattice_vectors
 from ..compute.parallel import parallel_map
+from ..logging_utils import should_log_progress
 from .bloch import StateBlochSymmetryProvider
 from .constraints import (
     propagate_physical_frame,
@@ -328,7 +329,11 @@ def disentangle_symmetry_constrained(
         _validate_report(report, tolerance, iteration)
         history.append(_iteration_record(iteration, omega, change, report, mixing))
         err = abs(last_omega - omega)
-        LOGGER.info(
+        finished = err < err_diff and change < projector_tolerance
+        log = LOGGER.info if should_log_progress(
+            iteration, total=max_iter, finished=finished
+        ) else LOGGER.debug
+        log(
             "disentanglement iter %s omega_I=%s err=%s projector_change=%s "
             "projector_symmetry=%s intertwiner=%s orthonormality=%s frozen=%s path=%s mixing=%s",
             iteration,
@@ -342,7 +347,7 @@ def disentangle_symmetry_constrained(
             report.max_path_consistency,
             mixing,
         )
-        if err < err_diff and change < projector_tolerance:
+        if finished:
             converged = True
             break
         last_omega = omega

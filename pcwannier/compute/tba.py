@@ -60,8 +60,8 @@ class TBAModel:
         projected = np.empty((k_count, band_count, band_count), dtype=np.complex128)
         for pos, (i, j, k) in enumerate(state.k_indices()):
             umat = self.ctx.output_state_coefficients_at(i, j, k)
-            energy = self._output_energies_at((i, j, k))
-            projected[pos] = np.conj(umat).T @ (energy[:, None] * umat)
+            base_hamiltonian = self._output_base_hamiltonian_at((i, j, k))
+            projected[pos] = np.conj(umat).T @ base_hamiltonian @ umat
             k_cart[pos] = get_kxyz(config, [i, j, k])[:dim]
         self._projected_k_cart = k_cart
         self._projected_hamiltonians = projected
@@ -75,9 +75,10 @@ class TBAModel:
         if any(len(np.asarray(self.state.E[index]).reshape(-1)) != band_count for index in indices):
             return None
 
-        raw = np.asarray(
-            [np.sort(np.real(self._output_energies_at(index))) for index in indices]
-        )
+        raw = np.asarray([
+            np.linalg.eigvalsh(self._hermitian_batch(self._output_base_hamiltonian_at(index)))
+            for index in indices
+        ])
         output = np.linalg.eigvalsh(self._hermitian_batch(projected))
         errors = np.max(np.abs(output - raw), axis=1)
         worst = int(np.argmax(errors))
@@ -195,6 +196,27 @@ class TBAModel:
                 f"contains no L-channel bands at k={index}."
             )
         return energies * signs
+
+    def _output_base_hamiltonian_at(
+        self, index: tuple[int, int, int]
+    ) -> np.ndarray:
+        getter = getattr(self.state, "base_hamiltonian_at", None)
+        matrix = (
+            np.asarray(getter(index), dtype=np.complex128)
+            if callable(getter)
+            else np.diag(np.asarray(self.state.E[index], dtype=np.complex128))
+        )
+        if not bool(getattr(self.config, "invert_longitudinal_energies", False)):
+            return matrix
+        # The legacy file-based L path supplies Maxwell eigenstates, so its
+        # source Hamiltonian is diagonal before the Wannier gauge transform.
+        diagonal = np.diag(np.diag(matrix))
+        scale = max(float(np.linalg.norm(matrix, ord="fro")), 1.0)
+        if np.linalg.norm(matrix - diagonal, ord="fro") > 1.0e-10 * scale:
+            raise ValueError(
+                "invert_longitudinal_energies requires a diagonal source Hamiltonian."
+            )
+        return np.diag(self._output_energies_at(index))
 
     @staticmethod
     def _hermitian_batch(matrices: np.ndarray) -> np.ndarray:

@@ -13,6 +13,7 @@ from .conventions import BlochConvention, BlochFieldRepresentation
 from .maxwell import FieldKind, MaxwellProblem
 
 if TYPE_CHECKING:
+    from .etbc import ETBCCompletionResult
     from .symmetry.analysis import (
         BlochSymmetryAnalysisResult,
         GammaZeroRegularizationAnalysis,
@@ -446,6 +447,7 @@ class InputBundle:
     auxiliary_bundle_loaders: dict[str, Callable[[], "InputBundle"]] = field(
         default_factory=dict
     )
+    base_hamiltonians: np.ndarray | None = None
 
 
 @dataclass
@@ -526,6 +528,7 @@ class RunResult:
     hopping_reconstruction_diagnostics: HoppingReconstructionDiagnostics | None = None
     sewing_matrices: tuple[SewingMatrixCacheEntry, ...] | None = None
     trial_covariance_diagnostics: tuple[Any, ...] = ()
+    etbc: ETBCCompletionResult | None = None
 
 
 @dataclass

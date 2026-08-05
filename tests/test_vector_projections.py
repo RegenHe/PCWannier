@@ -125,6 +125,56 @@ def test_pm3m_wyckoff_projection_target_binding(tmp_path):
         (0.5, 0.0, 0.5),
         (0.0, 0.5, 0.5),
     }
+
+
+def test_etbc_config_uses_targets_without_longitudinal_files(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
+                "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+                "k_points = 0:1:1, 0:1:1, 0:1:1",
+                "composition_of_b = 1 0 0, 0 1 0, 0 0 1",
+                "dataset_type = mpb",
+                "field_components = full_vector",
+                "primary_field = magnetic",
+                "dataset_file = H.h5",
+                "mesh_file = grid.h5",
+                "E_file = E.h5",
+                "metric_file = false",
+                "wannier_subspace = T + L",
+                "longitudinal_source = etbc",
+                "etbc_auxiliary_eigenvalue = 0",
+                "etbc_rank_tolerance = 1e-9",
+                "band_window = 0:2",
+                "inner_window = false",
+                "extension = 1,1,1",
+                "wannier_figures = false",
+                "symmetry_file = Pm-3m",
+                "symmetry_constrained = false",
+                "projections",
+                "3c; [0.5,0.5,0.0]; (z=[0,0,1], x=[1,0,0]); [1,0,0,5]@[0,0,1]",
+                "end",
+                "wannier_targets",
+                "center_A2g_3c; 3c; A2g",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(incar)
+
+    assert config.wannier_subspace == "T+L"
+    assert config.longitudinal_source == "etbc"
+    assert config.band_calc_num == 3
+    assert config.longitudinal_field_file is False
+    assert config.longitudinal_band_window is None
+    assert config.etbc_auxiliary_eigenvalue == pytest.approx(0.0)
+    assert config.etbc_rank_tolerance == pytest.approx(1.0e-9)
+    target = config.symmetry_context.model.target("center_A2g_3c")
     record = config.projection_target_bindings[0].projection
     directions = []
     for point in target.orbit.points:
@@ -327,6 +377,78 @@ def test_synthetic_3d_vector_projection_to_wannier_and_hopping(tmp_path):
         result.hoppings[(0, 0, 0)].conj().T,
         atol=1.0e-12,
     )
+
+
+def test_synthetic_3d_etbc_completion_runs_full_wannier_pipeline(tmp_path):
+    shape = (4, 4, 4)
+    kpoints = np.zeros((1, 3), dtype=float)
+    with h5py.File(tmp_path / "grid.h5", "w") as handle:
+        handle.attrs["dimension"] = 3
+        handle.create_dataset("shape", data=np.asarray(shape, dtype=np.int64))
+        handle.create_dataset("basis", data=np.eye(3))
+        for axis in range(3):
+            handle.create_dataset(
+                f"u{axis + 1}", data=np.arange(shape[axis]) / shape[axis] - 0.5
+            )
+    with h5py.File(tmp_path / "E.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("E", data=np.zeros((1, 2), dtype=float))
+    fields = np.zeros((1, 2) + shape + (3,), dtype=np.complex128)
+    fields[0, 0, ..., 0] = 1.0
+    fields[0, 1, ..., 1] = 1.0
+    with h5py.File(tmp_path / "H.h5", "w") as handle:
+        handle.create_dataset("kpoints", data=kpoints)
+        handle.create_dataset("H_periodic", data=fields)
+
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "dataset_type = mpb",
+                "field_components = full_vector",
+                "primary_field = magnetic",
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
+                "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+                "k_points = 0:1:1, 0:1:1, 0:1:1",
+                "composition_of_b = 1 0 0, 0 1 0, 0 0 1",
+                "wannier_subspace = T + L",
+                "longitudinal_source = etbc",
+                "etbc_auxiliary_eigenvalue = 0",
+                "band_window = 0:2",
+                "inner_window = false",
+                "dataset_file = ./H.h5",
+                "mesh_file = ./grid.h5",
+                "metric_file = false",
+                "E_file = ./E.h5",
+                "extension = 1,1,1",
+                "max_iter = 0",
+                "wannier_figures = false",
+                "symmetry_file = Pm-3m",
+                "symmetry_constrained = false",
+                "projections",
+                "1a; [0,0,0]; (z=[0,0,1], x=[1,0,0]); "
+                "[1,0,0,4]@[1,0,0]; [1,0,0,4]@[0,1,0]; [1,0,0,4]@[0,0,1]",
+                "end",
+                "wannier_targets",
+                "center_T1g_1a; 1a; T1g",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_calculation(load_input(load_config(incar)), threads=1)
+
+    assert result.etbc is not None
+    assert result.etbc.transverse_dimension == 2
+    assert result.etbc.auxiliary_dimension == 1
+    assert result.etbc.gamma_regularized_indices == ((0, 0, 0),)
+    assert result.A[0, 0, 0].shape == (3, 3)
+    assert result.V[0, 0, 0].shape == (3, 3)
+    assert result.wanniers[(0, 0, 0)].shape == (np.prod(shape), 3, 3)
+    assert np.allclose(result.wannier_norms, 1.0, atol=1.0e-10)
+    assert np.allclose(result.hoppings[(0, 0, 0)], 0.0, atol=1.0e-12)
 
 
 def test_orbit_expanded_vector_trials_normalize_all_six_columns(monkeypatch):

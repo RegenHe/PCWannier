@@ -10,6 +10,7 @@ from ..data import (
     InputBundle,
     RunResult,
 )
+from ..etbc import complete_transverse_bundle
 from ..symmetry.analysis import (
     regularize_gamma_zero_modes,
     run_bloch_symmetry_analysis,
@@ -45,7 +46,10 @@ from .threading import blas_thread_limit, threadpool_summary
 from .topology import calculate_topology
 from .vector_diagnostics import diagnose_bundle_vector_fields
 from .wannier import generate_wannier
-from .vector_trials import prepare_vector_trial_targets
+from .vector_trials import (
+    build_vector_bloch_trials,
+    prepare_vector_trial_targets,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -213,9 +217,15 @@ def _prepare_state(
     *,
     threads: int,
     resolved_backend: str,
+    use_overlap_cache: bool = True,
 ) -> tuple[StateCollection, np.ndarray]:
     config = bundle.config
-    state = StateCollection(bundle, backend=resolved_backend, threads=threads)
+    state = StateCollection(
+        bundle,
+        backend=resolved_backend,
+        threads=threads,
+        use_overlap_cache=use_overlap_cache,
+    )
     with timed_step("check orthogonality", LOGGER):
         report, need_orth = state.check_orthogonality()
     LOGGER.info(
@@ -292,13 +302,57 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         bundle.mesh.vertices.shape[0],
         bundle.mesh.elements.shape[0],
     )
-    state, report = _prepare_state(bundle, threads=threads, resolved_backend=resolved_backend)
+    etbc_enabled = (
+        config.wannier_subspace == "T+L"
+        and config.longitudinal_source == "etbc"
+    )
+    state, report = _prepare_state(
+        bundle,
+        threads=threads,
+        resolved_backend=resolved_backend,
+        use_overlap_cache=not etbc_enabled,
+    )
     trial_covariance_diagnostics = ()
     if config.projection_target_bindings:
         if bundle.symmetry is None:
             raise ValueError("Three-dimensional vector projections require symmetry_file.")
         bundle.symmetry, trial_covariance_diagnostics = prepare_vector_trial_targets(
             state, bundle.symmetry
+        )
+        state.symmetry = bundle.symmetry
+    etbc_result = None
+    if etbc_enabled:
+        with timed_step(
+            "construct ETBC auxiliary modes",
+            LOGGER,
+            rank_tolerance=config.etbc_rank_tolerance,
+            auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
+        ):
+            etbc_result = complete_transverse_bundle(
+                state,
+                lambda index: build_vector_bloch_trials(
+                    state, index, context=bundle.symmetry
+                ),
+                auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
+                rank_tolerance=config.etbc_rank_tolerance,
+            )
+        bundle = etbc_result.augmented_bundle
+        state, report = _prepare_state(
+            bundle,
+            threads=threads,
+            resolved_backend=resolved_backend,
+        )
+        finite_singular = etbc_result.minimum_nonzero_singular_value
+        LOGGER.info(
+            "ETBC completion: N_T=%s N_L=%s N_W=%s min_nonzero_singular=%s "
+            "max_TL_overlap=%.6g max_augmented_gram=%.6g gamma_regularized=%s",
+            etbc_result.transverse_dimension,
+            etbc_result.auxiliary_dimension,
+            etbc_result.wannier_dimension,
+            finite_singular,
+            etbc_result.maximum_transverse_auxiliary_overlap,
+            etbc_result.maximum_augmented_orthonormality_error,
+            etbc_result.gamma_regularized_indices,
         )
     symmetry_analysis = None
     symmetry_provider = None
@@ -633,6 +687,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             None if symmetry_provider is None else symmetry_provider.cached_sewing_matrices
         ),
         trial_covariance_diagnostics=trial_covariance_diagnostics,
+        etbc=etbc_result,
     )
 
 

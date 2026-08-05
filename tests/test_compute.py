@@ -130,6 +130,53 @@ def test_tba_inverts_only_longitudinal_energies_before_output_gauge():
     assert np.array_equal(energies[0, 0, 0], [4.0, 6.0, 9.0])
 
 
+def test_tba_uses_full_source_basis_hamiltonian_before_wannier_gauge():
+    energies = _object_grid(np.array([0.0, 1.0, 2.0]))
+    band_indices = _object_grid([0, 1, 2])
+    base = np.array(
+        [[1.0, 0.2j, 0.0], [-0.2j, 2.0, 0.3], [0.0, 0.3, 0.0]],
+        dtype=np.complex128,
+    )
+    gauge, _ = np.linalg.qr(
+        np.array(
+            [[1.0, 1.0j, 0.2], [0.3j, 1.0, -0.4], [0.1, 0.2j, 1.0]],
+            dtype=np.complex128,
+        )
+    )
+    config = SimpleNamespace(
+        band_calc_num=3,
+        kdim=3,
+        real_lattice_vectors=np.eye(3),
+        reciprocal_lattice_vectors=np.eye(3),
+        lattice_const=1.0,
+        k_points=[np.array([0.0]), np.array([0.0]), np.array([0.0])],
+        invert_longitudinal_energies=False,
+    )
+    state = SimpleNamespace(
+        E=energies,
+        E_idx=band_indices,
+        base_hamiltonian_at=lambda _index: base,
+        k_shape=(1, 1, 1),
+        k_indices=lambda: iter(((0, 0, 0),)),
+        get_k_num=lambda: 1,
+        bloch_sign=1,
+    )
+    model = TBAModel(
+        SimpleNamespace(
+            config=config,
+            state=state,
+            output_state_coefficients_at=lambda *_: gauge,
+        )
+    )
+
+    _, projected = model._projected_k_hamiltonians()
+
+    assert np.allclose(projected[0], gauge.conj().T @ base @ gauge)
+    assert np.allclose(
+        np.linalg.eigvalsh(projected[0]), np.linalg.eigvalsh(base), atol=1.0e-13
+    )
+
+
 def test_parallel_map_preserves_deterministic_input_order():
     expected = [(value, value * value) for value in range(32)]
     for threads in (1, 2, 4):

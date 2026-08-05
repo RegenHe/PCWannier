@@ -186,7 +186,10 @@ def load_mpb_input(config: IncarConfig) -> InputBundle:
         )
     metric_material = _load_metric_material(config, grid)
 
-    if config.wannier_subspace == "T+L":
+    if (
+        config.wannier_subspace == "T+L"
+        and config.longitudinal_source == "file"
+    ):
         return _combine_transverse_longitudinal(
             config,
             grid,

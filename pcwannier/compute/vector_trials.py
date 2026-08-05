@@ -271,10 +271,10 @@ def _tile_translations(extension) -> tuple[tuple[int, ...], ...]:
     return tuple(tuple(int(value) for value in item) for item in np.array(np.meshgrid(*axes, indexing="ij")).reshape(len(axes), -1).T)
 
 
-def build_vector_bloch_trials(state, k_index) -> np.ndarray:
+def build_vector_bloch_trials(state, k_index, *, context=None) -> np.ndarray:
     """Construct orbit-expanded 3D vector Bloch sums on the primitive grid."""
 
-    context = state.config.symmetry_context
+    context = context or getattr(state, "symmetry", None) or state.config.symmetry_context
     bindings = tuple(state.config.projection_target_bindings)
     if context is None or not bindings:
         raise ValueError("3D vector trials require bound Wannier targets and symmetry context.")

@@ -43,7 +43,10 @@ class IncarConfig:
     longitudinal_field_file: str | bool = False
     longitudinal_energy_file: str | bool = False
     wannier_subspace: str = "T"
+    longitudinal_source: str = "file"
     invert_longitudinal_energies: bool = False
+    etbc_auxiliary_eigenvalue: float = 0.0
+    etbc_rank_tolerance: float = 1.0e-10
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None
     longitudinal_inner_window: np.ndarray | EnergyWindow | bool = False
     longitudinal_S_file: str = "./S_L.txt"
@@ -639,6 +642,12 @@ class IncarParser:
                 )
             if not cfg.symmetry_context.model.targets:
                 raise ValueError("symmetry_constrained=true requires at least one Wannier target.")
+        if cfg.wannier_subspace == "T+L" and cfg.longitudinal_source == "etbc":
+            if cfg.symmetry_context is None or not cfg.projection_target_bindings:
+                raise ValueError(
+                    "longitudinal_source=etbc requires symmetry_file plus matching 3D "
+                    "projections and wannier_targets."
+                )
         return cfg
 
     def parse_value(self, key: str, value: str):
@@ -651,6 +660,7 @@ class IncarParser:
             "field_components",
             "primary_field",
             "wannier_subspace",
+            "longitudinal_source",
             "symmetry_file",
             "symmetry_output_basis",
             "ebr_catalog",
@@ -711,6 +721,8 @@ class IncarParser:
             "representation_character_tolerance",
             "projection_rank_tolerance",
             "gamma_zero_mode_tolerance",
+            "etbc_auxiliary_eigenvalue",
+            "etbc_rank_tolerance",
         }:
             return float(evaluate_math_expression(value))
         if key in {
@@ -1193,6 +1205,9 @@ def _configure_wannier_subspace(cfg: IncarConfig) -> bool:
     cfg.wannier_subspace = re.sub(r"\s+", "", str(cfg.wannier_subspace)).upper()
     if cfg.wannier_subspace not in {"T", "T+L"}:
         raise ValueError("wannier_subspace must be 'T' or 'T + L'.")
+    cfg.longitudinal_source = str(cfg.longitudinal_source).strip().lower()
+    if cfg.longitudinal_source not in {"file", "etbc"}:
+        raise ValueError("longitudinal_source must be 'file' or 'etbc'.")
     if cfg.wannier_subspace == "T+L":
         return True
 
@@ -1205,6 +1220,7 @@ def _configure_wannier_subspace(cfg: IncarConfig) -> bool:
         ("gamma_zero_regularization", False),
     ):
         setattr(cfg, name, inactive)
+    cfg.longitudinal_source = "file"
 
     filtered_points = []
     for point in cfg.representation_analysis or ():
@@ -1273,7 +1289,7 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
 
     _validate_band_window("band_window", cfg.band_window, allow_false=False)
     _validate_band_window("inner_window", cfg.inner_window, allow_false=True)
-    if longitudinal_enabled:
+    if longitudinal_enabled and cfg.longitudinal_source == "file":
         _validate_band_window(
             "longitudinal_band_window",
             cfg.longitudinal_band_window,
@@ -1373,15 +1389,56 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
     if cfg.integration_mode not in {"nodal", "quadratic"}:
         raise ValueError("integration_mode must be 'nodal' or 'quadratic'.")
     if longitudinal_enabled:
-        if cfg.longitudinal_band_window is None:
-            raise ValueError("wannier_subspace=T + L requires longitudinal_band_window.")
-        if str(cfg.field_components).strip().lower() != "full_vector" or str(cfg.primary_field).lower() != "magnetic":
-            raise ValueError("wannier_subspace=T + L requires full_vector magnetic fields.")
-        if cfg.gamma_zero_regularization:
-            raise ValueError(
-                "gamma_zero_regularization must be false for wannier_subspace=T + L; "
-                "the combined reader already regularizes the Gamma T+L zero space."
-            )
+        if str(cfg.field_components).strip().lower() != "full_vector":
+            raise ValueError("wannier_subspace=T + L requires full_vector fields.")
+        if cfg.longitudinal_source == "file":
+            if cfg.longitudinal_band_window is None:
+                raise ValueError(
+                    "wannier_subspace=T + L with longitudinal_source=file requires "
+                    "longitudinal_band_window."
+                )
+            if str(cfg.primary_field).lower() != "magnetic":
+                raise ValueError(
+                    "File-based longitudinal modes currently require a magnetic primary field."
+                )
+            if cfg.gamma_zero_regularization:
+                raise ValueError(
+                    "gamma_zero_regularization must be false for file-based T + L; "
+                    "the combined reader already regularizes the Gamma T+L zero space."
+                )
+        else:
+            if dimension != 3:
+                raise ValueError("longitudinal_source=etbc requires a three-dimensional lattice.")
+            if cfg.inner_window is not False:
+                raise ValueError("longitudinal_source=etbc currently requires inner_window=false.")
+            if cfg.symmetry_constrained:
+                raise NotImplementedError(
+                    "longitudinal_source=etbc does not yet support symmetry-constrained localization."
+                )
+            ignored = []
+            for name, inactive in (
+                ("longitudinal_field_file", False),
+                ("longitudinal_energy_file", False),
+                ("longitudinal_band_window", None),
+                ("longitudinal_inner_window", False),
+                ("invert_longitudinal_energies", False),
+            ):
+                value = getattr(cfg, name)
+                is_inactive = value is None or value is False
+                if not is_inactive and isinstance(value, str):
+                    is_inactive = value.strip().lower() == "false"
+                if not is_inactive:
+                    ignored.append(name)
+                setattr(cfg, name, inactive)
+            if ignored:
+                LOGGER.warning(
+                    "longitudinal_source=etbc ignores file-based longitudinal settings: %s",
+                    ", ".join(ignored),
+                )
+    if not np.isfinite(cfg.etbc_auxiliary_eigenvalue):
+        raise ValueError("etbc_auxiliary_eigenvalue must be finite.")
+    if not np.isfinite(cfg.etbc_rank_tolerance) or not 0.0 < cfg.etbc_rank_tolerance < 1.0:
+        raise ValueError("etbc_rank_tolerance must lie in (0, 1).")
     cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
     if cfg.symmetry_output_basis not in {"strict", "fem"}:
         raise ValueError("symmetry_output_basis must be 'strict' or 'fem'.")

@@ -11,7 +11,14 @@ from .parallel import parallel_map
 
 
 class StateCollection:
-    def __init__(self, bundle: InputBundle, *, backend: str = "python", threads: int = 1):
+    def __init__(
+        self,
+        bundle: InputBundle,
+        *,
+        backend: str = "python",
+        threads: int = 1,
+        use_overlap_cache: bool = True,
+    ):
         self.config = bundle.config
         self.maxwell = bundle.maxwell
         configured_maxwell = getattr(self.config, "maxwell_problem", None)
@@ -20,7 +27,9 @@ class StateCollection:
                 "InputBundle Maxwell metadata does not match the calculation config."
             )
         self.threads = max(1, int(threads))
+        self.use_overlap_cache = bool(use_overlap_cache)
         self.mesh = bundle.mesh
+        self.symmetry = bundle.symmetry
         # State transformations replace object-grid entries. Keep the source
         # bundle reusable without copying the large field blocks themselves.
         self.fields = np.asarray(bundle.fields, dtype=object).copy()
@@ -73,6 +82,9 @@ class StateCollection:
         self.extended_metric_material: np.ndarray | None = None
         self._identity_transform: np.ndarray | None = None
         self._phase_cache: dict[tuple[int, int, int], np.ndarray] = {}
+        self.base_hamiltonians = self._validate_base_hamiltonians(
+            bundle.base_hamiltonians
+        )
 
     def band_label(self, actual_band_index: int) -> str:
         reference = self.band_channels.get(int(actual_band_index))
@@ -222,7 +234,7 @@ class StateCollection:
         if self.S is not None:
             return
         use_cached = {str(name).upper() for name in getattr(self.config, "use_cached_data", ())}
-        if "S" in use_cached:
+        if self.use_overlap_cache and "S" in use_cached:
             path_value = getattr(self.config, "S_file", None)
             input_path = getattr(self.config, "input_path", None)
             path = input_path(path_value) if callable(input_path) else None
@@ -339,6 +351,58 @@ class StateCollection:
         if block.ndim == 3:
             phase = phase[:, :, None]
         return block * phase
+
+    def get_internal_block(
+        self,
+        i: int,
+        j: int,
+        k: int,
+        *,
+        full_bloch: bool = False,
+    ) -> np.ndarray:
+        """Return fields in the internally strict orthonormal basis."""
+
+        block = (
+            self.get_full_bloch_block(i, j, k)
+            if full_bloch
+            else self.get_block(i, j, k)
+        )
+        transform = np.asarray(self.get_transform(False)[i, j, k], dtype=np.complex128)
+        if block.ndim == 3:
+            return np.einsum("npc,ni->ipc", block, transform, optimize=True)
+        return np.asarray(block.T @ transform, dtype=np.complex128).T
+
+    def base_hamiltonian_at(self, index: tuple[int, int, int]) -> np.ndarray:
+        if self.base_hamiltonians is not None:
+            return np.asarray(self.base_hamiltonians[index], dtype=np.complex128)
+        energies = np.asarray(self.E[index], dtype=np.complex128).reshape(-1)
+        return np.diag(energies)
+
+    def _validate_base_hamiltonians(self, values: np.ndarray | None) -> np.ndarray | None:
+        if values is None:
+            return None
+        raw = np.asarray(values, dtype=object)
+        if raw.shape != self.k_shape:
+            raise ValueError(
+                f"Base Hamiltonian k-grid has shape {raw.shape}; expected {self.k_shape}."
+            )
+        output = np.empty(self.k_shape, dtype=object)
+        for index in self.k_indices():
+            matrix = np.asarray(raw[index], dtype=np.complex128)
+            count = self.get_block(*index).shape[0]
+            if matrix.shape != (count, count) or not np.all(np.isfinite(matrix)):
+                raise ValueError(
+                    f"Base Hamiltonian at k={index} must be a finite {(count, count)} matrix."
+                )
+            scale = max(float(np.linalg.norm(matrix, ord="fro")), 1.0)
+            residual = float(np.linalg.norm(matrix - matrix.conj().T, ord="fro"))
+            if residual > 1.0e-10 * scale:
+                raise ValueError(
+                    f"Base Hamiltonian at k={index} is not Hermitian "
+                    f"(residual={residual:.6g})."
+                )
+            output[index] = 0.5 * (matrix + matrix.conj().T)
+        return output
 
     def get_extended_phase(self, i: int, j: int, k: int) -> np.ndarray:
         if self.extended_mesh is None:

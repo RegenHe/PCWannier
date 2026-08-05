@@ -113,9 +113,15 @@ def test_p4g_glide_uses_one_bloch_convention_for_field_target_and_factor():
         composed = target.matrix(glide_index, transformed_k) @ target.matrix(
             glide_index, kpoint
         )
+        exact_product = glide * glide
         assert np.allclose(
             composed,
             factor * target.matrix(identity_index, kpoint),
+            atol=1e-12,
+        )
+        assert np.allclose(
+            target.matrix(exact_product, kpoint),
+            composed,
             atol=1e-12,
         )
 

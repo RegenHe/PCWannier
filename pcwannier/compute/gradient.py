@@ -35,13 +35,21 @@ class Gradient:
             self.U = load_cell_matrix(path, self.state.k_shape)
             self._validate_cached_u()
         self.epsilon = epsilon
-        last_omega = np.inf
         err = np.inf
         if max_iter == 0:
             self.evaluate_current()
             return
         self.mset.update(self.U)
+        self.update()
+        last_omega = float(np.sum(self.omega))
+        if not np.isfinite(last_omega):
+            raise FloatingPointError(f"Gradient optimization starts from a non-finite omega={last_omega}.")
+        gradient_tolerance = max(float(np.sqrt(max(err_diff, np.finfo(float).eps))), 1.0e-12)
+        gradient_norm = np.inf
+        converged = False
         for iteration in range(max_iter):
+            previous_u = self.U.copy()
+            previous_omega = self.omega.copy()
             self.calc()
             gradient_norm = max(float(np.linalg.norm(self.G[idx], ord="fro")) for idx in self.state.k_indices())
             self.mset.update(self.U)
@@ -52,9 +60,30 @@ class Gradient:
                     f"Gradient optimization produced a non-finite value at iteration {iteration + 1}: "
                     f"omega={total}, gradient_norm={gradient_norm}."
                 )
+            increase_tolerance = max(abs(last_omega) * 1.0e-12, 1.0e-14)
+            if total > last_omega + increase_tolerance:
+                self.U = previous_u
+                self.omega = previous_omega
+                self.mset.update(self.U)
+                self.epsilon *= 0.5
+                if self.epsilon <= np.finfo(float).eps:
+                    raise FloatingPointError(
+                        "Gradient optimization could not find a decreasing step before epsilon "
+                        "reached machine precision."
+                    )
+                LOGGER.warning(
+                    "gradient iter %s rejected: omega increased from %s to %s; step reduced to %s",
+                    iteration + 1,
+                    last_omega,
+                    total,
+                    self.epsilon,
+                )
+                continue
+
             err = abs(last_omega - total)
             LOGGER.info(
-                "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s max_gradient_norm=%s",
+                "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
+                "max_gradient_norm=%s epsilon=%s",
                 iteration + 1,
                 total,
                 float(self.omega[0]),
@@ -62,17 +91,20 @@ class Gradient:
                 float(self.omega[2]),
                 err,
                 gradient_norm,
+                self.epsilon,
             )
-            if err < err_diff:
-                break
-            if np.isfinite(last_omega) and total > last_omega + max(err_diff, abs(last_omega) * 1e-12):
-                self.epsilon *= 0.5
-                LOGGER.warning("Omega increased; gradient step reduced to %s", self.epsilon)
-            if err < self.epsilon * 1e-1:
-                self.epsilon *= 0.1
             last_omega = total
-        if err > err_diff:
-            LOGGER.warning("Gradient iteration reached the limit with err=%s", err)
+            if err <= err_diff and gradient_norm <= gradient_tolerance:
+                converged = True
+                break
+        if not converged:
+            LOGGER.warning(
+                "Gradient iteration reached the limit with err=%s and max_gradient_norm=%s "
+                "(required <= %s).",
+                err,
+                gradient_norm,
+                gradient_tolerance,
+            )
         self.update()
 
     def evaluate_current(self) -> None:

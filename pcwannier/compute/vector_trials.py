@@ -39,12 +39,29 @@ def _evaluate_transformed_trial(
     points_cartesian: np.ndarray,
     center_fractional,
     operation,
+    *,
+    supercell_periods=None,
 ) -> np.ndarray:
     center = _center_cartesian(state.config, center_fractional)
+    displacement = points_cartesian - center[None, :]
+    if supercell_periods is not None:
+        periods = np.asarray(supercell_periods, dtype=float).reshape(-1)
+        lattice = np.asarray(state.config.real_lattice_vectors, dtype=float)
+        if periods.shape != (lattice.shape[0],) or np.any(periods <= 0.0):
+            raise ValueError("Born-von Karman periods must be positive and match the lattice dimension.")
+        scale = float(state.config.lattice_const)
+        fractional = (displacement / scale) @ np.linalg.inv(lattice)
+        # The trial lives on the finite Born-von Karman torus selected by the
+        # k mesh.  Minimum-image reduction makes the finite real-space
+        # representative independent of the arbitrary output extension.
+        fractional -= periods[None, :] * np.floor(
+            fractional / periods[None, :] + 0.5
+        )
+        displacement = (fractional @ lattice) * scale
     rotation = _cartesian_rotation(
         operation, state.config.real_lattice_vectors
     )
-    preimage_displacement = (points_cartesian - center[None, :]) @ rotation
+    preimage_displacement = displacement @ rotation
     values = trial.evaluate(
         preimage_displacement,
         record.frame,
@@ -263,12 +280,216 @@ def prepare_vector_trial_targets(state, context):
     return build_symmetry_context(model, context.k_points), tuple(diagnostics)
 
 
-def _tile_translations(extension) -> tuple[tuple[int, ...], ...]:
+def _born_von_karman_translations(k_points) -> tuple[tuple[int, ...], ...]:
     axes = []
-    for size in extension:
+    for axis in k_points:
+        size = len(axis)
         center = int(np.floor((int(size) - 1) / 2.0))
         axes.append(tuple(int(value - center) for value in range(int(size))))
     return tuple(tuple(int(value) for value in item) for item in np.array(np.meshgrid(*axes, indexing="ij")).reshape(len(axes), -1).T)
+
+
+def _born_von_karman_translation_axes(k_points) -> tuple[np.ndarray, ...]:
+    axes = []
+    for axis in k_points:
+        size = int(len(axis))
+        center = int(np.floor((size - 1) / 2.0))
+        axes.append(np.arange(size, dtype=int) - center)
+    return tuple(axes)
+
+
+def _is_complete_uniform_k_mesh(k_points, *, tolerance: float = 1.0e-10) -> bool:
+    for axis in k_points:
+        values = np.asarray(axis, dtype=float).reshape(-1)
+        if values.size <= 1:
+            continue
+        expected = 1.0 / float(values.size)
+        if not np.allclose(np.diff(values), expected, rtol=0.0, atol=tolerance):
+            return False
+    return True
+
+
+def _translation_bloch_fft(
+    images: np.ndarray,
+    k_points,
+    bloch_sign: int,
+) -> np.ndarray:
+    """Transform translation-resolved trial images to the configured k mesh."""
+
+    k_shape = tuple(int(len(axis)) for axis in k_points)
+    values = np.asarray(images, dtype=np.complex128)
+    if values.shape[: len(k_shape)] != k_shape:
+        raise ValueError(
+            f"Translation images start with shape {values.shape[:len(k_shape)]}; "
+            f"expected {k_shape}."
+        )
+    sign = int(bloch_sign)
+    if sign not in {-1, 1}:
+        raise ValueError(f"Bloch sign must be +1 or -1; got {bloch_sign}.")
+    if not _is_complete_uniform_k_mesh(k_points):
+        raise ValueError(
+            "FFT Bloch sums require each sampled k axis to be a complete uniform "
+            "periodic mesh with spacing 1/N."
+        )
+
+    translation_axes = _born_von_karman_translation_axes(k_points)
+    offset_phase = np.ones(k_shape, dtype=np.complex128)
+    index_phase = np.ones(k_shape, dtype=np.complex128)
+    dimension = len(k_shape)
+    for axis_index, (axis, translations) in enumerate(
+        zip(k_points, translation_axes)
+    ):
+        reshape = [1] * dimension
+        reshape[axis_index] = translations.size
+        offset_phase *= np.exp(
+            sign
+            * 2j
+            * np.pi
+            * float(np.asarray(axis, dtype=float)[0])
+            * translations
+        ).reshape(reshape)
+        center = int(np.floor((translations.size - 1) / 2.0))
+        indices = np.arange(translations.size, dtype=float)
+        index_phase *= np.exp(
+            -sign * 2j * np.pi * indices * center / float(translations.size)
+        ).reshape(reshape)
+
+    trailing = (1,) * (values.ndim - dimension)
+    weighted = values * offset_phase.reshape(k_shape + trailing)
+    axes = tuple(range(dimension))
+    if sign > 0:
+        transformed = np.fft.ifftn(weighted, axes=axes) * int(np.prod(k_shape))
+    else:
+        transformed = np.fft.fftn(weighted, axes=axes)
+    transformed *= index_phase.reshape(k_shape + trailing)
+    return np.asarray(transformed, dtype=np.complex128)
+
+
+def _vector_trial_columns(state, context):
+    columns = []
+    for binding in tuple(state.config.projection_target_bindings):
+        target = context.model.target(binding.target_name)
+        record = binding.projection
+        for orbit_point in target.orbit.points:
+            for trial in record.states:
+                columns.append((record, orbit_point, trial))
+    return tuple(columns)
+
+
+def build_vector_bloch_trial_grid(
+    state,
+    *,
+    context=None,
+    workspace_bytes: int = 256 << 20,
+) -> np.ndarray:
+    """Construct all k-point trial frames with one FFT over BvK translations."""
+
+    context = context or getattr(state, "symmetry", None) or state.config.symmetry_context
+    bindings = tuple(state.config.projection_target_bindings)
+    if context is None or not bindings:
+        raise ValueError("3D vector trials require bound Wannier targets and symmetry context.")
+    k_points = tuple(state.config.k_points)
+    k_shape = tuple(int(len(axis)) for axis in k_points)
+    if not _is_complete_uniform_k_mesh(k_points):
+        LOGGER.warning(
+            "Vector trial k mesh is not a complete uniform periodic grid; "
+            "falling back to direct per-k Bloch sums."
+        )
+        output = np.empty(k_shape, dtype=object)
+        for index in np.ndindex(k_shape):
+            output[index] = build_vector_bloch_trials(state, index, context=context)
+        return output
+
+    points = np.asarray(state.mesh.vertices, dtype=float)
+    columns = _vector_trial_columns(state, context)
+    if len(columns) != int(state.config.band_calc_num):
+        raise ValueError(
+            f"Vector trial basis contains {len(columns)} columns; expected "
+            f"band_calc_num={state.config.band_calc_num}."
+        )
+    output = np.empty(k_shape, dtype=object)
+    for index in np.ndindex(k_shape):
+        output[index] = np.empty(
+            (points.shape[0], len(columns), 3), dtype=np.complex128
+        )
+
+    translations = _born_von_karman_translation_axes(k_points)
+    periods = tuple(int(len(axis)) for axis in k_points)
+    translation_count = int(np.prod(k_shape))
+    bytes_per_point = max(
+        1,
+        translation_count * 3 * np.dtype(np.complex128).itemsize * 3,
+    )
+    point_chunk = max(
+        1,
+        min(points.shape[0], int(workspace_bytes) // bytes_per_point),
+    )
+    LOGGER.info(
+        "Vector Bloch trial FFT: k_points=%d translations=%d spatial_points=%d "
+        "columns=%d point_chunk=%d cached_trials=%.1f MB",
+        translation_count,
+        translation_count,
+        points.shape[0],
+        len(columns),
+        point_chunk,
+        (
+            translation_count
+            * points.shape[0]
+            * len(columns)
+            * 3
+            * np.dtype(np.complex128).itemsize
+            / (1024.0**2)
+        ),
+    )
+
+    for column, (record, orbit_point, trial) in enumerate(columns):
+        operation = orbit_point.representative_operation
+        for start in range(0, points.shape[0], point_chunk):
+            stop = min(start + point_chunk, points.shape[0])
+            local_points = points[start:stop]
+            images = np.empty(
+                k_shape + (local_points.shape[0], 3), dtype=np.complex128
+            )
+            for translation_index in np.ndindex(k_shape):
+                translation = np.asarray(
+                    [
+                        translations[axis][translation_index[axis]]
+                        for axis in range(len(k_shape))
+                    ],
+                    dtype=float,
+                )
+                shifted_center = np.asarray(
+                    orbit_point.position, dtype=float
+                ) + translation
+                images[translation_index] = _evaluate_transformed_trial(
+                    state,
+                    record,
+                    trial,
+                    local_points,
+                    shifted_center,
+                    operation,
+                    supercell_periods=periods,
+                )
+            transformed = _translation_bloch_fft(
+                images, k_points, state.bloch_sign
+            )
+            for k_index in np.ndindex(k_shape):
+                output[k_index][start:stop, column, :] = transformed[k_index]
+
+    for index in np.ndindex(k_shape):
+        values = output[index]
+        norms = state.inner_product.norms(
+            np.swapaxes(values, 1, 2),
+            name=f"3D projection Bloch-sum norms at k={index}",
+        )
+        invalid = np.flatnonzero(~np.isfinite(norms) | (norms <= 0.0))
+        if invalid.size:
+            raise ValueError(
+                "3D projection Bloch sums have zero or non-finite norms at "
+                f"k={index}, columns={invalid.tolist()}."
+            )
+        values /= np.sqrt(norms)[None, :, None]
+    return output
 
 
 def build_vector_bloch_trials(state, k_index, *, context=None) -> np.ndarray:
@@ -285,34 +506,32 @@ def build_vector_bloch_trials(state, k_index, *, context=None) -> np.ndarray:
     k_fractional = np.asarray(
         [state.config.k_points[axis][k_index[axis]] for axis in range(3)], dtype=float
     )
-    translations = _tile_translations(state.config.extension)
+    periods = tuple(int(len(axis)) for axis in state.config.k_points)
+    translations = _born_von_karman_translations(state.config.k_points)
     columns = []
-    for binding in bindings:
-        target = context.model.target(binding.target_name)
-        record = binding.projection
-        for orbit_point in target.orbit.points:
-            operation = orbit_point.representative_operation
-            for trial in record.states:
-                total = np.zeros((points.shape[0], 3), dtype=np.complex128)
-                for translation in translations:
-                    shifted_center = np.asarray(orbit_point.position, dtype=float) + np.asarray(
-                        translation, dtype=float
-                    )
-                    phase = np.exp(
-                        state.bloch_sign
-                        * 2j
-                        * np.pi
-                        * np.dot(k_fractional, np.asarray(translation, dtype=float))
-                    )
-                    total += phase * _evaluate_transformed_trial(
-                        state,
-                        record,
-                        trial,
-                        points,
-                        shifted_center,
-                        operation,
-                    )
-                columns.append(total)
+    for record, orbit_point, trial in _vector_trial_columns(state, context):
+        operation = orbit_point.representative_operation
+        total = np.zeros((points.shape[0], 3), dtype=np.complex128)
+        for translation in translations:
+            shifted_center = np.asarray(orbit_point.position, dtype=float) + np.asarray(
+                translation, dtype=float
+            )
+            phase = np.exp(
+                state.bloch_sign
+                * 2j
+                * np.pi
+                * np.dot(k_fractional, np.asarray(translation, dtype=float))
+            )
+            total += phase * _evaluate_transformed_trial(
+                state,
+                record,
+                trial,
+                points,
+                shifted_center,
+                operation,
+                supercell_periods=periods,
+            )
+        columns.append(total)
     values = np.stack(columns, axis=1)
     # Trial construction uses (point, trial, component), while the inner-product
     # column convention is (point, component, column).

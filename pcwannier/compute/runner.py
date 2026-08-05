@@ -47,7 +47,7 @@ from .topology import calculate_topology
 from .vector_diagnostics import diagnose_bundle_vector_fields
 from .wannier import generate_wannier
 from .vector_trials import (
-    build_vector_bloch_trials,
+    build_vector_bloch_trial_grid,
     prepare_vector_trial_targets,
 )
 
@@ -328,20 +328,35 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             rank_tolerance=config.etbc_rank_tolerance,
             auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
         ):
-            etbc_result = complete_transverse_bundle(
-                state,
-                lambda index: build_vector_bloch_trials(
-                    state, index, context=bundle.symmetry
-                ),
-                auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
-                rank_tolerance=config.etbc_rank_tolerance,
+            trial_grid = build_vector_bloch_trial_grid(
+                state, context=bundle.symmetry
             )
+
+            def take_trial(index):
+                values = trial_grid[index]
+                if values is None:
+                    raise RuntimeError(
+                        f"ETBC trial frame at k={index} was requested more than once."
+                    )
+                trial_grid[index] = None
+                return values
+
+            try:
+                etbc_result = complete_transverse_bundle(
+                    state,
+                    take_trial,
+                    auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
+                    rank_tolerance=config.etbc_rank_tolerance,
+                )
+            finally:
+                del trial_grid
         bundle = etbc_result.augmented_bundle
         state, report = _prepare_state(
             bundle,
             threads=threads,
             resolved_backend=resolved_backend,
         )
+        state._precomputed_vector_projection = etbc_result.trial_projection_matrices
         finite_singular = etbc_result.minimum_nonzero_singular_value
         LOGGER.info(
             "ETBC completion: N_T=%s N_L=%s N_W=%s min_nonzero_singular=%s "

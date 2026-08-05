@@ -349,11 +349,14 @@ def localize_symmetry_constrained(
     if max_iter == 0:
         return SymmetryLocalizationResult(tuple(history), True, full_gauge, report)
 
-    last_omega = np.inf
+    last_omega = float(np.sum(gradient.omega))
     err = np.inf
+    gradient_tolerance = max(float(np.sqrt(max(err_diff, np.finfo(float).eps))), 1.0e-12)
     converged = False
     for iteration in range(1, max_iter + 1):
         step_epsilon = float(gradient.epsilon)
+        previous_u = gradient.U.copy()
+        previous_omega = gradient.omega.copy()
         representatives = []
         for star, constrained in zip(initial_gauge.stars.stars, representative_gradients):
             step = step_epsilon * constrained
@@ -370,23 +373,51 @@ def localize_symmetry_constrained(
         gradient.U = propagated.gauge
         gradient.mset.update(gradient.U)
         gradient.update()
-        full_gauge = _compose_gauge(initial_gauge.gauge, gradient.U)
-        report = evaluate_symmetry_gauge(
+        candidate_full_gauge = _compose_gauge(initial_gauge.gauge, gradient.U)
+        candidate_report = evaluate_symmetry_gauge(
             state,
             context,
             provider,
-            full_gauge,
+            candidate_full_gauge,
             initial_gauge.band_indices,
             propagated.max_path_consistency,
             band_indices_by_k=initial_gauge.band_indices_by_k,
         )
-        _validate_iteration(report, gradient.omega, representative_gradients, tolerance, iteration)
+        _validate_iteration(
+            candidate_report,
+            gradient.omega,
+            representative_gradients,
+            tolerance,
+            iteration,
+        )
 
         total = float(np.sum(gradient.omega))
         gradient_norm = max(
             (float(np.linalg.norm(matrix, ord="fro")) for matrix in representative_gradients),
             default=0.0,
         )
+        increase_tolerance = max(abs(last_omega) * 1.0e-12, 1.0e-14)
+        if total > last_omega + increase_tolerance:
+            gradient.U = previous_u
+            gradient.omega = previous_omega
+            gradient.mset.update(gradient.U)
+            gradient.epsilon *= 0.5
+            if gradient.epsilon <= np.finfo(float).eps:
+                raise FloatingPointError(
+                    "Symmetry-constrained localization could not find a decreasing step before "
+                    "epsilon reached machine precision."
+                )
+            LOGGER.warning(
+                "gradient iter %s rejected: omega increased from %s to %s; step reduced to %s",
+                iteration,
+                last_omega,
+                total,
+                gradient.epsilon,
+            )
+            continue
+
+        full_gauge = candidate_full_gauge
+        report = candidate_report
         err = abs(last_omega - total)
         history.append(
             _iteration_record(
@@ -399,7 +430,7 @@ def localize_symmetry_constrained(
         )
         LOGGER.info(
             "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
-            "max_gradient_norm=%s symmetry_max=%s symmetry_mean=%s unitarity=%s path=%s",
+            "max_gradient_norm=%s symmetry_max=%s symmetry_mean=%s unitarity=%s path=%s epsilon=%s",
             iteration,
             total,
             float(gradient.omega[0]),
@@ -411,21 +442,26 @@ def localize_symmetry_constrained(
             report.mean_residual,
             report.max_semiunitarity_error,
             report.max_path_consistency,
+            gradient.epsilon,
         )
-        if err < err_diff:
+        last_omega = total
+        if err <= err_diff and gradient_norm <= gradient_tolerance:
             converged = True
             break
-        if np.isfinite(last_omega) and total > last_omega + max(err_diff, abs(last_omega) * 1.0e-12):
-            gradient.epsilon *= 0.5
-            LOGGER.warning("Omega increased; gradient step reduced to %s", gradient.epsilon)
-        if err < gradient.epsilon * 1.0e-1:
-            gradient.epsilon *= 0.1
-        last_omega = total
         gradient.calc(is_update=False)
         representative_gradients = symmetrize_gradient(gradient.G, context, initial_gauge.stars)
 
     if not converged:
-        LOGGER.warning("Gradient iteration reached the limit with err=%s", err)
+        LOGGER.warning(
+            "Gradient iteration reached the limit with err=%s and max_gradient_norm=%s "
+            "(required <= %s).",
+            err,
+            max(
+                (float(np.linalg.norm(matrix, ord="fro")) for matrix in representative_gradients),
+                default=0.0,
+            ),
+            gradient_tolerance,
+        )
     return SymmetryLocalizationResult(tuple(history), converged, full_gauge, report)
 
 

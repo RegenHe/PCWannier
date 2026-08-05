@@ -509,8 +509,13 @@ class BlochSymmetryAction:
         return transformed
 
     def _stencil(self, operation: SpaceGroupOperation) -> BarycentricStencil:
-        reduced_tau = reduce_fractional(operation.translation, self.tolerance).reduced
-        key = (operation.rotation.tobytes(), np.round(reduced_tau / self.tolerance).astype(np.int64).tobytes())
+        # Full-Bloch interpolation must distinguish g from t_n g: their
+        # periodic vertex indices agree, but their quasiperiodic lattice
+        # shifts differ by n and carry the nonsymmorphic composition phase.
+        translation_key = np.rint(
+            np.asarray(operation.translation) / self.tolerance
+        ).astype(np.int64)
+        key = (operation.rotation.tobytes(), translation_key.tobytes())
         cached = self._stencils.get(key)
         if cached is not None:
             self._stencils.move_to_end(key)

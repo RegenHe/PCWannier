@@ -301,23 +301,34 @@ class StateInitializer:
                 f"Calculated bands exceed band window: {band_count} > {min_len}."
             )
 
+        precomputed = self.state._precomputed_vector_projection
+
         def calc_idx(idx):
-            gmat = build_vector_bloch_trials(self.state, idx)
-            if gmat.shape != (
-                self.state.mesh.vertices.shape[0],
-                band_count,
-                3,
-            ):
-                raise ValueError(
-                    f"3D trial basis at k={idx} has shape {gmat.shape}; expected "
-                    f"{(self.state.mesh.vertices.shape[0], band_count, 3)}."
+            if precomputed is None:
+                gmat = build_vector_bloch_trials(self.state, idx)
+                if gmat.shape != (
+                    self.state.mesh.vertices.shape[0],
+                    band_count,
+                    3,
+                ):
+                    raise ValueError(
+                        f"3D trial basis at k={idx} has shape {gmat.shape}; expected "
+                        f"{(self.state.mesh.vertices.shape[0], band_count, 3)}."
+                    )
+                fields = self.state.get_full_bloch_block(*idx)
+                amat = self.state.inner_product.overlap(
+                    fields,
+                    np.swapaxes(gmat, 0, 1),
+                    chunk_size=64,
                 )
-            fields = self.state.get_full_bloch_block(*idx)
-            amat = self.state.inner_product.overlap(
-                fields,
-                np.swapaxes(gmat, 0, 1),
-                chunk_size=64,
-            )
+            else:
+                amat = np.asarray(precomputed[idx], dtype=np.complex128)
+                expected = (len(self.state.E_idx[idx]), band_count)
+                if amat.shape != expected:
+                    raise ValueError(
+                        f"Precomputed 3D projection at k={idx} has shape {amat.shape}; "
+                        f"expected {expected}."
+                    )
             if self.config.proj_binarize:
                 amat = self.binarize(amat)
             return idx, amat, self._projection_frame_from_a(amat, idx)

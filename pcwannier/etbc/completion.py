@@ -6,6 +6,7 @@ import logging
 import numpy as np
 
 from ..conventions import BlochFieldRepresentation
+from ..compute.parallel import memory_limited_threads, parallel_map
 from ..data import BandChannelReference, InputBundle
 from .models import (
     ETBCCompletionResult,
@@ -349,11 +350,25 @@ def complete_transverse_bundle(
     augmented_zero = np.empty(k_shape, dtype=object)
     base_hamiltonians = np.empty(k_shape, dtype=object)
     nullspaces = np.empty(k_shape, dtype=object)
+    projection_matrices = np.empty(k_shape, dtype=object)
     diagnostics: list[ETBCKPointDiagnostics] = []
     gamma_regularized: list[tuple[int, int, int]] = []
     l_offset = int(np.asarray(physical_state.energy_matrix).shape[-1])
+    indices = tuple(physical_state.k_indices())
+    point_count = int(physical_state.mesh.vertices.shape[0])
+    bytes_per_worker = n_w * point_count * 3 * np.dtype(np.complex128).itemsize * 5
+    workers = memory_limited_threads(
+        physical_state.configured_threads,
+        bytes_per_worker,
+    )
+    LOGGER.info(
+        "ETBC k-point construction: workers=%d requested=%d estimated_worker_memory=%.1f MB",
+        workers,
+        physical_state.configured_threads,
+        bytes_per_worker / (1024.0**2),
+    )
 
-    for index in physical_state.k_indices():
+    def calc_index(index):
         transverse_full = physical_state.get_internal_block(
             *index, full_bloch=True
         )
@@ -397,22 +412,19 @@ def complete_transverse_bundle(
                 zero_tolerance=zero_tolerance,
             )
             singular_values: tuple[float, ...] = ()
-            nullspaces[index] = None
-            gamma_regularized.append(tuple(int(value) for value in index))
+            nullspace = None
             auxiliary_error, cross_error, augmented_error = errors
-            diagnostics.append(
-                ETBCKPointDiagnostics(
-                    tuple(int(value) for value in index),
-                    n_t,
-                    n_l,
-                    singular_values,
-                    tuple(float(value) for value in trial_eigenvalues),
-                    0.0,
-                    auxiliary_error,
-                    cross_error,
-                    augmented_error,
-                    True,
-                )
+            diagnostic = ETBCKPointDiagnostics(
+                tuple(int(value) for value in index),
+                n_t,
+                n_l,
+                singular_values,
+                tuple(float(value) for value in trial_eigenvalues),
+                0.0,
+                auxiliary_error,
+                cross_error,
+                augmented_error,
+                True,
             )
         else:
             if _is_gamma(config, index) and zero_positions.size not in {0, 2}:
@@ -432,41 +444,78 @@ def complete_transverse_bundle(
             h_augmented = np.zeros((n_w, n_w), dtype=np.complex128)
             h_augmented[:n_t, :n_t] = h_transverse
             h_augmented[n_t:, n_t:] = float(auxiliary_eigenvalue) * np.eye(n_l)
-            nullspaces[index] = result.nullspace_coefficients
-            diagnostics.append(
-                ETBCKPointDiagnostics(
-                    tuple(int(value) for value in index),
-                    n_t,
-                    n_l,
-                    tuple(float(value) for value in result.singular_values),
-                    tuple(float(value) for value in result.trial_gram_eigenvalues),
-                    result.transverse_orthonormality_error,
-                    result.auxiliary_orthonormality_error,
-                    result.transverse_auxiliary_overlap,
-                    result.augmented_orthonormality_error,
-                    False,
-                )
+            nullspace = result.nullspace_coefficients
+            diagnostic = ETBCKPointDiagnostics(
+                tuple(int(value) for value in index),
+                n_t,
+                n_l,
+                tuple(float(value) for value in result.singular_values),
+                tuple(float(value) for value in result.trial_gram_eigenvalues),
+                result.transverse_orthonormality_error,
+                result.auxiliary_orthonormality_error,
+                result.transverse_auxiliary_overlap,
+                result.augmented_orthonormality_error,
+                False,
             )
 
         phase = physical_state.get_phase(*index)[None, :, None]
-        augmented_fields[index] = np.ascontiguousarray(
+        periodic_fields = np.ascontiguousarray(
             augmented_full * np.conj(phase)
         )
-        augmented_energies[index] = np.concatenate(
+        energies = np.concatenate(
             (
                 physical_energies,
                 np.full(n_l, float(auxiliary_eigenvalue), dtype=float),
             )
         )
         physical_ids = np.asarray(physical_state.E_idx[index], dtype=int)
-        augmented_indices[index] = np.concatenate(
+        band_indices = np.concatenate(
             (physical_ids, l_offset + np.arange(n_l, dtype=int))
         ).tolist()
-        augmented_inner[index] = []
-        augmented_zero[index] = np.abs(augmented_energies[index]) <= float(
+        zero_modes = np.abs(energies) <= float(
             config.gamma_zero_mode_tolerance
         )
-        base_hamiltonians[index] = _hermitian(h_augmented)
+        projection = physical_state.inner_product.overlap(
+            augmented_full,
+            trial_rows,
+            chunk_size=64,
+        )
+        return (
+            tuple(int(value) for value in index),
+            periodic_fields,
+            energies,
+            band_indices,
+            zero_modes,
+            _hermitian(h_augmented),
+            nullspace,
+            diagnostic,
+            gamma_special,
+            projection,
+        )
+
+    for (
+        index,
+        periodic_fields,
+        energies,
+        band_indices,
+        zero_modes,
+        h_augmented,
+        nullspace,
+        diagnostic,
+        gamma_special,
+        projection,
+    ) in parallel_map(indices, calc_index, workers):
+        augmented_fields[index] = periodic_fields
+        augmented_energies[index] = energies
+        augmented_indices[index] = band_indices
+        augmented_inner[index] = []
+        augmented_zero[index] = zero_modes
+        base_hamiltonians[index] = h_augmented
+        nullspaces[index] = nullspace
+        projection_matrices[index] = projection
+        diagnostics.append(diagnostic)
+        if gamma_special:
+            gamma_regularized.append(index)
 
     energy_matrix = np.concatenate(
         (
@@ -517,5 +566,6 @@ def complete_transverse_bundle(
         float(auxiliary_eigenvalue),
         tuple(diagnostics),
         nullspaces,
+        projection_matrices,
         tuple(gamma_regularized),
     )

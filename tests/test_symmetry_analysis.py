@@ -9,6 +9,7 @@ import pytest
 
 import pcwannier.symmetry.analysis as symmetry_analysis_module
 from pcwannier import BlochConvention
+from pcwannier.conventions import BlochFieldRepresentation
 from pcwannier.compute.integration import MetricInnerProduct
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import (
@@ -16,6 +17,7 @@ from pcwannier.data import (
     BlochSymmetryRunResult,
     InputBundle,
     Mesh,
+    PeriodicGrid,
 )
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.matrix_io import load_cell_matrix
@@ -24,6 +26,8 @@ from pcwannier.symmetry.reporting import (
     format_bloch_symmetry_report,
     format_symmetry_analysis_report,
 )
+from pcwannier.symmetry.definition import build_factor_system
+from pcwannier.symmetry.tables import ConcreteFiniteGroup
 from pcwannier.symmetry import (
     BlochSymmetryAction,
     DegeneracyTolerance,
@@ -32,7 +36,9 @@ from pcwannier.symmetry import (
     RepresentationAnalysisSpec,
     RepresentationPointSpec,
     SpaceGroupOperation,
+    SpaceGroup,
     StateBlochSymmetryProvider,
+    SymmetryModel,
     SymmetryCalculationSpec,
     WannierTargetSpec,
     analyze_bloch_symmetry,
@@ -147,6 +153,32 @@ def test_full_bloch_action_uses_quasiperiodic_lattice_shift():
     assert np.allclose(transformed, expected[None, :], atol=1e-12)
 
 
+def test_full_bloch_stencil_cache_keeps_exact_lattice_translation_phase():
+    mesh = _square_mesh()
+    action = BlochSymmetryAction(
+        mesh.vertices,
+        mesh.elements,
+        np.eye(2),
+        bloch_sign=-1,
+    )
+    kpoint = np.array([0.25, 0.0])
+    field = np.exp(
+        -2j * np.pi * (mesh.vertices @ kpoint)
+    )[None, :]
+    identity = SpaceGroupOperation.identity(2)
+    translation = SpaceGroupOperation.lattice_translation([1, 0])
+
+    unchanged = action.apply_full_bloch(
+        field, identity, kpoint, FieldKind.SCALAR
+    )
+    transformed = action.apply_full_bloch(
+        field, translation, kpoint, FieldKind.SCALAR
+    )
+
+    assert np.allclose(unchanged, field, atol=1.0e-12)
+    assert np.allclose(transformed, 1.0j * field, atol=1.0e-12)
+
+
 def test_full_bloch_antiunitary_action_conjugates_quasiperiodic_phase():
     mesh = _square_mesh()
     operation = SpaceGroupOperation(
@@ -172,6 +204,78 @@ def test_full_bloch_antiunitary_action_conjugates_quasiperiodic_phase():
 
     expected = np.where(mesh.vertices[:, 0] < 1.0 - 1.0e-12, -1j, 1.0)
     assert np.allclose(transformed, expected[None, :], atol=1e-12)
+
+
+def test_uniform_3d_screw_sewing_matches_its_nonsymmorphic_factor_system():
+    identity = SpaceGroupOperation.identity(3, "E")
+    screw = SpaceGroupOperation(
+        np.diag([-1, -1, 1]),
+        np.array([0.0, 0.0, 0.5]),
+        "screw_2_1_z",
+    )
+    group = SpaceGroup((identity, screw), tolerance=1.0e-10)
+    convention = BlochConvention(1, "mpb-test")
+    model = SymmetryModel(3, 1.0e-10, group, (), bloch_convention=convention)
+    k_axes = (np.array([0.0]), np.array([0.0]), np.array([-0.5]))
+    context = build_symmetry_context(model, k_axes)
+
+    grid = PeriodicGrid((2, 2, 2), np.eye(3))
+    block = np.zeros((1, grid.point_count, 3), dtype=np.complex128)
+    block[0, :, 2] = 1.0
+    fields = np.empty((1, 1, 1), dtype=object)
+    fields[0, 0, 0] = block
+    bands = np.empty((1, 1, 1), dtype=object)
+    bands[0, 0, 0] = [0]
+    energies = np.empty((1, 1, 1), dtype=object)
+    energies[0, 0, 0] = np.array([1.0])
+    config = SimpleNamespace(
+        kdim=3,
+        integration_mode="nodal",
+        use_cached_data=[],
+        real_lattice_vectors=np.eye(3),
+        reciprocal_lattice_vectors=np.eye(3),
+        lattice_const=1.0,
+        extension=[1, 1, 1],
+        k_points=k_axes,
+        symmetry_context=context,
+        maxwell_problem=MaxwellProblem.for_components("full_vector", "magnetic"),
+    )
+    state = StateCollection(
+        InputBundle(
+            config=config,
+            maxwell=config.maxwell_problem,
+            bloch_convention=convention,
+            mesh=grid,
+            fields=fields,
+            metric_material=np.ones(grid.point_count),
+            energies=energies,
+            band_indices=bands,
+            inner_band_indices=bands.copy(),
+            energy_matrix=np.ones((1, 1, 1, 1)),
+            field_representation=BlochFieldRepresentation.PERIODIC_PART,
+            symmetry=context,
+        )
+    )
+    report, need_orthogonalization = state.check_orthogonality()
+    assert not need_orthogonalization
+    assert report[0, 0, 0, 0] < 1.0e-14
+    state.ensure_identity_transform()
+
+    provider = StateBlochSymmetryProvider(state, context)
+    mapping = provider.mapping(1, (0, 0, 0))
+    sewing = provider.sewing_matrix_for_mapping(mapping, (0,))
+    concrete = ConcreteFiniteGroup.from_space_group(group)
+    factor = build_factor_system(
+        concrete,
+        [0.0, 0.0, -0.5],
+        1.0e-10,
+        bloch_convention=convention,
+    )
+
+    assert np.array_equal(concrete.lattice_shifts[1, 1], [0, 0, 1])
+    assert sewing[0, 0] == pytest.approx(1.0j, abs=1.0e-13)
+    assert (sewing @ sewing)[0, 0] == pytest.approx(-1.0, abs=1.0e-13)
+    assert factor.phases[1, 1] == pytest.approx(-1.0, abs=1.0e-13)
 
 
 def test_quadratic_identity_sewing_at_bz_boundary_is_unitary():

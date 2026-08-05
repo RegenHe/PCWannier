@@ -144,6 +144,12 @@ def test_gamma_two_transverse_plus_one_auxiliary_uses_constant_frame():
         np.linalg.eigvalsh(result.augmented_bundle.base_hamiltonians[0, 0, 0]),
         0.0,
     )
+    expected_projection = state.inner_product.overlap(
+        block,
+        np.swapaxes(trials, 0, 1),
+        chunk_size=64,
+    )
+    assert np.allclose(result.trial_projection_matrices[0, 0, 0], expected_projection)
 
 
 def test_gamma_general_group_preserves_positive_t_and_builds_extra_l():

@@ -62,3 +62,17 @@ def parallel_map(items, func, threads: int):
 
     with ParallelExecutor(threads) as executor:
         yield from executor.map(items, func)
+
+
+def memory_limited_threads(
+    requested: int,
+    bytes_per_worker: int,
+    *,
+    budget_bytes: int = 1 << 30,
+) -> int:
+    """Limit field-level parallelism to a predictable temporary-memory budget."""
+
+    count = max(1, int(requested))
+    worker_bytes = max(1, int(bytes_per_worker))
+    budget = max(worker_bytes, int(budget_bytes))
+    return max(1, min(count, budget // worker_bytes))

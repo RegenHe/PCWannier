@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from pcwannier import load_input, run_calculation
+from pcwannier.compute.integration import create_metric_inner_product
 from pcwannier.config import IncarParser, load_config
+from pcwannier.data import PeriodicGrid
 from pcwannier.projections import (
     LocalFrame3D,
     ProjectionRecord3D,
@@ -15,8 +17,48 @@ from pcwannier.projections import (
     real_spherical_harmonic,
 )
 from pcwannier.symmetry import cartesian_field_matrix
+from pcwannier.symmetry.bloch import build_bloch_symmetry_action
 import pcwannier.compute.vector_trials as vector_trials_module
 from pcwannier.compute.wannier import generate_wannier
+
+
+@pytest.mark.parametrize("bloch_sign", [-1, 1])
+def test_translation_bloch_fft_matches_direct_sum(bloch_sign):
+    k_points = (
+        np.arange(3, dtype=float) / 3.0 - 1.0 / 3.0,
+        np.arange(2, dtype=float) / 2.0 - 0.25,
+        np.asarray([0.125]),
+    )
+    k_shape = tuple(len(axis) for axis in k_points)
+    rng = np.random.default_rng(9021 + bloch_sign)
+    images = rng.normal(size=k_shape + (5, 3)) + 1j * rng.normal(
+        size=k_shape + (5, 3)
+    )
+
+    transformed = vector_trials_module._translation_bloch_fft(
+        images, k_points, bloch_sign
+    )
+    translation_axes = vector_trials_module._born_von_karman_translation_axes(
+        k_points
+    )
+    for k_index in np.ndindex(k_shape):
+        k_fractional = np.asarray(
+            [k_points[axis][k_index[axis]] for axis in range(3)]
+        )
+        expected = np.zeros(images.shape[-2:], dtype=np.complex128)
+        for translation_index in np.ndindex(k_shape):
+            translation = np.asarray(
+                [
+                    translation_axes[axis][translation_index[axis]]
+                    for axis in range(3)
+                ]
+            )
+            expected += images[translation_index] * np.exp(
+                bloch_sign * 2j * np.pi * np.dot(k_fractional, translation)
+            )
+        assert np.allclose(
+            transformed[k_index], expected, atol=2.0e-13, rtol=2.0e-13
+        )
 
 
 def test_local_frame_and_fixed_vector_orbitals():
@@ -234,6 +276,111 @@ def test_3d_projection_target_center_is_reduced_modulo_lattice(tmp_path):
         for point in target.orbit.points
     )
     assert target.multiplicity == 4
+
+
+def test_sg213_vector_trials_obey_full_nonsymmorphic_bloch_covariance(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "lattice_const = 1",
+                "real_lattice_vectors = 1 0 0, 0 1 0, 0 0 1",
+                "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+                "k_points = -0.5:0.5:0.5, -0.5:0.5:0.5, -0.5:0.5:0.5",
+                "composition_of_b = 1 0 0, 0 1 0, 0 0 1",
+                "dataset_type = mpb",
+                "field_components = full_vector",
+                "primary_field = magnetic",
+                "dataset_file = H.h5",
+                "mesh_file = grid.h5",
+                "E_file = E.h5",
+                "metric_file = false",
+                "band_window = 0:8",
+                # The projection must depend on the BvK k mesh, not this
+                # unrelated real-space output extension.
+                "extension = 1,1,1",
+                "wannier_figures = false",
+                "symmetry_file = hall:509",
+                "projections",
+                "4b; [-0.125,-0.125,-0.125]; (z=[1,1,1], x=[1,-1,0]); "
+                "[1,0,0,5]@[1,0,0]; [1,0,0,5]@[0,1,0]",
+                "end",
+                "wannier_targets",
+                "center_E_4b; 4b; E",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(incar)
+    grid = PeriodicGrid((8, 8, 8), np.eye(3))
+    inner_product = create_metric_inner_product(
+        grid, np.ones(grid.point_count), mode="nodal", backend="python"
+    )
+    context = config.symmetry_context
+    state = SimpleNamespace(
+        config=config,
+        mesh=grid,
+        symmetry=context,
+        bloch_sign=context.model.bloch_convention.sign,
+        maxwell=config.maxwell_problem,
+        inner_product=inner_product,
+    )
+    context, _ = vector_trials_module.prepare_vector_trial_targets(state, context)
+    state.symmetry = context
+    action = build_bloch_symmetry_action(
+        grid,
+        grid.fractional_vertices,
+        config.real_lattice_vectors,
+        bloch_sign=state.bloch_sign,
+        tolerance=config.symmetry_tolerance,
+    )
+    shape = tuple(len(axis) for axis in config.k_points)
+    fft_trials = vector_trials_module.build_vector_bloch_trial_grid(
+        state, context=context, workspace_bytes=8 << 20
+    )
+
+    for source_index in ((0, 0, 0), (1, 1, 1)):
+        source_k = np.asarray(
+            [config.k_points[axis][source_index[axis]] for axis in range(3)]
+        )
+        source = vector_trials_module.build_vector_bloch_trials(
+            state, source_index, context=context
+        )
+        assert np.allclose(
+            fft_trials[source_index], source, atol=2.0e-13, rtol=2.0e-13
+        )
+        cache = {source_index: source}
+        source_rows = np.swapaxes(source, 0, 1)
+        flat = np.ravel_multi_index(source_index, shape)
+        for operation_index, operation in enumerate(context.model.group.operations):
+            mapping = context.k_mappings[operation_index][flat]
+            target = cache.get(mapping.target_k_index)
+            if target is None:
+                target = vector_trials_module.build_vector_bloch_trials(
+                    state, mapping.target_k_index, context=context
+                )
+                cache[mapping.target_k_index] = target
+            dmat = context.target_matrix(operation_index, source_k)
+            expected = np.einsum("pjc,ji->pic", target, dmat, optimize=True)
+            transformed = np.swapaxes(
+                action.apply_full_bloch(
+                    source_rows,
+                    operation,
+                    source_k,
+                    state.maxwell.symmetry_field_kind,
+                    time_reversal=state.maxwell.apply_time_reversal,
+                ),
+                0,
+                1,
+            )
+            assert np.allclose(transformed, expected, atol=2.0e-12, rtol=2.0e-12)
+
+        config.extension = [7, 7, 7]
+        extended_output_trial = vector_trials_module.build_vector_bloch_trials(
+            state, source_index, context=context
+        )
+        assert np.allclose(extended_output_trial, source, atol=1.0e-14, rtol=1.0e-14)
 
 
 def _write_pm3m_vector_binding_incar(
@@ -488,7 +635,7 @@ def test_orbit_expanded_vector_trials_normalize_all_six_columns(monkeypatch):
     monkeypatch.setattr(
         vector_trials_module,
         "_evaluate_transformed_trial",
-        lambda _state, _record, trial, points, _center, _operation: np.full(
+        lambda _state, _record, trial, points, _center, _operation, **_kwargs: np.full(
             (points.shape[0], 3), trial, dtype=np.complex128
         ),
     )

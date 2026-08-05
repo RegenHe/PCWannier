@@ -45,6 +45,7 @@ class ETBCCompletionResult:
     auxiliary_eigenvalue: float
     diagnostics: tuple[ETBCKPointDiagnostics, ...]
     nullspace_coefficients: np.ndarray = field(repr=False)
+    trial_projection_matrices: np.ndarray = field(repr=False)
     gamma_regularized_indices: tuple[tuple[int, int, int], ...] = ()
 
     @property

@@ -7,12 +7,31 @@ from pcwannier.compute.gradient import Gradient
 from pcwannier.compute.context import CalculationContext
 from pcwannier.compute.initializer import StateInitializer
 from pcwannier.compute.matrix import MSet
-from pcwannier.compute.parallel import parallel_map
+from pcwannier.compute.parallel import memory_limited_threads, parallel_map
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import BandChannelReference, InputBundle, Mesh
 from pcwannier.matrix_io import save_cell_matrix
 from pcwannier.maxwell import MaxwellProblem
 from pcwannier.compute.tba import TBAModel
+
+
+def test_gradient_does_not_report_convergence_from_small_spread_change_alone():
+    gradient, calls = _synthetic_gradient_optimizer([1.0, 0.9999995, 0.9999990, 0.9999985])
+
+    Gradient.iter(gradient, err_diff=1.0e-6, max_iter=3, epsilon=0.01)
+
+    assert calls["calc"] == 3
+    assert gradient.epsilon == pytest.approx(0.01)
+
+
+def test_gradient_rejects_uphill_step_and_restores_gauge():
+    gradient, calls = _synthetic_gradient_optimizer([1.0, 0.9, 1.1])
+
+    Gradient.iter(gradient, err_diff=1.0e-8, max_iter=2, epsilon=0.01)
+
+    assert calls["calc"] == 2
+    assert gradient.epsilon == pytest.approx(0.005)
+    assert np.allclose(gradient.U[0, 0, 0], [[1.0]])
 
 
 def test_calculation_context_separates_internal_and_output_coefficients():
@@ -182,6 +201,12 @@ def test_parallel_map_preserves_deterministic_input_order():
     for threads in (1, 2, 4):
         actual = list(parallel_map(range(32), lambda value: (value, value * value), threads))
         assert actual == expected
+
+
+def test_memory_limited_threads_respects_request_and_budget():
+    assert memory_limited_threads(8, 128, budget_bytes=512) == 4
+    assert memory_limited_threads(2, 128, budget_bytes=512) == 2
+    assert memory_limited_threads(8, 1024, budget_bytes=512) == 1
 
 
 def test_even_kmesh_half_r_set_has_no_inverse_duplicates():
@@ -723,6 +748,31 @@ def _object_grid(value):
     grid = np.empty((1, 1, 1), dtype=object)
     grid[0, 0, 0] = value
     return grid
+
+
+def _synthetic_gradient_optimizer(omega_values):
+    gradient = object.__new__(Gradient)
+    gradient.config = SimpleNamespace(use_cached_data=[])
+    gradient.state = SimpleNamespace(k_indices=lambda: iter(((0, 0, 0),)))
+    gradient.mset = SimpleNamespace(update=lambda _u: None)
+    gradient.U = _object_grid(np.zeros((1, 1), dtype=np.complex128))
+    gradient.G = _object_grid(np.ones((1, 1), dtype=np.complex128))
+    gradient.omega = np.full(3, np.nan, dtype=float)
+    calls = {"calc": 0, "update": 0}
+
+    def calc():
+        calls["calc"] += 1
+        gradient.G[0, 0, 0] = np.ones((1, 1), dtype=np.complex128)
+        gradient.U[0, 0, 0] = gradient.U[0, 0, 0] + 1.0
+
+    def update():
+        index = min(calls["update"], len(omega_values) - 1)
+        gradient.omega = np.array([omega_values[index], 0.0, 0.0], dtype=float)
+        calls["update"] += 1
+
+    gradient.calc = calc
+    gradient.update = update
+    return gradient, calls
 
 
 def _two_band_overlap_state(metric_material=None, components="Ez", integration_mode="nodal"):

@@ -69,7 +69,7 @@ class WannierTargetRepresentation:
     orbit: CrystallographicOrbit
     site_irrep: SiteIrrep
     bloch_convention: BlochConvention = field(default_factory=BlochConvention)
-    _matrix_cache: dict[tuple[int, bytes], np.ndarray] = field(
+    _matrix_cache: dict[tuple[int, tuple[int, ...], bytes], np.ndarray] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
 
@@ -89,19 +89,31 @@ class WannierTargetRepresentation:
         return orbit_index * self.site_irrep.dimension + irrep_index
 
     def matrix(self, operation: int | SpaceGroupOperation, k_fractional) -> np.ndarray:
-        operation_index = (
-            int(operation) if isinstance(operation, (int, np.integer)) else self.group.operation_index(operation)
-        )
+        if isinstance(operation, (int, np.integer)):
+            operation_index = int(operation)
+            representative_shift = np.zeros(self.group.dimension, dtype=np.int64)
+            exact_operation = None
+        else:
+            reduced = self.group.reduce_operation(operation)
+            operation_index = reduced.result_index
+            representative_shift = np.asarray(reduced.lattice_shift, dtype=np.int64)
+            exact_operation = operation
         if not 0 <= operation_index < len(self.group.operations):
             raise IndexError("Space-group operation index is out of range.")
+        if exact_operation is None:
+            exact_operation = self.group.operations[operation_index]
         kpoint = np.asarray(k_fractional, dtype=float)
         if kpoint.shape != (self.group.dimension,) or not np.all(np.isfinite(kpoint)):
             raise ValueError(f"k_fractional must have shape {(self.group.dimension,)} and be finite.")
-        cache_key = (operation_index, np.ascontiguousarray(kpoint).tobytes())
+        cache_key = (
+            operation_index,
+            tuple(int(value) for value in representative_shift),
+            np.ascontiguousarray(kpoint).tobytes(),
+        )
         cached = self._matrix_cache.get(cache_key)
         if cached is not None:
             return cached
-        transformed_k = self.group.operations[operation_index].act_reciprocal(kpoint)
+        transformed_k = exact_operation.act_reciprocal(kpoint)
         dimension = self.site_irrep.dimension
         output = np.zeros((self.wannier_dimension, self.wannier_dimension), dtype=np.complex128)
         for orbit_index in range(self.multiplicity):
@@ -116,6 +128,13 @@ class WannierTargetRepresentation:
             row = slice(action.target_index * dimension, (action.target_index + 1) * dimension)
             column = slice(orbit_index * dimension, (orbit_index + 1) * dimension)
             output[row, column] = phase * self.site_irrep.matrix(action.site_element_index)
+        if np.any(representative_shift):
+            output *= np.exp(
+                -self.bloch_convention.sign
+                * 2j
+                * np.pi
+                * np.dot(transformed_k, representative_shift)
+            )
         residual = float(np.linalg.norm(output.conj().T @ output - np.eye(self.wannier_dimension), ord="fro"))
         if residual > 1e-8:
             raise FloatingPointError(f"Target Wannier representation is not unitary (residual={residual:.6g}).")
@@ -129,7 +148,7 @@ class CombinedTargetRepresentation:
     """Cached block-diagonal target representation in configured target order."""
 
     targets: tuple[WannierTargetRepresentation, ...]
-    _matrix_cache: dict[tuple[int, bytes], np.ndarray] = field(
+    _matrix_cache: dict[tuple[int, tuple[int, ...], bytes], np.ndarray] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
 
@@ -163,21 +182,27 @@ class CombinedTargetRepresentation:
         operation: int | SpaceGroupOperation,
         k_fractional,
     ) -> np.ndarray:
-        operation_index = (
-            int(operation)
-            if isinstance(operation, (int, np.integer))
-            else self.group.operation_index(operation)
-        )
+        if isinstance(operation, (int, np.integer)):
+            operation_index = int(operation)
+            representative_shift = (0,) * self.group.dimension
+        else:
+            reduced = self.group.reduce_operation(operation)
+            operation_index = reduced.result_index
+            representative_shift = reduced.lattice_shift
         kpoint = np.asarray(k_fractional, dtype=float)
         if kpoint.shape != (self.group.dimension,) or not np.all(np.isfinite(kpoint)):
             raise ValueError(
                 f"k_fractional must have shape {(self.group.dimension,)} and be finite."
             )
-        cache_key = (operation_index, np.ascontiguousarray(kpoint).tobytes())
+        cache_key = (
+            operation_index,
+            representative_shift,
+            np.ascontiguousarray(kpoint).tobytes(),
+        )
         cached = self._matrix_cache.get(cache_key)
         if cached is not None:
             return cached
-        blocks = [target.matrix(operation_index, kpoint) for target in self.targets]
+        blocks = [target.matrix(operation, kpoint) for target in self.targets]
         output = np.zeros((self.dimension, self.dimension), dtype=np.complex128)
         offset = 0
         for block in blocks:

@@ -236,10 +236,19 @@ class SpaceGroup:
         if not 0 <= left < len(self.operations) or not 0 <= right < len(self.operations):
             raise IndexError("Space-group operation index is out of range.")
         exact_product = self.operations[left] * self.operations[right]
-        result_index = self.operation_index(exact_product)
+        return self.reduce_operation(exact_product)
+
+    def reduce_operation(self, operation: SpaceGroupOperation) -> SeitzProduct:
+        """Reduce an exact Seitz operation to a stored representative."""
+
+        if not isinstance(operation, SpaceGroupOperation):
+            raise TypeError("Expected a SpaceGroupOperation.")
+        if operation.dimension != self.dimension:
+            raise ValueError("Seitz operation dimension does not match the space group.")
+        result_index = self.operation_index(operation)
         representative = self.operations[result_index]
         lattice_shift = _integer_shift(
-            exact_product.translation - representative.translation,
+            operation.translation - representative.translation,
             self.tolerance,
             description="Seitz representative product translation",
         )

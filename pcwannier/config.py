@@ -102,7 +102,7 @@ class IncarConfig:
     ebr_data_file: str | bool = "./ebr.json"
     band_file: str = "./band.txt"
     hopping_file: str = "./hopping.txt"
-    wannier_file: str = "./wannier.txt"
+    wannier_file: str | bool = False
     wannier_figures: str = "./wanniers"
     band_figure: str = "./band.png"
     topo_output: str = "./topo"

@@ -44,6 +44,7 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.ebr_max_states == 1_000_000
     assert cfg.ebr_report_file == "./ebr.txt"
     assert cfg.ebr_data_file == "./ebr.json"
+    assert cfg.wannier_file is False
     assert cfg.field_components == FieldComponents.EZ.value
     assert cfg.maxwell_problem.primary_field == PrimaryField.ELECTRIC
     assert cfg.maxwell_problem.metric_material == MaterialKind.EPSILON

@@ -33,8 +33,10 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert len(cfg.projections[0]["states"]) == 3
     assert cfg.compute_backend == "python"
     assert cfg.integration_mode == "nodal"
+    assert cfg.P_file == "./P.txt"
     assert cfg.wannier_subspace == "T"
     assert cfg.invert_longitudinal_energies is False
+    assert cfg.projector_preserving_band_interpolation is True
     assert cfg.symmetry_report_file == "./sym.txt"
     assert cfg.ebr_catalog == "auto"
     assert cfg.ebr_mode == "auto"
@@ -112,6 +114,19 @@ def test_bloch_symmetry_config_mode_does_not_require_wannier_inputs(tmp_path):
     assert cfg.symmetry_context.model.symmetry_gauge is None
     point = cfg.symmetry_context.model.representation_analysis.points[0]
     assert point.target_names is None
+
+
+def test_projector_preserving_band_interpolation_switch_parses_boolean(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        _minimal_symmetry_incar()
+        + "\nprojector_preserving_band_interpolation = false\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(incar)
+
+    assert cfg.projector_preserving_band_interpolation is False
 
 
 def test_longitudinal_settings_are_ignored_for_transverse_subspace(tmp_path):

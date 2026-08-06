@@ -53,9 +53,12 @@ def test_cell_matrix_rejects_ambiguous_or_inconsistent_blocks(tmp_path, content,
 def test_write_outputs_writes_raw_s_in_shared_cell_format(tmp_path):
     smat = np.empty((1, 1, 1), dtype=object)
     smat[0, 0, 0] = np.array([[1.0, 0.2j], [-0.2j, 1.5]])
+    projector = np.empty((1, 1, 1), dtype=object)
+    projector[0, 0, 0] = np.array([[1.0, 0.0], [0.0, 0.0]])
     config = SimpleNamespace(
         base_dir=tmp_path,
         S_file="S.txt",
+        P_file="P.txt",
         M_file=False,
         V_file=False,
         A_file=False,
@@ -71,6 +74,7 @@ def test_write_outputs_writes_raw_s_in_shared_cell_format(tmp_path):
     )
     result = SimpleNamespace(
         S=smat,
+        transverse_projectors=projector,
         band=None,
         topology=None,
         sewing_matrices=None,
@@ -82,3 +86,11 @@ def test_write_outputs_writes_raw_s_in_shared_cell_format(tmp_path):
     assert "CELL(0, 0, 0)" in path.read_text(encoding="utf-8")
     loaded = load_cell_matrix(path, smat.shape)
     assert np.allclose(loaded[0, 0, 0], smat[0, 0, 0])
+
+    projector_path = tmp_path / "P.txt"
+    text = projector_path.read_text(encoding="utf-8")
+    assert "P_T(k) in the final Wannier basis" in text
+    loaded_projector = load_cell_matrix(projector_path, projector.shape)
+    assert np.allclose(
+        loaded_projector[0, 0, 0], projector[0, 0, 0]
+    )

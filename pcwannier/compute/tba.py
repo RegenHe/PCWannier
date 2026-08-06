@@ -15,10 +15,21 @@ from ..data import (
 from .context import CalculationContext
 from .kspace import get_kxyz
 from .parallel import parallel_map
+from .projector_interpolation import (
+    ProjectorBandInterpolationDiagnostics,
+    ProjectorPreservingBandInterpolator,
+)
 
 
 class TBAModel:
-    def __init__(self, ctx: CalculationContext, threads: int = 1):
+    def __init__(
+        self,
+        ctx: CalculationContext,
+        threads: int = 1,
+        *,
+        projector_preserving: bool = False,
+        fixed_longitudinal_eigenvalue: float | None = None,
+    ):
         self.ctx = ctx
         self.config = ctx.config
         self.state = ctx.state
@@ -26,26 +37,74 @@ class TBAModel:
         self.hoppings: list[np.ndarray] | None = None
         self._projected_hamiltonians: np.ndarray | None = None
         self._projected_k_cart: np.ndarray | None = None
+        self._projector_source_positions: dict[
+            tuple[int, int, int], tuple[np.ndarray, np.ndarray]
+        ] = {}
+        if projector_preserving:
+            transverse_dimension = self._prepare_projector_source_positions()
+            self._projector_interpolator = ProjectorPreservingBandInterpolator(
+                transverse_dimension,
+                int(self.config.band_calc_num),
+                fixed_longitudinal_eigenvalue=fixed_longitudinal_eigenvalue,
+            )
+        else:
+            self._projector_interpolator = None
+        self._sector_hamiltonians: tuple[np.ndarray, np.ndarray] | None = None
+        self._projected_projectors: np.ndarray | None = None
+        self._transverse_projector_grid: np.ndarray | None = None
+        self._sector_hopping_cache: dict[
+            tuple[str, tuple[int, int, int]], np.ndarray
+        ] = {}
+        self.projector_interpolation_diagnostics: (
+            ProjectorBandInterpolationDiagnostics | None
+        ) = None
+
+    def transverse_projectors(self) -> np.ndarray | None:
+        """Return sampled P_T(k) matrices in the final Wannier basis."""
+
+        if getattr(self, "_projector_interpolator", None) is None:
+            return None
+        if self._transverse_projector_grid is not None:
+            return self._transverse_projector_grid
+        flat_projectors = self._projector_k_data()[2]
+        output = np.empty(self.state.k_shape, dtype=object)
+        for position, index in enumerate(self.state.k_indices()):
+            output[index] = np.asarray(
+                flat_projectors[position], dtype=np.complex128
+            ).copy()
+        self._transverse_projector_grid = output
+        return output
 
     def gen_hopping(self, r: list[int] | tuple[int, ...] | None = None) -> np.ndarray:
         if r is None:
             r = [0, 0, 0]
+        k_cart, projected = self._projected_k_hamiltonians()
+        return self._fourier_coefficient(projected, k_cart, r)
+
+    def _fourier_coefficient(
+        self,
+        matrices: np.ndarray,
+        k_cart: np.ndarray,
+        r: list[int] | tuple[int, ...],
+    ) -> np.ndarray:
         config = self.config
-        state = self.state
         kdim = int(config.kdim)
-        avec = np.asarray(config.real_lattice_vectors)
+        avec = np.asarray(config.real_lattice_vectors, dtype=float)
         dim = avec.shape[1]
         r_use = (list(r) + [0, 0, 0])[:kdim]
         r_cart = np.zeros(dim, dtype=float)
         for axis in range(kdim):
             r_cart += r_use[axis] * avec[axis, :]
         r_cart *= float(config.lattice_const)
-
-        band_count = int(config.band_calc_num)
-        sign = state.bloch_sign
-        k_cart, projected = self._projected_k_hamiltonians()
-        phase = np.exp(1j * (-sign) * (k_cart @ r_cart))
-        return np.sum(projected * phase[:, None, None], axis=0) / state.get_k_num()
+        phase = np.exp(1j * (-self.state.bloch_sign) * (k_cart @ r_cart))
+        return (
+            np.sum(
+                np.asarray(matrices, dtype=np.complex128)
+                * phase[:, None, None],
+                axis=0,
+            )
+            / self.state.get_k_num()
+        )
 
     def _projected_k_hamiltonians(self) -> tuple[np.ndarray, np.ndarray]:
         if self._projected_hamiltonians is not None and self._projected_k_cart is not None:
@@ -66,6 +125,254 @@ class TBAModel:
         self._projected_k_cart = k_cart
         self._projected_hamiltonians = projected
         return k_cart, projected
+
+    def _prepare_projector_source_positions(self) -> int:
+        channels = getattr(self.state, "band_channels", {})
+        counts = set()
+        for index in self.state.k_indices():
+            actual_bands = np.asarray(self.state.E_idx[index], dtype=int).reshape(-1)
+            transverse = []
+            longitudinal = []
+            for position, actual_band in enumerate(actual_bands):
+                reference = channels.get(int(actual_band))
+                if reference is None:
+                    raise ValueError(
+                        "projector_preserving_band_interpolation requires T/L channel "
+                        f"metadata for actual band {actual_band} at k={index}."
+                    )
+                channel = str(reference.channel).strip().upper()
+                if channel == "L":
+                    longitudinal.append(position)
+                elif channel in {"H", "T"}:
+                    transverse.append(position)
+                else:
+                    raise ValueError(
+                        "Unsupported band channel for projector-preserving interpolation: "
+                        f"{reference.channel!r}."
+                    )
+            if not transverse or not longitudinal:
+                raise ValueError(
+                    "projector_preserving_band_interpolation requires both T and L "
+                    f"states at every k point; k={index} has T={len(transverse)}, "
+                    f"L={len(longitudinal)}."
+                )
+            self._projector_source_positions[tuple(index)] = (
+                np.asarray(transverse, dtype=int),
+                np.asarray(longitudinal, dtype=int),
+            )
+            counts.add(len(transverse))
+        if len(counts) != 1:
+            raise ValueError(
+                "Projector-preserving interpolation requires a fixed transverse "
+                f"dimension; found {sorted(counts)}."
+            )
+        transverse_dimension = counts.pop()
+        if transverse_dimension >= int(self.config.band_calc_num):
+            raise ValueError(
+                "The selected Wannier space has no longitudinal sector after fixing "
+                f"N_T={transverse_dimension}; N_W={self.config.band_calc_num}."
+            )
+        return transverse_dimension
+
+    def _projector_k_data(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if getattr(self, "_projector_interpolator", None) is None:
+            raise RuntimeError("Projector-preserving interpolation is not active.")
+        if self._sector_hamiltonians is not None and self._projected_projectors is not None:
+            return (
+                self._sector_hamiltonians[0],
+                self._sector_hamiltonians[1],
+                self._projected_projectors,
+            )
+        if self.state.S is None:
+            raise ValueError(
+                "Projector-preserving interpolation requires the raw S(k) matrices."
+            )
+
+        indices = tuple(self.state.k_indices())
+        dimension = self._projector_interpolator.wannier_dimension
+        transverse_hamiltonians = np.empty(
+            (len(indices), dimension, dimension), dtype=np.complex128
+        )
+        longitudinal_hamiltonians = np.empty_like(transverse_hamiltonians)
+        projectors = np.empty_like(transverse_hamiltonians)
+        for position, index in enumerate(indices):
+            transverse_positions, longitudinal_positions = (
+                self._projector_source_positions[index]
+            )
+            coefficients = np.asarray(
+                self.ctx.output_state_coefficients_at(*index),
+                dtype=np.complex128,
+            )
+            source_dimension = coefficients.shape[0]
+            if coefficients.shape != (source_dimension, dimension):
+                raise ValueError(
+                    f"Output coefficients at k={index} have shape {coefficients.shape}; "
+                    f"expected ({source_dimension}, {dimension})."
+                )
+            normalization = np.eye(source_dimension, dtype=np.complex128)
+            normalization_grid = getattr(self.state, "normalization_transform", None)
+            if bool(getattr(self.state, "is_orthogonalized", False)) and (
+                normalization_grid is not None
+            ):
+                normalization = np.asarray(
+                    normalization_grid[index], dtype=np.complex128
+                )
+            raw_overlap = np.asarray(self.state.S[index], dtype=np.complex128)
+            overlap = normalization.conj().T @ raw_overlap @ normalization
+            projectors[position] = (
+                self._projector_interpolator.projector_in_wannier_basis(
+                    overlap, coefficients, transverse_positions
+                )
+            )
+            raw_base_hamiltonian = np.asarray(
+                self._output_base_hamiltonian_at(index), dtype=np.complex128
+            )
+            base_hamiltonian = (
+                normalization.conj().T
+                @ raw_base_hamiltonian
+                @ normalization
+            )
+            if base_hamiltonian.shape != (source_dimension, source_dimension):
+                raise ValueError(
+                    f"Source Hamiltonian at k={index} has shape "
+                    f"{base_hamiltonian.shape}; expected "
+                    f"{(source_dimension, source_dimension)}."
+                )
+            cross = base_hamiltonian[
+                np.ix_(transverse_positions, longitudinal_positions)
+            ]
+            reverse_cross = base_hamiltonian[
+                np.ix_(longitudinal_positions, transverse_positions)
+            ]
+            scale = max(float(np.linalg.norm(base_hamiltonian, ord="fro")), 1.0)
+            if max(
+                float(np.linalg.norm(cross, ord="fro")),
+                float(np.linalg.norm(reverse_cross, ord="fro")),
+            ) > 1.0e-10 * scale:
+                raise ValueError(
+                    "The source Hamiltonian mixes transverse and longitudinal sectors "
+                    f"at k={index}; projector-preserving interpolation requires a "
+                    "block-diagonal source Hamiltonian."
+                )
+            transverse_base = np.zeros_like(base_hamiltonian)
+            transverse_base[np.ix_(transverse_positions, transverse_positions)] = (
+                base_hamiltonian[np.ix_(transverse_positions, transverse_positions)]
+            )
+            longitudinal_base = np.zeros_like(base_hamiltonian)
+            longitudinal_base[
+                np.ix_(longitudinal_positions, longitudinal_positions)
+            ] = base_hamiltonian[
+                np.ix_(longitudinal_positions, longitudinal_positions)
+            ]
+            transverse_hamiltonians[position] = (
+                coefficients.conj().T @ transverse_base @ coefficients
+            )
+            longitudinal_hamiltonians[position] = (
+                coefficients.conj().T @ longitudinal_base @ coefficients
+            )
+        self._sector_hamiltonians = (
+            self._hermitian_batch(transverse_hamiltonians),
+            self._hermitian_batch(longitudinal_hamiltonians),
+        )
+        self._projected_projectors = self._hermitian_batch(projectors)
+        return (
+            self._sector_hamiltonians[0],
+            self._sector_hamiltonians[1],
+            self._projected_projectors,
+        )
+
+    @staticmethod
+    def _r_key(r: list[int] | tuple[int, ...]) -> tuple[int, int, int]:
+        return tuple(int(value) for value in (list(r) + [0, 0, 0])[:3])
+
+    def _projector_interpolation_hopping(
+        self,
+        kind: str,
+        r: list[int] | tuple[int, ...],
+    ) -> np.ndarray:
+        key = self._r_key(r)
+        cache_key = (kind, key)
+        if kind == "transverse":
+            matrices = self._projector_k_data()[0]
+        elif kind == "longitudinal":
+            matrices = self._projector_k_data()[1]
+        elif kind == "projector":
+            matrices = self._projector_k_data()[2]
+        else:
+            raise ValueError(f"Unknown projector interpolation matrix kind {kind!r}.")
+        if cache_key not in self._sector_hopping_cache:
+            k_cart, _ = self._projected_k_hamiltonians()
+            self._sector_hopping_cache[cache_key] = self._fourier_coefficient(
+                matrices, k_cart, key
+            )
+        return self._sector_hopping_cache[cache_key]
+
+    def _band_hamiltonian_factory(
+        self,
+        hoppings: dict[tuple[int, int, int], np.ndarray],
+    ):
+        h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
+        neighbors = self._band_neighbors(hoppings)
+        if getattr(self, "_projector_interpolator", None) is None:
+            hop_array = self._hoppings_for_neighbors(hoppings, neighbors)
+            return self._h_of_k_factory(h0, neighbors, hop_array)
+
+        transverse_h0 = self._projector_interpolation_hopping(
+            "transverse", (0, 0, 0)
+        )
+        longitudinal_h0 = self._projector_interpolation_hopping(
+            "longitudinal", (0, 0, 0)
+        )
+        projector_h0 = self._projector_interpolation_hopping(
+            "projector", (0, 0, 0)
+        )
+        transverse_hops = np.asarray(
+            [
+                self._projector_interpolation_hopping("transverse", row)
+                for row in neighbors
+            ],
+            dtype=np.complex128,
+        )
+        longitudinal_hops = np.asarray(
+            [
+                self._projector_interpolation_hopping("longitudinal", row)
+                for row in neighbors
+            ],
+            dtype=np.complex128,
+        )
+        projector_hops = np.asarray(
+            [
+                self._projector_interpolation_hopping("projector", row)
+                for row in neighbors
+            ],
+            dtype=np.complex128,
+        )
+        transverse_factory = self._h_of_k_factory(
+            transverse_h0, neighbors, transverse_hops
+        )
+        longitudinal_factory = self._h_of_k_factory(
+            longitudinal_h0, neighbors, longitudinal_hops
+        )
+        projector_factory = self._h_of_k_factory(
+            projector_h0, neighbors, projector_hops
+        )
+
+        def h_of_k(k_cart: np.ndarray) -> np.ndarray:
+            output, diagnostics = self._projector_interpolator.constrain_hamiltonians(
+                transverse_factory(k_cart),
+                longitudinal_factory(k_cart),
+                projector_factory(k_cart),
+            )
+            self.projector_interpolation_diagnostics = (
+                diagnostics
+                if self.projector_interpolation_diagnostics is None
+                else self.projector_interpolation_diagnostics.merged(diagnostics)
+            )
+            return output
+
+        return h_of_k
 
     def output_spectrum_diagnostics(self, symmetry_analysis=None) -> OutputSpectrumDiagnostics | None:
         """Compare the output-basis Hamiltonian with isolated FEM eigenvalues."""
@@ -265,10 +572,7 @@ class TBAModel:
         k_path = np.vstack(k_list_parts)
         k_axis = np.arange(0, total + 1)
 
-        h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
-        neigh = self._band_neighbors(hoppings)
-        hops = self._hoppings_for_neighbors(hoppings, neigh)
-        h_of_k = self._h_of_k_factory(h0, neigh, hops)
+        h_of_k = self._band_hamiltonian_factory(hoppings)
         hks = h_of_k(self._kfrac_to_kcart(k_path))
         energies = np.linalg.eigvalsh(hks) if config.hermitian else np.sort(np.linalg.eigvals(hks))
 
@@ -332,10 +636,9 @@ class TBAModel:
         kfrac = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
         nk_shape = kfrac.shape[:-1]
         k_flat = kfrac.reshape(int(np.prod(nk_shape)), kdim)
-        h0 = np.asarray(hoppings[(0, 0, 0)], dtype=np.complex128)
-        neigh = self._band_neighbors(hoppings)
-        hops = self._hoppings_for_neighbors(hoppings, neigh)
-        hks = self._h_of_k_factory(h0, neigh, hops)(self._kfrac_to_kcart(k_flat))
+        hks = self._band_hamiltonian_factory(hoppings)(
+            self._kfrac_to_kcart(k_flat)
+        )
         eigvals, eigvecs = np.linalg.eigh(hks)
         result.bz_eigvals = eigvals.reshape(*nk_shape, int(config.band_calc_num))
         result.bz_eigvecs = eigvecs.reshape(*nk_shape, int(config.band_calc_num), int(config.band_calc_num))

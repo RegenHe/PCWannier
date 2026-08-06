@@ -645,7 +645,29 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             stencil_bytes / (1024.0 * 1024.0),
         )
         symmetry_provider.release_spatial_cache()
-    tba = TBAModel(ctx, threads=threads)
+    projector_interpolation_enabled = bool(
+        config.projector_preserving_band_interpolation
+        and config.wannier_subspace == "T+L"
+    )
+    tba = TBAModel(
+        ctx,
+        threads=threads,
+        projector_preserving=projector_interpolation_enabled,
+        fixed_longitudinal_eigenvalue=(
+            None if etbc_result is None else etbc_result.auxiliary_eigenvalue
+        ),
+    )
+    if projector_interpolation_enabled:
+        LOGGER.info(
+            "T/L band interpolation: projector-preserving mode enabled "
+            "(longitudinal_source=%s%s)",
+            config.longitudinal_source,
+            (
+                ""
+                if etbc_result is None
+                else f" fixed_longitudinal_eigenvalue={etbc_result.auxiliary_eigenvalue:.10g}"
+            ),
+        )
     if config.invert_longitudinal_energies:
         LOGGER.info(
             "Final TBA spectrum: L-channel Maxwell eigenvalues are multiplied by -1 "
@@ -668,6 +690,24 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             tba.gen_bz_bands(band, hoppings)
     with timed_step("calculate topology", LOGGER, enabled=band is not None):
         topology = calculate_topology(band, config) if band is not None else None
+    if tba.projector_interpolation_diagnostics is not None:
+        interpolation = tba.projector_interpolation_diagnostics
+        log_interpolation = (
+            LOGGER.warning
+            if interpolation.minimum_projector_gap < 1.0e-6
+            else LOGGER.info
+        )
+        log_interpolation(
+            "T/L projector interpolation: points=%d min_projector_gap=%.6g "
+            "raw_idempotency=%.6g flattened_idempotency=%.6g "
+            "removed_cross_sector=%.6g",
+            interpolation.point_count,
+            interpolation.minimum_projector_gap,
+            interpolation.maximum_raw_projector_idempotency_error,
+            interpolation.maximum_flattened_projector_idempotency_error,
+            interpolation.maximum_removed_cross_sector_component,
+        )
+    transverse_projectors = tba.transverse_projectors()
 
     bloch_gauge = state.gen_matrix_on_kmesh(
         lambda i, j, k: np.asarray(ctx.bloch_gauge_at(i, j, k), dtype=np.complex128).copy()
@@ -703,6 +743,8 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         ),
         trial_covariance_diagnostics=trial_covariance_diagnostics,
         etbc=etbc_result,
+        transverse_projectors=transverse_projectors,
+        projector_interpolation_diagnostics=tba.projector_interpolation_diagnostics,
     )
 
 

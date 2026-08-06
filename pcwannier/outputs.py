@@ -680,6 +680,19 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
     if s_path is not None and result.S is not None:
         with timed_step("write raw S matrix", LOGGER, file=s_path):
             save_cell_matrix(s_path, result.S, result.S.shape)
+    p_path = _resolve_output(getattr(config, "P_file", "./P.txt"), config, out_dir)
+    transverse_projectors = getattr(result, "transverse_projectors", None)
+    if p_path is not None and transverse_projectors is not None:
+        with timed_step("write transverse P matrix", LOGGER, file=p_path):
+            save_cell_matrix(
+                p_path,
+                transverse_projectors,
+                transverse_projectors.shape,
+                header_comments=(
+                    "P_T(k) in the final Wannier basis.",
+                    "CELL indices follow the configured sampled k grid.",
+                ),
+            )
     m_path = _resolve_output(config.M_file, config, out_dir)
     if m_path is not None:
         with timed_step("write M0 matrix", LOGGER, file=m_path):

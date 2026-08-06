@@ -45,6 +45,7 @@ class IncarConfig:
     wannier_subspace: str = "T"
     longitudinal_source: str = "file"
     invert_longitudinal_energies: bool = False
+    projector_preserving_band_interpolation: bool = True
     etbc_auxiliary_eigenvalue: float = 0.0
     etbc_rank_tolerance: float = 1.0e-10
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None
@@ -96,6 +97,7 @@ class IncarConfig:
     M_file: str = "./M.txt"
     A_file: str = "./A.txt"
     S_file: str = "./S.txt"
+    P_file: str = "./P.txt"
     D_file: str = "./D.txt"
     symmetry_report_file: str | bool = "./sym.txt"
     ebr_report_file: str | bool = "./ebr.txt"
@@ -673,6 +675,7 @@ class IncarParser:
             "longitudinal_S_file",
             "longitudinal_D_file",
             "S_file",
+            "P_file",
             "D_file",
             "symmetry_report_file",
             "ebr_report_file",
@@ -827,6 +830,7 @@ class IncarParser:
             "symmetry_validate_wannier",
             "gamma_zero_regularization",
             "invert_longitudinal_energies",
+            "projector_preserving_band_interpolation",
         }:
             normalized = value.strip().lower()
             if normalized not in {"true", "false"}:

@@ -7,6 +7,9 @@ from pcwannier import BlochConvention
 from pcwannier.conventions import BlochFieldRepresentation
 from pcwannier.compute.state import StateCollection
 from pcwannier.compute.uniform_grid import UniformGridInnerProduct
+from pcwannier.compute.projector_interpolation import (
+    ProjectorPreservingBandInterpolator,
+)
 from pcwannier.data import InputBundle, PeriodicGrid
 from pcwannier.etbc import complete_transverse_bundle, construct_auxiliary_frame
 from pcwannier.maxwell import MaxwellProblem
@@ -60,6 +63,92 @@ def test_construct_auxiliary_frame_rejects_missing_transverse_direction():
         construct_auxiliary_frame(
             transverse, trials, inner, rank_tolerance=1.0e-10
         )
+
+
+def test_projector_interpolation_flattens_rank_and_pins_auxiliary_energy():
+    interpolator = ProjectorPreservingBandInterpolator(
+        2, 3, fixed_longitudinal_eigenvalue=-0.25
+    )
+    approximate = np.asarray(
+        [
+            [
+                [0.93, 0.04 + 0.02j, 0.12],
+                [0.04 - 0.02j, 0.82, -0.09j],
+                [0.12, 0.09j, 0.18],
+            ]
+        ],
+        dtype=np.complex128,
+    )
+    h_transverse = np.asarray(
+        [[[2.0, 0.3, 0.4j], [0.3, 4.0, -0.2], [-0.4j, -0.2, 0.7]]],
+        dtype=np.complex128,
+    )
+
+    flattened, _ = interpolator.flatten_projectors(approximate)
+    output, diagnostics = interpolator.constrain_hamiltonians(
+        h_transverse, np.zeros_like(h_transverse), approximate
+    )
+    complement = np.eye(3) - flattened[0]
+
+    assert np.allclose(flattened[0] @ flattened[0], flattened[0], atol=1.0e-13)
+    assert np.trace(flattened[0]).real == pytest.approx(2.0)
+    assert np.linalg.norm(flattened[0] @ output[0] @ complement) < 1.0e-13
+    assert np.allclose(
+        complement @ output[0] @ complement,
+        -0.25 * complement,
+        atol=1.0e-13,
+    )
+    assert diagnostics.minimum_projector_gap > 0.0
+    assert diagnostics.maximum_raw_projector_idempotency_error > 0.0
+    assert diagnostics.maximum_flattened_projector_idempotency_error < 1.0e-13
+
+
+def test_projector_uses_metric_output_coefficients_and_source_selector():
+    interpolator = ProjectorPreservingBandInterpolator(2, 3)
+    overlap = np.asarray(
+        [[1.2, 0.1j, 0.05], [-0.1j, 0.9, 0.03j], [0.05, -0.03j, 1.1]],
+        dtype=np.complex128,
+    )
+    eigenvalues, eigenvectors = np.linalg.eigh(overlap)
+    coefficients = eigenvectors @ np.diag(1.0 / np.sqrt(eigenvalues)) @ eigenvectors.conj().T
+
+    projector = interpolator.projector_in_wannier_basis(
+        overlap, coefficients, np.asarray([0, 1])
+    )
+
+    assert np.allclose(projector, projector.conj().T, atol=1.0e-13)
+    assert np.allclose(projector @ projector, projector, atol=1.0e-13)
+    assert np.trace(projector).real == pytest.approx(2.0)
+
+
+def test_file_longitudinal_hamiltonian_is_restricted_not_pinned():
+    interpolator = ProjectorPreservingBandInterpolator(2, 3)
+    approximate = np.asarray(
+        [[[0.9, 0.1, 0.2], [0.1, 0.85, -0.1j], [0.2, 0.1j, 0.25]]],
+        dtype=np.complex128,
+    )
+    h_transverse = np.asarray(
+        [[[2.0, 0.3, 0.4], [0.3, 4.0, 0.2j], [0.4, -0.2j, 0.5]]],
+        dtype=np.complex128,
+    )
+    h_longitudinal = np.asarray(
+        [[[0.4, -0.1j, 0.6], [0.1j, 0.2, -0.3], [0.6, -0.3, 7.0]]],
+        dtype=np.complex128,
+    )
+
+    projector, _ = interpolator.flatten_projectors(approximate)
+    output, diagnostics = interpolator.constrain_hamiltonians(
+        h_transverse, h_longitudinal, approximate
+    )
+    complement = np.eye(3) - projector[0]
+
+    assert np.allclose(
+        complement @ output[0] @ complement,
+        complement @ h_longitudinal[0] @ complement,
+        atol=1.0e-13,
+    )
+    assert np.linalg.norm(projector[0] @ output[0] @ complement) < 1.0e-13
+    assert diagnostics.maximum_removed_cross_sector_component > 0.0
 
 
 def _physical_state_for_gamma(*, include_positive=False):

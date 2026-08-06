@@ -196,6 +196,106 @@ def test_tba_uses_full_source_basis_hamiltonian_before_wannier_gauge():
     )
 
 
+def test_projector_band_interpolation_preserves_sectors_without_changing_hoppings():
+    shape = (2, 1, 1)
+    energies = np.empty(shape, dtype=object)
+    indices = np.empty(shape, dtype=object)
+    overlaps = np.empty(shape, dtype=object)
+    bases = np.empty(shape, dtype=object)
+    for index in np.ndindex(shape):
+        energies[index] = np.asarray([2.0, 5.0, 7.0])
+        indices[index] = [0, 1, 2]
+        overlaps[index] = np.eye(3, dtype=np.complex128)
+        bases[index] = np.diag([2.0, 5.0, 7.0]).astype(np.complex128)
+    angle = 0.7
+    gauges = (
+        np.eye(3, dtype=np.complex128),
+        np.asarray(
+            [
+                [np.cos(angle), 0.0, np.sin(angle)],
+                [0.0, 1.0, 0.0],
+                [-np.sin(angle), 0.0, np.cos(angle)],
+            ],
+            dtype=np.complex128,
+        ),
+    )
+    config = SimpleNamespace(
+        band_calc_num=3,
+        kdim=3,
+        real_lattice_vectors=np.eye(3),
+        reciprocal_lattice_vectors=np.eye(3),
+        lattice_const=1.0,
+        k_points=[np.asarray([-0.5, 0.0]), np.asarray([0.0]), np.asarray([0.0])],
+        neighbor=[],
+        invert_longitudinal_energies=False,
+    )
+    state = SimpleNamespace(
+        E=energies,
+        E_idx=indices,
+        S=overlaps,
+        base_hamiltonian_at=lambda index: bases[index],
+        k_shape=shape,
+        k_indices=lambda: iter(np.ndindex(shape)),
+        get_k_num=lambda: 2,
+        bloch_sign=1,
+        band_channels={
+            0: BandChannelReference("H", 0),
+            1: BandChannelReference("H", 1),
+            2: BandChannelReference("L", 0),
+        },
+    )
+    ctx = SimpleNamespace(
+        config=config,
+        state=state,
+        output_state_coefficients_at=lambda i, _j, _k: gauges[i],
+    )
+    ordinary = TBAModel(ctx)
+    constrained = TBAModel(
+        ctx,
+        projector_preserving=True,
+        fixed_longitudinal_eigenvalue=0.0,
+    )
+    file_longitudinal = TBAModel(ctx, projector_preserving=True)
+
+    ordinary_hoppings = ordinary.collect_hoppings()
+    constrained_hoppings = constrained.collect_hoppings()
+    assert ordinary_hoppings.keys() == constrained_hoppings.keys()
+    for key in ordinary_hoppings:
+        assert np.allclose(ordinary_hoppings[key], constrained_hoppings[key])
+
+    h_of_k = constrained._band_hamiltonian_factory(constrained_hoppings)
+    interpolated = h_of_k(constrained._kfrac_to_kcart(np.asarray([[0.25, 0.0, 0.0]])))
+    eigenvalues = np.linalg.eigvalsh(interpolated[0])
+
+    assert np.min(np.abs(eigenvalues)) < 1.0e-13
+    assert constrained.projector_interpolation_diagnostics is not None
+    assert (
+        constrained.projector_interpolation_diagnostics
+        .maximum_flattened_projector_idempotency_error
+        < 1.0e-13
+    )
+
+    file_hoppings = file_longitudinal.collect_hoppings()
+    projector_grid = file_longitudinal.transverse_projectors()
+    assert projector_grid.shape == shape
+    assert np.allclose(
+        projector_grid[0, 0, 0] @ projector_grid[0, 0, 0],
+        projector_grid[0, 0, 0],
+        atol=1.0e-13,
+    )
+    file_h_of_k = file_longitudinal._band_hamiltonian_factory(file_hoppings)
+    sampled = file_h_of_k(
+        file_longitudinal._kfrac_to_kcart(
+            np.asarray([[-0.5, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        )
+    )
+    assert np.allclose(
+        np.linalg.eigvalsh(sampled),
+        np.asarray([[2.0, 5.0, 7.0], [2.0, 5.0, 7.0]]),
+        atol=1.0e-12,
+    )
+
+
 def test_parallel_map_preserves_deterministic_input_order():
     expected = [(value, value * value) for value in range(32)]
     for threads in (1, 2, 4):

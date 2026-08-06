@@ -525,6 +525,13 @@ def complete_transverse_bundle(
         axis=-1,
     )
     channels = dict(physical_state.band_channels)
+    for index in physical_state.k_indices():
+        for actual_band in np.asarray(
+            physical_state.E_idx[index], dtype=int
+        ).reshape(-1):
+            channels.setdefault(
+                int(actual_band), BandChannelReference("H", int(actual_band))
+            )
     channels.update(
         {
             l_offset + position: BandChannelReference("L", position)

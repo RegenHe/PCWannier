@@ -544,7 +544,7 @@ def test_state_provider_rejects_inconsistent_periodic_duplicate_nodes():
         StateBlochSymmetryProvider(metric_state, context)
 
 
-def test_representation_analysis_rejects_noninvariant_energy_block():
+def test_representation_analysis_warns_for_noninvariant_energy_block(caplog):
     model = square_2c_model()
     gamma_only = replace(
         model,
@@ -559,8 +559,13 @@ def test_representation_analysis_rejects_noninvariant_energy_block():
     fields = np.asarray([np.sin(2 * np.pi * x), np.sin(2 * np.pi * y)])
     state = _synthetic_state(fields, energies=[1.0, 2.0])
 
-    with pytest.raises(ValueError, match="Degenerate block.*not a valid unitary"):
-        run_symmetry_analysis(state, context)
+    result = run_symmetry_analysis(state, context)
+
+    assert "Degenerate block" in caplog.text
+    assert "is not closed" in caplog.text
+    point = result.physical.point("Gamma")
+    assert any(block.irrep_unavailable_reason is not None for block in point.degenerate_blocks)
+    assert result.target_compatibility("Gamma") is not None
 
 
 def test_physical_bloch_analysis_needs_no_wannier_targets_and_identifies_irrep():

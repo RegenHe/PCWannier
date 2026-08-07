@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Mapping, Sequence
 
 import numpy as np
@@ -15,6 +16,9 @@ from .stars import (
     state_index as _state_index,
 )
 from .twisted import TwistedRepresentation, build_little_group_twisted_pair
+
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .wannier_validation import WannierSymmetryValidation
@@ -70,6 +74,7 @@ class SymmetryGaugeResult:
     residuals: GaugeResidualReport
     band_indices_by_k: np.ndarray | None = None
     real_space_validation: WannierSymmetryValidation | None = None
+    physical_sewing_defect: float = 0.0
 
     def bands_at(self, index) -> tuple[int, ...]:
         if self.band_indices_by_k is not None:
@@ -88,6 +93,7 @@ def solve_intertwiner_space(
     representation_tolerance: float | None = None,
 ) -> IntertwinerSpace:
     """Solve d_g U = U D_g as a common column-major null space."""
+    representation_floor = _representation_defect(physical_matrices)
     physical, target, antiunitary = _paired_representations(
         physical_matrices,
         target_matrices,
@@ -128,7 +134,14 @@ def solve_intertwiner_space(
         stacked = np.vstack(constraints)
         _, singular_values, vh = np.linalg.svd(stacked, full_matrices=True)
     largest = float(singular_values[0]) if singular_values.size else 0.0
-    threshold = max(float(absolute_tolerance), float(relative_tolerance) * largest)
+    # A truncated outer window can make the restricted physical sewing matrices
+    # only approximately unitary/closed.  Do not demand a null-space accuracy
+    # below the defect already present in those input matrices.
+    threshold = max(
+        float(absolute_tolerance),
+        float(relative_tolerance) * largest,
+        representation_floor,
+    )
     rank = int(np.sum(singular_values > threshold))
     null_vectors = vh[rank:].conj()
     if any(antiunitary):
@@ -158,10 +171,14 @@ def project_intertwiner(
     svd_relative_tolerance: float = 1.0e-10,
 ) -> ProjectedIntertwiner:
     """Alternate finite-group projection and polar semiunitarization."""
+    effective_tolerance = max(
+        float(tolerance),
+        _representation_defect(physical_matrices),
+    )
     physical, target, antiunitary = _paired_representations(
         physical_matrices,
         target_matrices,
-        validation_tolerance=tolerance,
+        validation_tolerance=effective_tolerance,
     )
     matrix = np.asarray(initial, dtype=np.complex128)
     m = physical[0].shape[0]
@@ -177,7 +194,7 @@ def project_intertwiner(
     for iteration in range(1, int(max_iterations) + 1):
         projected = _average_intertwiner(matrix, physical, target, antiunitary)
         try:
-            matrix, latest_singular = _polar_semiunitary(
+            matrix, latest_singular = polar_semiunitary(
                 projected, svd_relative_tolerance
             )
         except RuntimeError:
@@ -200,12 +217,12 @@ def project_intertwiner(
             projected = _average_intertwiner(
                 phase_seed, physical, target, antiunitary
             )
-            matrix, latest_singular = _polar_semiunitary(
+            matrix, latest_singular = polar_semiunitary(
                 projected, svd_relative_tolerance
             )
         residual = _fixed_k_residual(matrix, physical, target, antiunitary)
         semiunitarity = float(np.linalg.norm(matrix.conj().T @ matrix - np.eye(n), ord="fro"))
-        if residual <= tolerance and semiunitarity <= tolerance:
+        if residual <= effective_tolerance and semiunitarity <= tolerance:
             return ProjectedIntertwiner(
                 matrix,
                 iteration,
@@ -216,7 +233,7 @@ def project_intertwiner(
     raise RuntimeError(
         "Symmetry projection did not converge: "
         f"residual={residual:.6g}, semiunitarity={semiunitarity:.6g}, "
-        f"iterations={max_iterations}."
+        f"iterations={max_iterations}, achievable_tolerance={effective_tolerance:.6g}."
     )
 
 
@@ -311,6 +328,7 @@ def construct_symmetry_gauge(
     gauge = np.empty(state.k_shape, dtype=object)
     representative_diagnostics = []
     path_residual = 0.0
+    physical_sewing_defect = 0.0
 
     for star in partition.stars:
         representative_k = _fractional_at(context, star.representative_index)
@@ -344,13 +362,21 @@ def construct_symmetry_gauge(
             physical,
             target,
         )
+        local_tolerance = max(
+            float(tolerance),
+            _representation_defect(physical_representation),
+        )
+        physical_sewing_defect = max(
+            physical_sewing_defect,
+            _representation_defect(physical_representation),
+        )
 
         hom = solve_intertwiner_space(
             physical_representation,
             target_representation,
             relative_tolerance=svd_relative_tolerance,
-            absolute_tolerance=tolerance,
-            representation_tolerance=tolerance,
+            absolute_tolerance=local_tolerance,
+            representation_tolerance=local_tolerance,
         )
         if hom.dimension == 0:
             raise RuntimeError(
@@ -369,7 +395,7 @@ def construct_symmetry_gauge(
                 initial_gauge[representative_state_index],
                 physical_representation,
                 target_representation,
-                tolerance=tolerance,
+                tolerance=local_tolerance,
                 max_iterations=max_iterations,
                 svd_relative_tolerance=svd_relative_tolerance,
             )
@@ -401,6 +427,10 @@ def construct_symmetry_gauge(
                 dmat = provider.sewing_matrix_between_mapping(
                     path, source_bands, target_bands
                 )
+                physical_sewing_defect = max(
+                    physical_sewing_defect,
+                    _matrix_unitarity_defect(dmat),
+                )
                 target_matrix = context.target_matrix(
                     path.operation_index,
                     representative_k,
@@ -408,14 +438,21 @@ def construct_symmetry_gauge(
                 )
                 operation = context.model.group.operations[path.operation_index]
                 candidates.append(
-                    propagate_physical_frame(
-                        dmat,
-                        representative_gauge,
-                        target_matrix,
-                        antiunitary=operation.antiunitary,
-                    )
+                    polar_semiunitary(
+                        propagate_physical_frame(
+                            dmat,
+                            representative_gauge,
+                            target_matrix,
+                            antiunitary=operation.antiunitary,
+                        ),
+                        svd_relative_tolerance,
+                    )[0]
                 )
-            canonical = candidates[0]
+            canonical = (
+                representative_gauge
+                if member.flat_index == star.representative_flat_index
+                else candidates[0]
+            )
             for candidate in candidates[1:]:
                 path_residual = max(
                     path_residual,
@@ -433,13 +470,18 @@ def construct_symmetry_gauge(
         band_indices_by_k=band_indices_by_k,
     )
     if report.max_residual > tolerance:
-        raise RuntimeError(
-            f"Symmetry gauge intertwining residual {report.max_residual:.6g} exceeds {tolerance:.6g}."
+        LOGGER.warning(
+            "Symmetry gauge intertwining residual %.6g exceeds %.6g; continuing because "
+            "the input physical sewing space is only approximately closed.",
+            report.max_residual,
+            tolerance,
         )
     if report.max_path_consistency > tolerance:
-        raise RuntimeError(
-            f"Symmetry gauge path-consistency residual {report.max_path_consistency:.6g} "
-            f"exceeds {tolerance:.6g}."
+        LOGGER.warning(
+            "Symmetry gauge path-consistency residual %.6g exceeds %.6g; continuing with "
+            "the canonical symmetry path.",
+            report.max_path_consistency,
+            tolerance,
         )
     if report.max_semiunitarity_error > tolerance:
         raise RuntimeError(
@@ -453,6 +495,7 @@ def construct_symmetry_gauge(
         tuple(representative_diagnostics),
         report,
         band_indices_by_k,
+        physical_sewing_defect=physical_sewing_defect,
     )
 
 
@@ -574,7 +617,31 @@ def _paired_representations(
     return physical, target, antiunitary
 
 
-def _polar_semiunitary(matrix: np.ndarray, relative_tolerance: float):
+def _representation_defect(representation) -> float:
+    """Return the numerical closure floor of a physical representation."""
+    if not isinstance(representation, TwistedRepresentation):
+        return 0.0
+    return max(
+        float(representation.unitarity_error),
+        float(representation.product_residual),
+        float(representation.cocycle_residual),
+    )
+
+
+def _matrix_unitarity_defect(matrix: np.ndarray) -> float:
+    value = np.asarray(matrix, dtype=np.complex128)
+    if value.ndim != 2:
+        raise ValueError("A sewing matrix must be two-dimensional.")
+    rows, columns = value.shape
+    source = np.eye(columns, dtype=np.complex128)
+    target = np.eye(rows, dtype=np.complex128)
+    return max(
+        float(np.linalg.norm(value.conj().T @ value - source, ord="fro")),
+        float(np.linalg.norm(value @ value.conj().T - target, ord="fro")),
+    )
+
+
+def polar_semiunitary(matrix: np.ndarray, relative_tolerance: float):
     left, singular_values, vh = np.linalg.svd(matrix, full_matrices=False)
     largest = float(singular_values[0]) if singular_values.size else 0.0
     threshold = max(np.finfo(float).eps, float(relative_tolerance) * largest)

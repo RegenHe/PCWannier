@@ -45,7 +45,7 @@ class IncarConfig:
     wannier_subspace: str = "T"
     longitudinal_source: str = "file"
     invert_longitudinal_energies: bool = False
-    projector_preserving_band_interpolation: bool = True
+    projector_preserving_band_interpolation: bool = False
     etbc_auxiliary_eigenvalue: float = 0.0
     etbc_rank_tolerance: float = 1.0e-10
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None

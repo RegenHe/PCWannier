@@ -147,6 +147,64 @@ def test_outer_window_closure_uses_configured_threads(tmp_path, monkeypatch):
     assert set(observed_threads) == {4}
 
 
+def test_approximate_outer_closure_warns_but_target_gauge_continues(tmp_path, caplog):
+    context = _c2_context(tmp_path, target_character=1.0, axis=np.array([0.0]))
+    state = _state(context, ((0, 1),))
+    noisy_c2 = np.diag([0.99999, -0.99999]).astype(np.complex128)
+    provider = _SyntheticProvider(
+        context,
+        lambda operation, *_: np.eye(2, dtype=np.complex128)
+        if operation == 0
+        else noisy_c2,
+    )
+
+    closure = validate_outer_window_closure(
+        state, context, provider, tolerance=1.0e-12
+    )
+    gauge = construct_symmetry_gauge(
+        state,
+        context,
+        _matrix_grid(state.k_shape, [np.array([[1.0], [0.0]])]),
+        provider=provider,
+        tolerance=1.0e-12,
+    )
+
+    assert closure.max_unitarity_error > 1.0e-6
+    assert "Outer window is not fully closed" in caplog.text
+    assert "Symmetry gauge intertwining residual" in caplog.text
+    assert gauge.residuals.max_residual > 1.0e-6
+    assert gauge.residuals.max_semiunitarity_error < 1.0e-12
+
+
+def test_approximate_star_propagation_reorthonormalizes_selected_frame(tmp_path):
+    context = _c2_context(tmp_path, target_character=1.0)
+    state = _state(context, ((0, 1), (2, 3)))
+    noisy_swap = 0.99999 * np.array(
+        [[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128
+    )
+    provider = _SyntheticProvider(
+        context,
+        lambda operation, *_: np.eye(2, dtype=np.complex128)
+        if operation == 0
+        else noisy_swap,
+    )
+    initial = _matrix_grid(
+        state.k_shape,
+        [np.array([[1.0], [0.0]]), np.array([[0.0], [1.0]])],
+    )
+
+    gauge = construct_symmetry_gauge(
+        state, context, initial, provider=provider, tolerance=1.0e-12
+    )
+
+    assert gauge.physical_sewing_defect > 1.0e-6
+    assert gauge.residuals.max_residual > 1.0e-6
+    assert gauge.residuals.max_semiunitarity_error < 1.0e-12
+    for index in state.k_indices():
+        frame = gauge.gauge[index]
+        assert np.allclose(frame.conj().T @ frame, np.eye(1), atol=1.0e-12)
+
+
 def test_identity_group_update_matches_unconstrained_largest_eigenvector(tmp_path):
     context = _identity_context(tmp_path)
     state = _state(context, ((0, 1),))

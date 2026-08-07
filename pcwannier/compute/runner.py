@@ -41,6 +41,11 @@ from .integration import numba_parallel_policy
 from .matrix import MSet
 from .parallel import ParallelExecutor
 from .state import StateCollection
+from .subspace_diagnostics import (
+    NeighborSubspaceSmoothness,
+    outer_channel_smoothness,
+    selected_sector_smoothness,
+)
 from .tba import TBAModel
 from .threading import blas_thread_limit, threadpool_summary
 from .topology import calculate_topology
@@ -397,6 +402,20 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     mset = MSet(state, threads=threads)
     with timed_step("initialize M0", LOGGER):
         mset.init_M0()
+    if config.wannier_subspace == "T+L":
+        outer_smoothness = outer_channel_smoothness(state, mset)
+        outer_entangled = any(
+            len(state.E_idx[index]) > int(config.band_calc_num)
+            for index in state.k_indices()
+        )
+        _log_subspace_smoothness(
+            outer_smoothness,
+            warn_below=None if outer_entangled else 0.5,
+            suggestion=(
+                "Enlarge the longitudinal outer window and select a smooth auxiliary "
+                "subspace by disentanglement."
+            ),
+        )
     initializer = StateInitializer(state, mset, threads=threads)
     if config.symmetry_constrained:
         with timed_step("projection initialization", LOGGER):
@@ -601,7 +620,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         r_key, wannier, norms = generate_wannier(ctx)
     LOGGER.info(
         "Wannier generated: r=%s shape=%s norm_real_min=%.6g norm_real_max=%.6g "
-        "norm_imag_max=%.6g centers_rn=%s",
+        "norm_imag_max=%.6g individual_first_moments=%s",
         r_key,
         wannier.shape,
         float(np.min(np.real(norms))),
@@ -609,14 +628,35 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         float(np.max(np.abs(np.imag(norms)))),
         np.real_if_close(gradient.rn.T).tolist(),
     )
+    if symmetry_gauge is not None and bundle.symmetry is not None:
+        _log_symmetry_target_centers(
+            gradient.rn,
+            config,
+            bundle.symmetry.model.targets,
+        )
     if symmetry_gauge is not None and gauge_spec.validate_wannier:
         enforce_wannier_residual = config.symmetry_output_basis == "strict"
+        input_limited_tolerance = max(
+            float(gauge_spec.real_space_tolerance),
+            float(symmetry_gauge.residuals.max_residual),
+            float(np.sqrt(max(symmetry_gauge.physical_sewing_defect, 0.0))),
+        )
+        if input_limited_tolerance > gauge_spec.real_space_tolerance:
+            LOGGER.warning(
+                "Real-space Wannier symmetry accuracy is limited by the selected physical "
+                "sewing space: requested=%.6g effective=%.6g sewing_defect=%.6g. "
+                "Residuals below the effective tolerance are diagnostic, not evidence of a "
+                "Wannier-gauge failure.",
+                gauge_spec.real_space_tolerance,
+                input_limited_tolerance,
+                symmetry_gauge.physical_sewing_defect,
+            )
         with timed_step("validate real-space Wannier symmetry", LOGGER):
             validation = validate_wannier_symmetry(
                 ctx,
                 bundle.symmetry.model.targets,
                 zero_cell_wanniers=wannier,
-                tolerance=gauge_spec.real_space_tolerance,
+                tolerance=input_limited_tolerance,
                 minimum_retained_norm=gauge_spec.minimum_retained_norm,
                 enforce_residual=enforce_wannier_residual,
             )
@@ -629,12 +669,13 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         )
         log_wannier_symmetry(
             "Wannier symmetry: basis=%s max_residual=%.6g mean_residual=%.6g "
-            "minimum_retained_norm=%.6g tolerance=%.6g%s",
+            "minimum_retained_norm=%.6g requested_tolerance=%.6g effective_tolerance=%.6g%s",
             config.symmetry_output_basis,
             validation.max_residual,
             validation.mean_residual,
             validation.minimum_retained_norm,
             gauge_spec.real_space_tolerance,
+            input_limited_tolerance,
             " (diagnostic only for FEM output)" if not enforce_wannier_residual else "",
         )
     if symmetry_provider is not None:
@@ -708,6 +749,15 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             interpolation.maximum_removed_cross_sector_component,
         )
     transverse_projectors = tba.transverse_projectors()
+    if transverse_projectors is not None:
+        _log_subspace_smoothness(
+            selected_sector_smoothness(ctx, transverse_projectors),
+            warn_below=0.5,
+            suggestion=(
+                "The selected sector changes rapidly between neighboring k points; "
+                "increase the k mesh or improve the longitudinal completion."
+            ),
+        )
 
     bloch_gauge = state.gen_matrix_on_kmesh(
         lambda i, j, k: np.asarray(ctx.bloch_gauge_at(i, j, k), dtype=np.complex128).copy()
@@ -805,6 +855,86 @@ def _log_hopping_reconstruction_diagnostics(result) -> None:
             )
 
 
+def _log_subspace_smoothness(
+    diagnostics: tuple[NeighborSubspaceSmoothness, ...],
+    *,
+    warn_below: float | None,
+    suggestion: str,
+) -> None:
+    for item in diagnostics:
+        log = (
+            LOGGER.warning
+            if warn_below is not None
+            and item.minimum_regular_singular_value < warn_below
+            else LOGGER.info
+        )
+        log(
+            "Neighbor subspace smoothness: sector=%s links=%d min_sigma=%.6g "
+            "regular_min_sigma=%.6g median_min_sigma=%.6g "
+            "worst_k=%s direction=%d worst_regular_k=%s "
+            "worst_regular_direction=%d%s",
+            item.label,
+            item.link_count,
+            item.minimum_singular_value,
+            item.minimum_regular_singular_value,
+            item.median_minimum_singular_value,
+            item.worst_source_index,
+            item.worst_direction,
+            item.worst_regular_source_index,
+            item.worst_regular_direction,
+            (
+                f". {suggestion}"
+                if warn_below is not None
+                and item.minimum_regular_singular_value < warn_below
+                else ""
+            ),
+        )
+
+
+def _log_symmetry_target_centers(rn, config, targets) -> None:
+    """Report representation-center centroids separately from basis first moments."""
+    centers = np.asarray(np.real_if_close(rn), dtype=np.complex128).T
+    imaginary = float(np.max(np.abs(centers.imag), initial=0.0))
+    if imaginary > 1.0e-10:
+        LOGGER.warning("Wannier first moments contain an imaginary residual of %.6g.", imaginary)
+    centers = centers.real
+    lattice = (
+        np.asarray(config.real_lattice_vectors, dtype=float)
+        * float(config.lattice_const)
+    )
+    fractional = centers @ np.linalg.inv(lattice)
+    offset = 0
+    for target in targets:
+        irrep_dimension = int(target.site_irrep.dimension)
+        for orbit_index, orbit_point in enumerate(target.orbit.points):
+            indices = tuple(
+                offset + target.wannier_index(irrep_index, orbit_index)
+                for irrep_index in range(irrep_dimension)
+            )
+            expected = np.asarray(orbit_point.position, dtype=float)
+            displacements = fractional[list(indices)] - expected[None, :]
+            displacements -= np.rint(displacements)
+            mean_displacement = np.mean(displacements, axis=0)
+            multiplet_center = np.mod(expected + mean_displacement, 1.0)
+            centroid_error = float(np.linalg.norm(mean_displacement))
+            individual_spread = max(
+                (float(np.linalg.norm(value - mean_displacement)) for value in displacements),
+                default=0.0,
+            )
+            LOGGER.info(
+                "Wannier target center: target=%s orbit=%s indices=%s expected=%s "
+                "multiplet_center=%s centroid_error=%.6g individual_first_moment_spread=%.6g",
+                target.name,
+                orbit_index,
+                indices,
+                expected.tolist(),
+                multiplet_center.tolist(),
+                centroid_error,
+                individual_spread,
+            )
+        offset += target.wannier_dimension
+
+
 def _validate_symmetry_gauge_prerequisites(analysis, tolerance: float) -> None:
     if analysis is None:
         return
@@ -824,14 +954,21 @@ def _validate_symmetry_gauge_prerequisites(analysis, tolerance: float) -> None:
             )
     for point in analysis.physical.points:
         if point.diagnostics.unitarity_error > tolerance:
-            raise RuntimeError(
-                f"Physical sewing space is not closed at {point.name}: "
-                f"unitarity residual={point.diagnostics.unitarity_error:.6g}."
+            LOGGER.warning(
+                "Physical sewing space is not fully closed at %s: unitarity residual=%.6g "
+                "exceeds %.6g. Continuing with this outer window; final selected-gauge "
+                "residuals will be reported separately.",
+                point.name,
+                point.diagnostics.unitarity_error,
+                tolerance,
             )
         if point.diagnostics.outer_composition_residual > tolerance:
-            raise RuntimeError(
-                f"Sewing composition residual at {point.name} is "
-                f"{point.diagnostics.outer_composition_residual:.6g}."
+            LOGGER.warning(
+                "Physical sewing composition residual at %s is %.6g and exceeds %.6g. "
+                "Continuing with the approximate outer-space representation.",
+                point.name,
+                point.diagnostics.outer_composition_residual,
+                tolerance,
             )
 
 

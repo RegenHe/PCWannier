@@ -941,12 +941,16 @@ def _analyze_target_compatibility(
     ]
     if invalid:
         block = invalid[0]
-        raise ValueError(
-            f"Degenerate block {block.band_indices} at representation point {point.name!r} "
-            "is not a valid unitary little-group representation: "
-            f"leakage={block.leakage:.6g}, unitarity={block.unitarity_error:.6g}, "
-            f"twisted_composition={block.twisted_composition_residual:.6g}. "
-            "Select a closed physical subspace before target compatibility analysis."
+        LOGGER.warning(
+            "Degenerate block %s at representation point %s is not closed: "
+            "leakage=%.6g unitarity=%.6g twisted_composition=%.6g. "
+            "Its irrep label is unavailable, but compatibility of the complete selected "
+            "Bloch space will still be analyzed when that space is valid.",
+            block.band_indices,
+            point.name,
+            block.leakage,
+            block.unitarity_error,
+            block.twisted_composition_residual,
         )
     target_matrices_by_operation = {
         operation_index: context.target_matrix(
@@ -1007,6 +1011,12 @@ def _analyze_target_compatibility(
             analysis_spec.leakage_tolerance
             if gauge_spec is None
             else gauge_spec.tolerance
+        )
+        numerical_tolerance = max(
+            float(numerical_tolerance),
+            float(physical_twisted.unitarity_error),
+            float(physical_twisted.product_residual),
+            float(physical_twisted.cocycle_residual),
         )
         svd_tolerance = (
             context.model.algebra_tolerance

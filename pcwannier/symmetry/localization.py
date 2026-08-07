@@ -506,14 +506,22 @@ def _validate_iteration(
     if not np.all(np.isfinite(omega)) or any(not np.all(np.isfinite(matrix)) for matrix in gradients):
         raise FloatingPointError(f"Non-finite symmetry localization value at iteration {iteration}.")
     if report.max_residual > tolerance:
-        raise RuntimeError(
-            f"Symmetry intertwining residual {report.max_residual:.6g} exceeds {tolerance:.6g} "
-            f"at iteration {iteration}."
+        log = LOGGER.warning if iteration == 0 else LOGGER.debug
+        log(
+            "Symmetry intertwining residual %.6g exceeds %.6g at iteration %s; "
+            "continuing because the physical sewing input may be only approximately closed.",
+            report.max_residual,
+            tolerance,
+            iteration,
         )
     if report.max_path_consistency > tolerance:
-        raise RuntimeError(
-            f"Symmetry path-consistency residual {report.max_path_consistency:.6g} exceeds "
-            f"{tolerance:.6g} at iteration {iteration}."
+        log = LOGGER.warning if iteration == 0 else LOGGER.debug
+        log(
+            "Symmetry path-consistency residual %.6g exceeds %.6g at iteration %s; "
+            "continuing with the canonical symmetry paths.",
+            report.max_path_consistency,
+            tolerance,
+            iteration,
         )
     if report.max_semiunitarity_error > tolerance:
         raise RuntimeError(

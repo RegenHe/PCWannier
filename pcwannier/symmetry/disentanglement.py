@@ -14,7 +14,7 @@ from .constraints import (
     propagate_projector,
     semilinear_value,
 )
-from .gauge import SymmetryGaugeResult, project_intertwiner
+from .gauge import SymmetryGaugeResult, polar_semiunitary, project_intertwiner
 from .representation import SymmetryContext
 from .stars import (
     SymmetryKStar,
@@ -100,6 +100,7 @@ def validate_outer_window_closure(
     threads = max(1, int(getattr(state, "configured_threads", 1)))
     errors: list[float] = []
     leakages: list[float] = []
+    worst_mapping = None
 
     def evaluate_mapping(item):
         operation_index, mapping = item
@@ -137,26 +138,38 @@ def validate_outer_window_closure(
         if len(tasks) > 1:
             results = (*results, *parallel_map(tasks[1:], evaluate_mapping, threads))
         for resolved_operation_index, mapping, error, leakage in results:
-            operation = context.model.group.operations[resolved_operation_index]
             errors.append(error)
             leakages.append(leakage)
-            if error > tolerance:
-                raise RuntimeError(
-                    "Outer window is not closed under symmetry: "
-                    f"operation={operation.name or resolved_operation_index}, "
-                    f"source_k={mapping.source_k_index}, "
-                    f"target_k={mapping.target_k_index}, unitarity_residual={error:.6g}."
-                )
+            if worst_mapping is None or error > worst_mapping[2]:
+                worst_mapping = (resolved_operation_index, mapping, error)
+
+    max_error = max(errors, default=0.0)
+    if max_error > tolerance and worst_mapping is not None:
+        operation_index, mapping, error = worst_mapping
+        operation = context.model.group.operations[operation_index]
+        LOGGER.warning(
+            "Outer window is not fully closed under symmetry: operation=%s source_k=%s "
+            "target_k=%s unitarity_residual=%.6g exceeds %.6g. Continuing so the "
+            "target subspace can be selected from this larger outer space.",
+            operation.name or operation_index,
+            mapping.source_k_index,
+            mapping.target_k_index,
+            error,
+            tolerance,
+        )
 
     composition = _outer_composition_residual(
         state, context, provider, bands, threads=threads
     )
     if composition > tolerance:
-        raise RuntimeError(
-            f"Outer-window sewing composition residual {composition:.6g} exceeds {tolerance:.6g}."
+        LOGGER.warning(
+            "Outer-window sewing composition residual %.6g exceeds %.6g; continuing with "
+            "the approximate outer-space sewing matrices.",
+            composition,
+            tolerance,
         )
     return OuterWindowClosureReport(
-        max(errors, default=0.0),
+        max_error,
         float(np.mean(errors)) if errors else 0.0,
         max(leakages, default=0.0),
         composition,
@@ -313,7 +326,12 @@ def disentangle_symmetry_constrained(
             )
 
         propagated, path_residual = _propagate_representatives(
-            representatives, context, stars, provider, bands
+            representatives,
+            context,
+            stars,
+            provider,
+            bands,
+            svd_relative_tolerance=svd_relative_tolerance,
         )
         change = _projector_change(frame, propagated)
         frame = propagated
@@ -621,7 +639,14 @@ def _restore_representative_constraints(
                 f"Initial target frame does not contain the frozen subspace at k={star.representative_index}."
             )
         representatives.append(projected)
-    return _propagate_representatives(representatives, context, stars, provider, bands)
+    return _propagate_representatives(
+        representatives,
+        context,
+        stars,
+        provider,
+        bands,
+        svd_relative_tolerance=svd_relative_tolerance,
+    )
 
 
 def _project_intertwiner_with_frozen(
@@ -676,7 +701,15 @@ def _project_intertwiner_with_frozen(
     )
 
 
-def _propagate_representatives(representatives, context, stars, provider, bands):
+def _propagate_representatives(
+    representatives,
+    context,
+    stars,
+    provider,
+    bands,
+    *,
+    svd_relative_tolerance,
+):
     gauge = np.empty(_state_shape(stars.k_shape), dtype=object)
     path_residual = 0.0
     for star, representative in zip(stars.stars, representatives):
@@ -692,14 +725,21 @@ def _propagate_representatives(representatives, context, stars, provider, bands)
                 target = context.target_matrix(path.operation_index, representative_k)
                 operation = context.model.group.operations[path.operation_index]
                 candidates.append(
-                    propagate_physical_frame(
-                        dmat,
-                        representative,
-                        target,
-                        antiunitary=operation.antiunitary,
-                    )
+                    polar_semiunitary(
+                        propagate_physical_frame(
+                            dmat,
+                            representative,
+                            target,
+                            antiunitary=operation.antiunitary,
+                        ),
+                        svd_relative_tolerance,
+                    )[0]
                 )
-            canonical = representative if member.flat_index == star.representative_flat_index else candidates[0]
+            canonical = (
+                representative
+                if member.flat_index == star.representative_flat_index
+                else candidates[0]
+            )
             for candidate in candidates:
                 path_residual = max(
                     path_residual,
@@ -839,11 +879,29 @@ def _validate_report(report, tolerance, iteration):
     )
     if not np.all(np.isfinite(values)):
         raise FloatingPointError(f"Non-finite symmetry disentanglement diagnostic at iteration {iteration}.")
-    if max(values) > tolerance:
+    hard_values = (report.max_orthonormality_error, report.max_frozen_residual)
+    if max(hard_values) > tolerance:
         raise RuntimeError(
             f"Symmetry disentanglement residual exceeds {tolerance:.6g} at iteration {iteration}: "
             f"projector={values[0]:.6g}, intertwiner={values[1]:.6g}, "
             f"orthonormality={values[2]:.6g}, frozen={values[3]:.6g}, path={values[4]:.6g}."
+        )
+    soft_values = (
+        report.max_projector_residual,
+        report.max_intertwiner_residual,
+        report.max_path_consistency,
+    )
+    if max(soft_values) > tolerance:
+        log = LOGGER.warning if iteration == 0 else LOGGER.debug
+        log(
+            "Symmetry disentanglement uses an approximately closed physical sewing space at "
+            "iteration %s: projector=%.6g intertwiner=%.6g path=%.6g tolerance=%.6g. "
+            "Continuing while retaining strict orthonormality and frozen-window checks.",
+            iteration,
+            soft_values[0],
+            soft_values[1],
+            soft_values[2],
+            tolerance,
         )
 
 

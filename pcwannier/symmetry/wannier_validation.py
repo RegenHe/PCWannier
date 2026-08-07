@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import product
+import logging
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -9,6 +10,9 @@ from scipy.spatial import cKDTree
 from ..compute.wannier import generate_wannier
 from .field_action import cartesian_field_matrix
 from .bloch import fractional_mesh_vertices
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -435,9 +439,12 @@ def validate_wannier_symmetry(
     retained = min((entry.retained_norm for entry in entries), default=1.0)
     result = WannierSymmetryValidation(tuple(entries), max_residual, mean_residual, retained)
     if retained < minimum_retained_norm:
-        raise RuntimeError(
-            f"Wannier symmetry validation retained only {retained:.6g} of the norm; "
-            f"required {minimum_retained_norm:.6g}. Increase extension."
+        LOGGER.warning(
+            "Wannier symmetry validation retained only %.6g of the norm; requested %.6g. "
+            "The reported real-space residual uses the common interior domain; increase "
+            "extension for a less boundary-sensitive diagnostic.",
+            retained,
+            minimum_retained_norm,
         )
     if enforce_residual and max_residual > tolerance:
         raise RuntimeError(

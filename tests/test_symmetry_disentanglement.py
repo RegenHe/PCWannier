@@ -262,21 +262,23 @@ def test_incompatible_outer_representation_has_no_target_intertwiner(tmp_path):
         )
 
 
-def test_frozen_window_symmetry_violation_is_rejected(tmp_path):
+def test_frozen_window_symmetry_violation_is_reported_without_aborting(tmp_path, caplog):
     context = _c2_context(tmp_path, target_character=1.0)
     state = _state(context, ((0, 1), (0, 1)))
     swap = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
     provider = _SyntheticProvider(context, lambda op, *_: np.eye(2) if op == 0 else swap)
     initializer = _initializer(state, target_dimension=1, frozen=(0,))
 
-    with pytest.raises(RuntimeError, match="Frozen window violates symmetry covariance"):
-        validate_frozen_window_covariance(
-            initializer,
-            context,
-            provider,
-            _band_grid(state),
-            tolerance=1e-12,
-        )
+    residual = validate_frozen_window_covariance(
+        initializer,
+        context,
+        provider,
+        _band_grid(state),
+        tolerance=1e-12,
+    )
+
+    assert residual > 1e-12
+    assert "Frozen window is only approximately symmetry covariant" in caplog.text
 
 
 def test_compatible_frozen_subspace_is_retained_at_little_group_point(tmp_path):

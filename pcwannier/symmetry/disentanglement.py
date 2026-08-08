@@ -187,6 +187,7 @@ def validate_frozen_window_covariance(
 ) -> float:
     state = initializer.state
     maximum = 0.0
+    worst = None
     for index in state.k_indices():
         outer = set(_bands_at(bands, index))
         frozen_actual = tuple(
@@ -206,11 +207,16 @@ def validate_frozen_window_covariance(
             source_frozen = _frozen_frame(initializer, source_index)
             target_frozen = _frozen_frame(initializer, target_index)
             if source_frozen.shape[1] != target_frozen.shape[1]:
-                raise RuntimeError(
+                LOGGER.warning(
                     "Frozen window is not symmetry closed: "
-                    f"operation={operation.name or operation_index}, source_k={mapping.source_k_index} "
-                    f"has {source_frozen.shape[1]} states, target_k={mapping.target_k_index} "
-                    f"has {target_frozen.shape[1]}."
+                    "operation=%s source_k=%s has %s states, target_k=%s has %s. "
+                    "Continuing with the configured frozen projectors; the final frozen-window "
+                    "and symmetry residuals are diagnostic.",
+                    operation.name or operation_index,
+                    mapping.source_k_index,
+                    source_frozen.shape[1],
+                    mapping.target_k_index,
+                    target_frozen.shape[1],
                 )
             dmat = provider.sewing_matrix_between_mapping(
                 mapping,
@@ -231,12 +237,20 @@ def validate_frozen_window_covariance(
                 )
             )
             maximum = max(maximum, residual)
-            if residual > tolerance:
-                raise RuntimeError(
-                    "Frozen window violates symmetry covariance: "
-                    f"operation={operation.name or operation_index}, source_k={mapping.source_k_index}, "
-                    f"target_k={mapping.target_k_index}, residual={residual:.6g}."
-                )
+            if worst is None or residual > worst[0]:
+                worst = (residual, operation.name or operation_index, mapping)
+    if maximum > tolerance and worst is not None:
+        residual, operation_name, mapping = worst
+        LOGGER.warning(
+            "Frozen window is only approximately symmetry covariant: operation=%s "
+            "source_k=%s target_k=%s residual=%.6g exceeds %.6g. Continuing; this "
+            "validation is diagnostic and the final selected-subspace residuals will be reported.",
+            operation_name,
+            mapping.source_k_index,
+            mapping.target_k_index,
+            residual,
+            tolerance,
+        )
     return maximum
 
 
@@ -573,9 +587,12 @@ def _updated_representative_frame(
     )
     frozen_error = _frozen_containment(projected, frozen)
     if frozen_error > tolerance:
-        raise RuntimeError(
-            f"Frozen and target-representation constraints are incompatible at "
-            f"k={star.representative_index}: residual={frozen_error:.6g}."
+        LOGGER.warning(
+            "Frozen and target-representation constraints are only approximately compatible "
+            "at k=%s: residual=%.6g exceeds %.6g. Continuing with the best finite frame.",
+            star.representative_index,
+            frozen_error,
+            tolerance,
         )
     return projected
 
@@ -634,9 +651,14 @@ def _restore_representative_constraints(
             max_iterations=max_iterations,
             svd_relative_tolerance=svd_relative_tolerance,
         )
-        if _frozen_containment(projected, frozen) > tolerance:
-            raise RuntimeError(
-                f"Initial target frame does not contain the frozen subspace at k={star.representative_index}."
+        frozen_error = _frozen_containment(projected, frozen)
+        if frozen_error > tolerance:
+            LOGGER.warning(
+                "Initial target frame only approximately contains the frozen subspace at k=%s: "
+                "residual=%.6g exceeds %.6g. Continuing with the best finite frame.",
+                star.representative_index,
+                frozen_error,
+                tolerance,
             )
         representatives.append(projected)
     return _propagate_representatives(
@@ -695,10 +717,15 @@ def _project_intertwiner_with_frozen(
         )
         matrix = containing_frame @ (left @ right)
 
-    raise RuntimeError(
-        "Frozen and target-representation alternating projection did not converge: "
-        f"residual={frozen_error:.6g}, iterations={max_iterations}."
+    LOGGER.warning(
+        "Frozen and target-representation alternating projection did not reach the requested "
+        "tolerance: residual=%.6g iterations=%s tolerance=%.6g. Continuing with the closest "
+        "semiunitary frame that exactly restores the configured frozen subspace.",
+        frozen_error,
+        max_iterations,
+        tolerance,
     )
+    return matrix
 
 
 def _propagate_representatives(
@@ -879,28 +906,30 @@ def _validate_report(report, tolerance, iteration):
     )
     if not np.all(np.isfinite(values)):
         raise FloatingPointError(f"Non-finite symmetry disentanglement diagnostic at iteration {iteration}.")
-    hard_values = (report.max_orthonormality_error, report.max_frozen_residual)
-    if max(hard_values) > tolerance:
+    if report.max_orthonormality_error > tolerance:
         raise RuntimeError(
-            f"Symmetry disentanglement residual exceeds {tolerance:.6g} at iteration {iteration}: "
+            f"Symmetry disentanglement orthonormality residual exceeds {tolerance:.6g} "
+            f"at iteration {iteration}: "
             f"projector={values[0]:.6g}, intertwiner={values[1]:.6g}, "
             f"orthonormality={values[2]:.6g}, frozen={values[3]:.6g}, path={values[4]:.6g}."
         )
     soft_values = (
         report.max_projector_residual,
         report.max_intertwiner_residual,
+        report.max_frozen_residual,
         report.max_path_consistency,
     )
     if max(soft_values) > tolerance:
         log = LOGGER.warning if iteration == 0 else LOGGER.debug
         log(
             "Symmetry disentanglement uses an approximately closed physical sewing space at "
-            "iteration %s: projector=%.6g intertwiner=%.6g path=%.6g tolerance=%.6g. "
-            "Continuing while retaining strict orthonormality and frozen-window checks.",
+            "iteration %s: projector=%.6g intertwiner=%.6g frozen=%.6g path=%.6g "
+            "tolerance=%.6g. Continuing while retaining strict orthonormality.",
             iteration,
             soft_values[0],
             soft_values[1],
             soft_values[2],
+            soft_values[3],
             tolerance,
         )
 

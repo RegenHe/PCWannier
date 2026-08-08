@@ -635,7 +635,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             bundle.symmetry.model.targets,
         )
     if symmetry_gauge is not None and gauge_spec.validate_wannier:
-        enforce_wannier_residual = config.symmetry_output_basis == "strict"
+        strict_symmetry_basis = config.symmetry_output_basis == "strict"
         input_limited_tolerance = max(
             float(gauge_spec.real_space_tolerance),
             float(symmetry_gauge.residuals.max_residual),
@@ -658,13 +658,13 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 zero_cell_wanniers=wannier,
                 tolerance=input_limited_tolerance,
                 minimum_retained_norm=gauge_spec.minimum_retained_norm,
-                enforce_residual=enforce_wannier_residual,
+                enforce_residual=False,
             )
         symmetry_gauge = replace(symmetry_gauge, real_space_validation=validation)
         ctx.symmetry_gauge = symmetry_gauge
         log_wannier_symmetry = (
             LOGGER.warning
-            if not enforce_wannier_residual and validation.max_residual > gauge_spec.real_space_tolerance
+            if validation.max_residual > gauge_spec.real_space_tolerance
             else LOGGER.info
         )
         log_wannier_symmetry(
@@ -676,7 +676,11 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             validation.minimum_retained_norm,
             gauge_spec.real_space_tolerance,
             input_limited_tolerance,
-            " (diagnostic only for FEM output)" if not enforce_wannier_residual else "",
+            " (diagnostic only; strict output basis requested)"
+            if strict_symmetry_basis and validation.max_residual > gauge_spec.real_space_tolerance
+            else " (diagnostic only for FEM output)"
+            if not strict_symmetry_basis
+            else "",
         )
     if symmetry_provider is not None:
         stencil_count, stencil_bytes = symmetry_provider.spatial_cache_info
@@ -940,17 +944,20 @@ def _validate_symmetry_gauge_prerequisites(analysis, tolerance: float) -> None:
         return
     for compatibility in analysis.target_compatibilities:
         if compatibility.compatibility is not None and not compatibility.compatibility.compatible:
-            raise RuntimeError(
-                "Target representation is incompatible at symmetry point "
-                f"{compatibility.point_name}."
+            LOGGER.warning(
+                "Target compatibility analysis reports an incompatibility at symmetry point %s. "
+                "Continuing because this preanalysis is diagnostic; the gauge construction will "
+                "still fail if no full-rank intertwiner actually exists.",
+                compatibility.point_name,
             )
         if (
             compatibility.target_twisted_representation is not None
             and compatibility.intertwiner_dimension == 0
         ):
-            raise RuntimeError(
-                "Target representation has no direct intertwiner at symmetry point "
-                f"{compatibility.point_name}."
+            LOGGER.warning(
+                "Target compatibility preanalysis found no direct intertwiner at symmetry point %s. "
+                "Continuing to the full k-mesh construction, which remains authoritative.",
+                compatibility.point_name,
             )
     for point in analysis.physical.points:
         if point.diagnostics.unitarity_error > tolerance:

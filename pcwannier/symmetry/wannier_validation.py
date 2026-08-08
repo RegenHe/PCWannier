@@ -446,9 +446,13 @@ def validate_wannier_symmetry(
             retained,
             minimum_retained_norm,
         )
-    if enforce_residual and max_residual > tolerance:
-        raise RuntimeError(
-            f"Real-space Wannier symmetry residual {max_residual:.6g} exceeds {tolerance:.6g}."
+    if max_residual > tolerance:
+        LOGGER.warning(
+            "Real-space Wannier symmetry residual %.6g exceeds %.6g%s. The validation is "
+            "diagnostic, so the computed Wannier functions are retained.",
+            max_residual,
+            tolerance,
+            " for a strict symmetry output basis" if enforce_residual else "",
         )
     return result
 

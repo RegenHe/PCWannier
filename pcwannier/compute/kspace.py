@@ -5,6 +5,23 @@ import numpy as np
 from ..config import IncarConfig
 
 
+def is_complete_uniform_k_mesh(k_points, *, tolerance: float = 1.0e-10) -> bool:
+    """Return whether every k axis is a complete half-open mesh with spacing 1/N."""
+
+    for axis in k_points:
+        values = np.asarray(axis, dtype=float).reshape(-1)
+        if values.size <= 1:
+            continue
+        if not np.allclose(
+            np.diff(values),
+            1.0 / float(values.size),
+            rtol=0.0,
+            atol=float(tolerance),
+        ):
+            return False
+    return True
+
+
 def neighbor_reciprocal_lattice_vectors(config: IncarConfig, k: list[int], direction: int):
     axes = int(config.kdim)
     idxs = (list(k) + [0] * axes)[:axes]

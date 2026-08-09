@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from ..compute.prepared import ProjectionSeed
     from ..data import InputBundle
 
 
@@ -38,14 +39,11 @@ class ETBCKPointDiagnostics:
 
 @dataclass(frozen=True)
 class ETBCCompletionResult:
-    augmented_bundle: InputBundle = field(repr=False)
     transverse_dimension: int
     auxiliary_dimension: int
     wannier_dimension: int
     auxiliary_eigenvalue: float
     diagnostics: tuple[ETBCKPointDiagnostics, ...]
-    nullspace_coefficients: np.ndarray = field(repr=False)
-    trial_projection_matrices: np.ndarray = field(repr=False)
     gamma_regularized_indices: tuple[tuple[int, int, int], ...] = ()
 
     @property
@@ -74,3 +72,12 @@ class ETBCCompletionResult:
                 default=0.0,
             )
         )
+
+
+@dataclass(frozen=True)
+class ETBCCompletionArtifacts:
+    """Large completion products kept only while the main calculation consumes them."""
+
+    result: ETBCCompletionResult
+    augmented_bundle: InputBundle = field(repr=False)
+    projection_seed: ProjectionSeed = field(repr=False)

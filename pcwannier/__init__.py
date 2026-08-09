@@ -2,13 +2,6 @@ from ._version import __version__
 from .config import EnergyWindow, IncarConfig, load_config
 from .conventions import BlochConvention
 from .compute import run_bloch_symmetry_preanalysis, run_calculation
-from .etbc import (
-    ETBCCompletionResult,
-    ETBCKPointDiagnostics,
-    ETBCKPointResult,
-    complete_transverse_bundle,
-    construct_auxiliary_frame,
-)
 from .maxwell import FieldComponents, FieldKind, MaterialKind, MaxwellProblem, PrimaryField
 from .outputs import (
     write_base_figures,
@@ -38,9 +31,6 @@ from .symmetry import (
 
 __all__ = [
     "EnergyWindow",
-    "ETBCCompletionResult",
-    "ETBCKPointDiagnostics",
-    "ETBCKPointResult",
     "BlochConvention",
     "IncarConfig",
     "FiniteGroupDefinition",
@@ -65,8 +55,6 @@ __all__ = [
     "load_space_group",
     "identify_finite_group",
     "load_symmetry",
-    "complete_transverse_bundle",
-    "construct_auxiliary_frame",
     "run_calculation",
     "run_bloch_symmetry_preanalysis",
     "write_base_figures",

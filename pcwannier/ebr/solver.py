@@ -11,6 +11,8 @@ from .models import (
     EBRMatrix,
     EBRSearchStatistics,
     EBRSubspaceEnumeration,
+    SignedEBRCombination,
+    TETBCompletion,
     TETBSolution,
 )
 
@@ -38,6 +40,7 @@ class _SearchBudget:
 
     def consume_signed_combination(self) -> None:
         self.signed_combinations += 1
+        self.consume()
 
 
 def decompose_ebr(
@@ -199,54 +202,67 @@ def enumerate_ebr_subspace_solutions(
         raise ValueError("Required auxiliary-irrep rows must belong to Gamma.")
 
     budget = _validated_budget(max_states)
-    output: list[tuple[TETBSolution, BandSymmetryVector]] = []
-    seen: set[tuple[int, ...]] = set()
-    for auxiliary_dimension in range(int(max_auxiliary_bands) + 1):
-        longitudinal = _enumerate_weighted_vectors(
-            matrix.dimensions, auxiliary_dimension, budget
-        )
-        combined = _enumerate_weighted_vectors(
-            matrix.dimensions, int(target_dimension) + auxiliary_dimension, budget
-        )
-        for n_l in longitudinal:
-            full_longitudinal = matrix.values @ n_l
-            auxiliary_kind_ok = (
-                auxiliary_dimension == 0
-                or not required_rows
-                or any(full_longitudinal[index] > 0 for index in required_rows)
+    grouped: dict[
+        tuple[int, ...],
+        tuple[BandSymmetryVector, list[TETBSolution]],
+    ] = {}
+    complete = True
+    examined = []
+    try:
+        for auxiliary_dimension in range(int(max_auxiliary_bands) + 1):
+            examined.append(auxiliary_dimension)
+            longitudinal = _enumerate_weighted_vectors(
+                matrix.dimensions, auxiliary_dimension, budget
             )
-            if not auxiliary_kind_ok:
-                continue
-            for n_t_plus_l in combined:
-                budget.consume_signed_combination()
-                n_t = n_t_plus_l - n_l
-                key = tuple(int(value) for value in n_t)
-                if key in seen:
-                    continue
-                formal = matrix.values @ n_t
-                selected = formal - surrogate
-                if np.any(selected < 0) or np.any(selected > inventory.multiplicities):
-                    continue
-                seen.add(key)
-                solution = TETBSolution(
-                    n_t_plus_l,
-                    n_l,
-                    n_t,
-                    surrogate,
-                    auxiliary_dimension,
-                    True,
-                    "fits the outer-window high-symmetry inventory",
+            combined = _enumerate_weighted_vectors(
+                matrix.dimensions, int(target_dimension) + auxiliary_dimension, budget
+            )
+            for n_l in longitudinal:
+                full_longitudinal = matrix.values @ n_l
+                auxiliary_kind_ok = (
+                    auxiliary_dimension == 0
+                    or not required_rows
+                    or any(full_longitudinal[index] > 0 for index in required_rows)
                 )
-                output.append(
-                    (
-                        solution,
-                        BandSymmetryVector(
+                if not auxiliary_kind_ok:
+                    continue
+                for n_t_plus_l in combined:
+                    budget.consume_signed_combination()
+                    n_t = n_t_plus_l - n_l
+                    key = tuple(int(value) for value in n_t)
+                    formal = matrix.values @ n_t
+                    selected = formal - surrogate
+                    if np.any(selected < 0) or np.any(
+                        selected > inventory.multiplicities
+                    ):
+                        continue
+                    solution = TETBSolution(
+                        n_t_plus_l,
+                        n_l,
+                        n_t,
+                        surrogate,
+                        auxiliary_dimension,
+                        True,
+                        "fits the outer-window high-symmetry inventory",
+                    )
+                    entry = grouped.get(key)
+                    if entry is None:
+                        vector = BandSymmetryVector(
                             matrix.row_keys,
                             selected,
                             int(target_dimension),
-                        ),
-                    )
-                )
+                        )
+                        entry = (vector, [])
+                        grouped[key] = entry
+                    entry[1].append(solution)
+    except EBRSearchLimitError:
+        complete = False
+
+    output = [
+        (solutions[0], vector)
+        for key, (vector, solutions) in grouped.items()
+        if solutions
+    ]
     output.sort(
         key=lambda item: (
             item[0].auxiliary_dimension,
@@ -254,19 +270,37 @@ def enumerate_ebr_subspace_solutions(
         )
     )
     solutions = tuple(output)
+    completion_groups = tuple(
+        (
+            SignedEBRCombination(np.asarray(key, dtype=np.int64)),
+            tuple(
+                TETBCompletion(
+                    solution.n_t_plus_l,
+                    solution.n_l,
+                    solution.auxiliary_dimension,
+                )
+                for solution in entries[1]
+            ),
+        )
+        for key, entries in sorted(grouped.items())
+    )
+    completion_count = sum(len(items) for _, items in completion_groups)
     return EBRSubspaceEnumeration(
         solutions,
         EBRSearchStatistics(
-            complete=True,
+            complete=complete,
             gamma_sectors=(gamma_sector,),
             auxiliary_dimensions_examined=tuple(
-                range(int(max_auxiliary_bands) + 1)
+                examined
             ),
             weighted_vectors_generated=budget.visited,
             signed_combinations_tested=budget.signed_combinations,
             algebraic_solutions=len(solutions),
+            unique_signed_solutions=len(completion_groups),
+            completion_solutions=completion_count,
             search_limit=budget.limit,
         ),
+        completion_groups,
     )
 
 

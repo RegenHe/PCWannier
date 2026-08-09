@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import OrderedDict
+from concurrent.futures import Future
 from itertools import product
 import logging
+from threading import RLock
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -428,14 +430,20 @@ class BlochSymmetryAction:
         self._stencil_cache_bytes_limit = max(0, int(stencil_cache_bytes))
         self._stencil_cache_nbytes = 0
         self._stencils: OrderedDict[tuple[bytes, bytes], BarycentricStencil] = OrderedDict()
+        self._stencil_lock = RLock()
+        self._stencil_inflight: dict[
+            tuple[bytes, bytes], Future[BarycentricStencil]
+        ] = {}
 
     @property
     def stencil_cache_info(self) -> tuple[int, int]:
-        return len(self._stencils), self._stencil_cache_nbytes
+        with self._stencil_lock:
+            return len(self._stencils), self._stencil_cache_nbytes
 
     def clear_stencil_cache(self) -> None:
-        self._stencils.clear()
-        self._stencil_cache_nbytes = 0
+        with self._stencil_lock:
+            self._stencils.clear()
+            self._stencil_cache_nbytes = 0
 
     def apply(
         self,
@@ -516,24 +524,47 @@ class BlochSymmetryAction:
             np.asarray(operation.translation) / self.tolerance
         ).astype(np.int64)
         key = (operation.rotation.tobytes(), translation_key.tobytes())
-        cached = self._stencils.get(key)
-        if cached is not None:
-            self._stencils.move_to_end(key)
-            return cached
-        inverse_rotation = np.linalg.inv(operation.rotation)
-        preimages = (self.fractional_vertices - operation.translation) @ inverse_rotation.T
-        stencil = self.interpolator.stencil(preimages)
-        if self._stencil_cache_bytes_limit > 0 and stencil.nbytes <= self._stencil_cache_bytes_limit:
-            while (
-                self._stencils
-                and self._stencil_cache_nbytes + stencil.nbytes
-                > self._stencil_cache_bytes_limit
-            ):
-                _, removed = self._stencils.popitem(last=False)
-                self._stencil_cache_nbytes -= removed.nbytes
-            self._stencils[key] = stencil
-            self._stencil_cache_nbytes += stencil.nbytes
-        return stencil
+        with self._stencil_lock:
+            cached = self._stencils.get(key)
+            if cached is not None:
+                self._stencils.move_to_end(key)
+                return cached
+            future = self._stencil_inflight.get(key)
+            owner = future is None
+            if owner:
+                future = Future()
+                self._stencil_inflight[key] = future
+        assert future is not None
+        if not owner:
+            return future.result()
+        try:
+            inverse_rotation = np.linalg.inv(operation.rotation)
+            preimages = (
+                self.fractional_vertices - operation.translation
+            ) @ inverse_rotation.T
+            stencil = self.interpolator.stencil(preimages)
+            with self._stencil_lock:
+                if (
+                    self._stencil_cache_bytes_limit > 0
+                    and stencil.nbytes <= self._stencil_cache_bytes_limit
+                ):
+                    while (
+                        self._stencils
+                        and self._stencil_cache_nbytes + stencil.nbytes
+                        > self._stencil_cache_bytes_limit
+                    ):
+                        _, removed = self._stencils.popitem(last=False)
+                        self._stencil_cache_nbytes -= removed.nbytes
+                    self._stencils[key] = stencil
+                    self._stencil_cache_nbytes += stencil.nbytes
+                self._stencil_inflight.pop(key, None)
+                future.set_result(stencil)
+            return stencil
+        except BaseException as exc:
+            with self._stencil_lock:
+                self._stencil_inflight.pop(key, None)
+                future.set_exception(exc)
+            raise
 
 
 def _compact_indices(indices: np.ndarray) -> np.ndarray:
@@ -692,6 +723,10 @@ class StateBlochSymmetryProvider:
         self._transform_inverse_cache: dict[tuple[int, ...], np.ndarray] = {}
         self._band_lowdin_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], np.ndarray] = {}
         self._band_basis_sewing_cache: dict[tuple[object, ...], np.ndarray] = {}
+        self._cache_lock = RLock()
+        self._sewing_inflight: dict[
+            tuple[object, ...], Future[SewingMatrixCacheEntry]
+        ] = {}
         cached_names = {
             str(value).upper() for value in getattr(state.config, "use_cached_data", ())
         }
@@ -732,17 +767,61 @@ class StateBlochSymmetryProvider:
             else tuple(int(value) for value in request.target_band_indices)
         )
         cache_key = self._sewing_cache_key(request)
-        cached = self._sewing_cache.get(cache_key)
-        if cached is not None:
-            return self._select_cached_bands(cached, source_bands, target_bands)
-        if self._cache_required:
-            raise ValueError(
-                "Sewing matrix cache does not contain the requested exact Seitz action: "
-                f"operation={request.operation.name or request.operation_index}, "
-                f"source_k={np.asarray(request.source_k_fractional).tolist()}, "
-                f"source_bands={source_bands}, target_bands={target_bands}."
+        with self._cache_lock:
+            cached = self._sewing_cache.get(cache_key)
+            if cached is not None:
+                return self._select_cached_bands(cached, source_bands, target_bands)
+            if self._cache_required:
+                raise ValueError(
+                    "Sewing matrix cache does not contain the requested exact Seitz action: "
+                    f"operation={request.operation.name or request.operation_index}, "
+                    f"source_k={np.asarray(request.source_k_fractional).tolist()}, "
+                    f"source_bands={source_bands}, target_bands={target_bands}."
+                )
+            future = self._sewing_inflight.get(cache_key)
+            owner = future is None
+            if owner:
+                future = Future()
+                self._sewing_inflight[cache_key] = future
+        assert future is not None
+        if not owner:
+            entry = future.result()
+            return self._select_cached_bands(entry, source_bands, target_bands)
+        try:
+            entry = self._integrate_sewing_entry(
+                request,
+                source_index=source_index,
+                source_representative=source_representative,
+                source_shift=source_shift,
+                target_index=target_index,
+                target_representative=target_representative,
+                target_shift=target_shift,
+                direct_shift=direct_shift,
             )
+            with self._cache_lock:
+                self._sewing_cache[cache_key] = entry
+                self._sewing_inflight.pop(cache_key, None)
+                future.set_result(entry)
+            return self._select_cached_bands(entry, source_bands, target_bands)
+        except BaseException as exc:
+            with self._cache_lock:
+                self._sewing_inflight.pop(cache_key, None)
+                future.set_exception(exc)
+            raise
 
+    def _integrate_sewing_entry(
+        self,
+        request: SewingMatrixRequest,
+        *,
+        source_index,
+        source_representative: np.ndarray,
+        source_shift: np.ndarray,
+        target_index,
+        target_representative: np.ndarray,
+        target_shift: np.ndarray,
+        direct_shift: np.ndarray,
+    ) -> SewingMatrixCacheEntry:
+        """Integrate one full outer-window matrix for a unique cache key."""
         full_source_bands = self._actual_bands(source_index)
         full_target_bands = self._actual_bands(target_index)
         if self.state.inner_product.uses_full_bloch_fields:
@@ -786,13 +865,13 @@ class StateBlochSymmetryProvider:
             matrix=np.asarray(matrix, dtype=np.complex128).copy(),
             antiunitary=request.operation.antiunitary,
         )
-        self._sewing_cache[cache_key] = entry
-        return self._select_cached_bands(entry, source_bands, target_bands)
+        return entry
 
     @property
     def cached_sewing_matrices(self) -> tuple[SewingMatrixCacheEntry, ...]:
         """Return deterministic, output-ready copies of all integrated sewing matrices."""
-        return tuple(self._sewing_cache[key] for key in sorted(self._sewing_cache))
+        with self._cache_lock:
+            return tuple(self._sewing_cache[key] for key in sorted(self._sewing_cache))
 
     @property
     def spatial_cache_info(self) -> tuple[int, int]:
@@ -887,7 +966,8 @@ class StateBlochSymmetryProvider:
             requested_source,
             requested_target,
         )
-        cached = self._band_basis_sewing_cache.get(cache_key)
+        with self._cache_lock:
+            cached = self._band_basis_sewing_cache.get(cache_key)
         if cached is not None:
             return cached.copy()
         internal = np.asarray(self.sewing_matrix(request), dtype=np.complex128)
@@ -919,7 +999,9 @@ class StateBlochSymmetryProvider:
         result = target_lowdin.conj().T @ block @ source_factor
         result = np.asarray(result, dtype=np.complex128)
         result.setflags(write=False)
-        self._band_basis_sewing_cache[cache_key] = result
+        with self._cache_lock:
+            existing = self._band_basis_sewing_cache.setdefault(cache_key, result)
+        result = existing
         return result.copy()
 
     def request_for_mapping(
@@ -1070,7 +1152,8 @@ class StateBlochSymmetryProvider:
 
     def _transform_inverse(self, index, band_count: int) -> np.ndarray:
         key = tuple(int(value) for value in index)
-        cached = self._transform_inverse_cache.get(key)
+        with self._cache_lock:
+            cached = self._transform_inverse_cache.get(key)
         if cached is not None:
             return cached
         transform = np.asarray(
@@ -1083,8 +1166,8 @@ class StateBlochSymmetryProvider:
         except np.linalg.LinAlgError as exc:
             raise ValueError("Outer-window orthogonalization transform is singular.") from exc
         inverse.setflags(write=False)
-        self._transform_inverse_cache[key] = inverse
-        return inverse
+        with self._cache_lock:
+            return self._transform_inverse_cache.setdefault(key, inverse)
 
     def _band_lowdin_factor(
         self,
@@ -1097,7 +1180,8 @@ class StateBlochSymmetryProvider:
     ) -> np.ndarray:
         index_key = tuple(int(value) for value in index)
         key = (index_key, requested_bands)
-        cached = self._band_lowdin_cache.get(key)
+        with self._cache_lock:
+            cached = self._band_lowdin_cache.get(key)
         if cached is not None:
             return cached
         positions = [full_bands.index(band) for band in requested_bands]
@@ -1107,8 +1191,8 @@ class StateBlochSymmetryProvider:
             description=description,
         )
         factor.setflags(write=False)
-        self._band_lowdin_cache[key] = factor
-        return factor
+        with self._cache_lock:
+            return self._band_lowdin_cache.setdefault(key, factor)
 
     def _sewing_cache_key(self, request: SewingMatrixRequest) -> tuple[object, ...]:
         return self._cache_key(

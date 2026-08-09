@@ -12,6 +12,7 @@ from pcwannier.compute.projector_interpolation import (
 )
 from pcwannier.data import InputBundle, PeriodicGrid
 from pcwannier.etbc import complete_transverse_bundle, construct_auxiliary_frame
+from pcwannier.etbc.completion import prepare_transverse_bundle
 from pcwannier.maxwell import MaxwellProblem
 
 
@@ -218,19 +219,20 @@ def test_gamma_two_transverse_plus_one_auxiliary_uses_constant_frame():
         axis=1,
     )
 
-    result = complete_transverse_bundle(
+    completion = prepare_transverse_bundle(
         state,
         lambda _: trials,
         auxiliary_eigenvalue=0.0,
         rank_tolerance=1.0e-10,
     )
 
+    result = completion.result
     assert result.gamma_regularized_indices == ((0, 0, 0),)
     assert result.auxiliary_dimension == 1
-    block = np.asarray(result.augmented_bundle.fields[0, 0, 0])
+    block = np.asarray(completion.augmented_bundle.fields[0, 0, 0])
     assert block.shape == (3, points, 3)
     assert np.allclose(
-        np.linalg.eigvalsh(result.augmented_bundle.base_hamiltonians[0, 0, 0]),
+        np.linalg.eigvalsh(completion.augmented_bundle.base_hamiltonians[0, 0, 0]),
         0.0,
     )
     expected_projection = state.inner_product.overlap(
@@ -238,7 +240,28 @@ def test_gamma_two_transverse_plus_one_auxiliary_uses_constant_frame():
         np.swapaxes(trials, 0, 1),
         chunk_size=64,
     )
-    assert np.allclose(result.trial_projection_matrices[0, 0, 0], expected_projection)
+    assert np.allclose(
+        completion.projection_seed.matrices[0, 0, 0], expected_projection
+    )
+
+
+def test_public_etbc_completion_does_not_expose_run_scoped_arrays():
+    state = _physical_state_for_gamma()
+    points = state.mesh.point_count
+    trials = np.stack(
+        [
+            _constant_field([1.0, 0.0, 0.0], points),
+            _constant_field([0.0, 1.0, 0.0], points),
+            _constant_field([0.0, 0.0, 1.0], points),
+        ],
+        axis=1,
+    )
+
+    result = complete_transverse_bundle(state, lambda _: trials)
+
+    assert result.auxiliary_dimension == 1
+    assert not hasattr(result, "augmented_bundle")
+    assert not hasattr(result, "projection_seed")
 
 
 def test_gamma_general_group_preserves_positive_t_and_builds_extra_l():
@@ -256,14 +279,101 @@ def test_gamma_general_group_preserves_positive_t_and_builds_extra_l():
     )
     trials = np.swapaxes(trial_rows, 0, 1)
 
-    result = complete_transverse_bundle(
+    completion = prepare_transverse_bundle(
         state,
         lambda _: trials,
         auxiliary_eigenvalue=0.0,
         rank_tolerance=1.0e-10,
     )
 
+    result = completion.result
     assert result.auxiliary_dimension == 2
-    h0 = result.augmented_bundle.base_hamiltonians[0, 0, 0]
+    h0 = completion.augmented_bundle.base_hamiltonians[0, 0, 0]
     assert np.allclose(np.linalg.eigvalsh(h0), [0.0, 0.0, 0.0, 0.0, 2.0])
     assert result.maximum_augmented_orthonormality_error < 1.0e-12
+
+
+def test_streaming_etbc_matches_materialized_gamma_completion():
+    state = _physical_state_for_gamma()
+    points = state.mesh.point_count
+    trials = np.stack(
+        [
+            _constant_field([1.0, 0.0, 0.0], points),
+            _constant_field([0.0, 1.0, 0.0], points),
+            _constant_field([0.0, 0.0, 1.0], points),
+        ],
+        axis=1,
+    )
+
+    class Source:
+        trial_count = 3
+        point_count = points
+
+        @staticmethod
+        def iter_raw_chunks():
+            yield 0, points, trials.reshape((1, 1, 1) + trials.shape)
+
+    materialized = prepare_transverse_bundle(
+        state, lambda _: trials, rank_tolerance=1.0e-10
+    )
+    streaming = prepare_transverse_bundle(
+        state, Source(), rank_tolerance=1.0e-10
+    )
+
+    assert streaming.result == materialized.result
+    assert np.allclose(
+        streaming.augmented_bundle.fields[0, 0, 0],
+        materialized.augmented_bundle.fields[0, 0, 0],
+        atol=1.0e-13,
+    )
+    assert np.allclose(
+        streaming.projection_seed.matrices[0, 0, 0],
+        materialized.projection_seed.matrices[0, 0, 0],
+        atol=1.0e-13,
+    )
+
+
+def test_streaming_etbc_matches_materialized_regular_k_completion():
+    state = _physical_state_for_gamma()
+    state.config.k_points = [
+        np.asarray([0.25]),
+        np.asarray([0.0]),
+        np.asarray([0.0]),
+    ]
+    state.E[0, 0, 0] = np.asarray([1.0, 2.0])
+    state.energy_matrix = np.asarray([1.0, 2.0]).reshape(1, 1, 1, 2)
+    points = state.mesh.point_count
+    trials = np.stack(
+        [
+            _constant_field([1.0, 0.0, 0.0], points),
+            _constant_field([0.0, 1.0, 0.0], points),
+            _constant_field([0.0, 0.0, 1.0], points),
+        ],
+        axis=1,
+    )
+
+    class Source:
+        trial_count = 3
+        point_count = points
+
+        @staticmethod
+        def iter_raw_chunks():
+            yield 0, points, trials.reshape((1, 1, 1) + trials.shape)
+
+    materialized = prepare_transverse_bundle(
+        state, lambda _: trials, rank_tolerance=1.0e-10
+    )
+    streaming = prepare_transverse_bundle(
+        state, Source(), rank_tolerance=1.0e-10
+    )
+
+    assert np.allclose(
+        streaming.augmented_bundle.fields[0, 0, 0],
+        materialized.augmented_bundle.fields[0, 0, 0],
+        atol=1.0e-13,
+    )
+    assert np.allclose(
+        streaming.projection_seed.matrices[0, 0, 0],
+        materialized.projection_seed.matrices[0, 0, 0],
+        atol=1.0e-13,
+    )

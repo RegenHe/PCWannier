@@ -10,6 +10,7 @@ from .integration import validated_real
 from .kspace import neighbor_reciprocal_lattice_vectors
 from .matrix import MSet
 from .parallel import parallel_map
+from .prepared import ProjectionSeed
 from .state import StateCollection
 
 LOGGER = logging.getLogger(__name__)
@@ -111,7 +112,14 @@ class StateBases:
 
 
 class StateInitializer:
-    def __init__(self, state: StateCollection, mset: MSet, threads: int = 1):
+    def __init__(
+        self,
+        state: StateCollection,
+        mset: MSet,
+        threads: int = 1,
+        *,
+        projection_seed: ProjectionSeed | None = None,
+    ):
         self.state = state
         self.mset = mset
         self.config = state.config
@@ -131,6 +139,7 @@ class StateInitializer:
         self._prepared = False
         self._has_cached_a = False
         self._has_cached_v = False
+        self.projection_seed = projection_seed
 
     def iter(self, err_diff: float, max_iter: int) -> None:
         self.prepare()
@@ -307,10 +316,10 @@ class StateInitializer:
                 f"Calculated bands exceed band window: {band_count} > {min_len}."
             )
 
-        precomputed = self.state._precomputed_vector_projection
+        seed = self.projection_seed
 
         def calc_idx(idx):
-            if precomputed is None:
+            if seed is None:
                 gmat = build_vector_bloch_trials(self.state, idx)
                 if gmat.shape != (
                     self.state.mesh.vertices.shape[0],
@@ -328,13 +337,8 @@ class StateInitializer:
                     chunk_size=64,
                 )
             else:
-                amat = np.asarray(precomputed[idx], dtype=np.complex128)
                 expected = (len(self.state.E_idx[idx]), band_count)
-                if amat.shape != expected:
-                    raise ValueError(
-                        f"Precomputed 3D projection at k={idx} has shape {amat.shape}; "
-                        f"expected {expected}."
-                    )
+                amat = seed.matrix(idx, expected)
             if self.config.proj_binarize:
                 amat = self.binarize(amat)
             return idx, amat, self._projection_frame_from_a(amat, idx)

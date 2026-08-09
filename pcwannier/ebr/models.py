@@ -236,6 +236,38 @@ class TETBSolution:
 
 
 @dataclass(frozen=True)
+class SignedEBRCombination:
+    multiplicities: np.ndarray
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "multiplicities",
+            _readonly_integer_array(
+                self.multiplicities, ndim=1, name="signed EBR combination"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class TETBCompletion:
+    n_t_plus_l: np.ndarray
+    n_l: np.ndarray
+    auxiliary_dimension: int
+
+    def __post_init__(self) -> None:
+        n_tl = _readonly_integer_array(self.n_t_plus_l, ndim=1, name="n_T+L")
+        n_l = _readonly_integer_array(self.n_l, ndim=1, name="n_L")
+        if n_tl.shape != n_l.shape or np.any(n_tl < 0) or np.any(n_l < 0):
+            raise ValueError("TETB completion multiplicities must be matching non-negative vectors.")
+        if isinstance(self.auxiliary_dimension, bool) or int(self.auxiliary_dimension) < 0:
+            raise ValueError("TETB completion auxiliary dimension must be non-negative.")
+        object.__setattr__(self, "n_t_plus_l", n_tl)
+        object.__setattr__(self, "n_l", n_l)
+        object.__setattr__(self, "auxiliary_dimension", int(self.auxiliary_dimension))
+
+
+@dataclass(frozen=True)
 class EBRSubspacePointRepresentation:
     point_name: str
     irrep_multiplicities: tuple[tuple[str, int], ...]
@@ -320,6 +352,8 @@ class EBRSearchStatistics:
     weighted_vectors_generated: int = 0
     signed_combinations_tested: int = 0
     algebraic_solutions: int = 0
+    unique_signed_solutions: int = 0
+    completion_solutions: int = 0
     realizable_candidates: int = 0
     block_realization_count: int = 0
     search_limit: int = 0
@@ -329,6 +363,8 @@ class EBRSearchStatistics:
             self.weighted_vectors_generated,
             self.signed_combinations_tested,
             self.algebraic_solutions,
+            self.unique_signed_solutions,
+            self.completion_solutions,
             self.realizable_candidates,
             self.block_realization_count,
             self.search_limit,
@@ -350,6 +386,9 @@ class EBRSearchStatistics:
 class EBRSubspaceEnumeration:
     solutions: tuple[tuple[TETBSolution, BandSymmetryVector], ...]
     statistics: EBRSearchStatistics
+    completion_groups: tuple[
+        tuple[SignedEBRCombination, tuple[TETBCompletion, ...]], ...
+    ] = ()
 
 
 @dataclass(frozen=True)

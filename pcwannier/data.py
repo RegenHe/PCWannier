@@ -427,7 +427,7 @@ class BandChannelReference:
         return f"{self.channel}:{self.source_band_index}"
 
 
-@dataclass
+@dataclass(frozen=True)
 class InputBundle:
     config: IncarConfig
     maxwell: MaxwellProblem

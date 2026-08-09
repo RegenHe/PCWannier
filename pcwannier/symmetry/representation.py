@@ -39,9 +39,10 @@ def _validate_site_representation(
     dimension: int,
 ) -> None:
     identity = np.eye(dimension)
+    product_table = orbit.site_symmetry.multiplication_table
     for left_index, left in enumerate(orbit.site_symmetry.elements):
         for right_index, right in enumerate(orbit.site_symmetry.elements):
-            product_index = orbit.site_symmetry.element_index(left.operation * right.operation)
+            product_index = int(product_table[left_index, right_index])
             right_matrix = (
                 matrices[right_index].conj()
                 if left.operation.antiunitary
@@ -360,8 +361,18 @@ def build_wannier_target_from_group_irrep(
     center,
     group_irrep: ResolvedIrrep,
     bloch_convention: BlochConvention | None = None,
+    *,
+    orbit: CrystallographicOrbit | None = None,
 ) -> WannierTargetRepresentation:
-    orbit = build_crystallographic_orbit(group, center)
+    if orbit is None:
+        orbit = build_crystallographic_orbit(group, center)
+    if not np.allclose(
+        np.asarray(orbit.center, dtype=float),
+        np.asarray(center, dtype=float),
+        rtol=0.0,
+        atol=group.tolerance,
+    ):
+        raise ValueError("Precomputed orbit center does not match the target center.")
     source_indices = tuple(
         element.source_operation_index for element in orbit.site_symmetry.elements
     )

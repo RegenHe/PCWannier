@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from dataclasses import replace
+from threading import Lock
+import time
 
 import numpy as np
 import pytest
@@ -492,6 +495,40 @@ def test_state_provider_roundtrips_full_outer_sewing_cache(tmp_path, monkeypatch
         cached_provider.sewing_matrix_for_mapping(
             cached_provider.mapping(identity, (0, 0)), (0, 1)
         )
+
+
+def test_state_provider_memoizes_concurrent_sewing_request(monkeypatch):
+    model = square_2c_model(analysis=False)
+    context = build_symmetry_context(model, [np.array([0.0]), np.array([0.0])])
+    mesh = _square_mesh()
+    fields = np.asarray(
+        [
+            np.sin(2 * np.pi * mesh.vertices[:, 0]),
+            np.sin(2 * np.pi * mesh.vertices[:, 1]),
+        ]
+    )
+    state = _synthetic_state(fields, energies=[1.0, 1.0])
+    provider = StateBlochSymmetryProvider(state, context)
+    operation_index = model.group.operation_index(model.group.operation_by_name("C4"))
+    mapping = provider.mapping(operation_index, (0, 0))
+    request = provider.request_for_mapping(mapping, (0, 1))
+    original_overlap = state.inner_product.overlap
+    lock = Lock()
+    calls = 0
+
+    def counted_overlap(*args, **kwargs):
+        nonlocal calls
+        with lock:
+            calls += 1
+        time.sleep(0.05)
+        return original_overlap(*args, **kwargs)
+
+    monkeypatch.setattr(state.inner_product, "overlap", counted_overlap)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        matrices = tuple(executor.map(provider.sewing_matrix, [request] * 4))
+
+    assert calls == 1
+    assert all(np.allclose(matrix, matrices[0]) for matrix in matrices[1:])
 
 
 def test_state_provider_rejects_sewing_cache_with_different_outer_bands(tmp_path):

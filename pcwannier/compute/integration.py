@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
@@ -10,9 +9,9 @@ from typing import Protocol
 import numpy as np
 
 from .backend import BACKEND_NUMBA, resolve_backend
+from .parallel import numba_parallel_allowed, set_numba_parallel_allowed
 
 _NUMBA_PARALLEL_COLUMN_THRESHOLD = 32
-_NUMBA_PARALLEL_ALLOWED: ContextVar[bool] = ContextVar("pcwannier_numba_parallel_allowed", default=True)
 
 
 @dataclass(frozen=True)
@@ -212,11 +211,11 @@ def create_metric_inner_product(
 
 @contextmanager
 def numba_parallel_policy(enabled: bool):
-    token = _NUMBA_PARALLEL_ALLOWED.set(bool(enabled))
+    previous = set_numba_parallel_allowed(bool(enabled))
     try:
         yield
     finally:
-        _NUMBA_PARALLEL_ALLOWED.reset(token)
+        set_numba_parallel_allowed(previous)
 
 
 def _mesh_integral_view(mesh) -> _MeshIntegralView:
@@ -468,7 +467,7 @@ def _integrate_weighted_abs2_columns_numba(
 ) -> np.ndarray:
     from .numba_kernels import integrate_weighted_abs2_columns_numba, integrate_weighted_abs2_columns_numba_parallel
 
-    if _NUMBA_PARALLEL_ALLOWED.get() and right.shape[1] >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
+    if numba_parallel_allowed() and right.shape[1] >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
         return integrate_weighted_abs2_columns_numba_parallel(left, right, elems, weights)
     return integrate_weighted_abs2_columns_numba(left, right, elems, weights)
 
@@ -484,7 +483,7 @@ def _integrate_weighted_abs2_columns_quadratic_numba(
         integrate_weighted_abs2_columns_quadratic_numba_parallel,
     )
 
-    if _NUMBA_PARALLEL_ALLOWED.get() and right.shape[1] >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
+    if numba_parallel_allowed() and right.shape[1] >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
         return integrate_weighted_abs2_columns_quadratic_numba_parallel(left, right, elems, weights)
     return integrate_weighted_abs2_columns_quadratic_numba(left, right, elems, weights)
 
@@ -500,7 +499,7 @@ def _integrate_overlap_matrix_numba(
     from .numba_kernels import integrate_overlap_matrix_numba, integrate_overlap_matrix_numba_parallel
 
     work_items = left.shape[0] * right.shape[0]
-    if _NUMBA_PARALLEL_ALLOWED.get() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
+    if numba_parallel_allowed() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
         return integrate_overlap_matrix_numba_parallel(left, right, weights_vector, elems, weights, conjugate_left)
     return integrate_overlap_matrix_numba(left, right, weights_vector, elems, weights, conjugate_left)
 
@@ -516,7 +515,7 @@ def _integrate_overlap_matrix_quadratic_numba(
     from .numba_kernels import integrate_overlap_matrix_quadratic_numba, integrate_overlap_matrix_quadratic_numba_parallel
 
     work_items = left.shape[0] * right.shape[0]
-    if _NUMBA_PARALLEL_ALLOWED.get() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
+    if numba_parallel_allowed() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
         return integrate_overlap_matrix_quadratic_numba_parallel(
             left, right, weights_vector, elems, weights, conjugate_left
         )
@@ -536,7 +535,7 @@ def _integrate_overlap_element_matrices_numba(
     )
 
     work_items = left.shape[0] * right.shape[0]
-    if _NUMBA_PARALLEL_ALLOWED.get() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
+    if numba_parallel_allowed() and work_items >= _NUMBA_PARALLEL_COLUMN_THRESHOLD:
         return integrate_overlap_element_matrices_numba_parallel(
             left, right, elems, element_matrices, conjugate_left
         )

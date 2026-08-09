@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import logging
 
 import numpy as np
@@ -16,8 +16,80 @@ from ..symmetry.representation import (
     build_symmetry_context,
 )
 from .initializer import StateBases
+from .kspace import is_complete_uniform_k_mesh
+from .parallel import parallel_map
+from .prepared import ProjectionSeed
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PreparedTrialColumn:
+    record: ProjectionRecord3D
+    trial: object
+    operation: object
+    base_center_cartesian: np.ndarray
+    cartesian_rotation: np.ndarray
+    component_matrix: np.ndarray
+    lattice: np.ndarray
+    inverse_lattice: np.ndarray
+    lattice_scale: float
+
+
+def _prepare_trial_column(state, record, orbit_point, trial) -> _PreparedTrialColumn:
+    operation = orbit_point.representative_operation
+    return _PreparedTrialColumn(
+        record=record,
+        trial=trial,
+        operation=operation,
+        base_center_cartesian=_center_cartesian(
+            state.config, orbit_point.position
+        ),
+        cartesian_rotation=_cartesian_rotation(
+            operation, state.config.real_lattice_vectors
+        ),
+        component_matrix=cartesian_field_matrix(
+            operation,
+            state.config.real_lattice_vectors,
+            state.maxwell.symmetry_field_kind,
+            state.config.symmetry_tolerance,
+        ),
+        lattice=np.asarray(state.config.real_lattice_vectors, dtype=float),
+        inverse_lattice=np.linalg.inv(
+            np.asarray(state.config.real_lattice_vectors, dtype=float)
+        ),
+        lattice_scale=float(state.config.lattice_const),
+    )
+
+
+def _evaluate_prepared_trial(
+    state,
+    prepared: _PreparedTrialColumn,
+    points_cartesian: np.ndarray,
+    translation: np.ndarray,
+    periods: tuple[int, ...],
+) -> np.ndarray:
+    lattice = prepared.lattice
+    scale = prepared.lattice_scale
+    center = prepared.base_center_cartesian + (translation @ lattice) * scale
+    displacement = points_cartesian - center[None, :]
+    fractional = (displacement / scale) @ prepared.inverse_lattice
+    period_values = np.asarray(periods, dtype=float)
+    fractional -= period_values[None, :] * np.floor(
+        fractional / period_values[None, :] + 0.5
+    )
+    displacement = (fractional @ lattice) * scale
+    values = prepared.trial.evaluate(
+        displacement @ prepared.cartesian_rotation,
+        prepared.record.frame,
+        scale,
+        StateBases.Radial,
+    )
+    if prepared.operation.antiunitary:
+        values = state.maxwell.apply_time_reversal(values)
+    return np.asarray(
+        values @ prepared.component_matrix.T, dtype=np.complex128
+    )
 
 
 def _cartesian_rotation(operation, lattice_vectors) -> np.ndarray:
@@ -298,17 +370,6 @@ def _born_von_karman_translation_axes(k_points) -> tuple[np.ndarray, ...]:
     return tuple(axes)
 
 
-def _is_complete_uniform_k_mesh(k_points, *, tolerance: float = 1.0e-10) -> bool:
-    for axis in k_points:
-        values = np.asarray(axis, dtype=float).reshape(-1)
-        if values.size <= 1:
-            continue
-        expected = 1.0 / float(values.size)
-        if not np.allclose(np.diff(values), expected, rtol=0.0, atol=tolerance):
-            return False
-    return True
-
-
 def _translation_bloch_fft(
     images: np.ndarray,
     k_points,
@@ -326,7 +387,7 @@ def _translation_bloch_fft(
     sign = int(bloch_sign)
     if sign not in {-1, 1}:
         raise ValueError(f"Bloch sign must be +1 or -1; got {bloch_sign}.")
-    if not _is_complete_uniform_k_mesh(k_points):
+    if not is_complete_uniform_k_mesh(k_points):
         raise ValueError(
             "FFT Bloch sums require each sampled k axis to be a complete uniform "
             "periodic mesh with spacing 1/N."
@@ -376,6 +437,202 @@ def _vector_trial_columns(state, context):
     return tuple(columns)
 
 
+class VectorTrialFrameSource:
+    """Re-iterable, chunked FFT source for orbit-expanded vector trials."""
+
+    def __init__(
+        self,
+        state,
+        *,
+        context=None,
+        workspace_bytes: int = 256 << 20,
+    ) -> None:
+        self.state = state
+        self.context = (
+            context
+            or getattr(state, "symmetry", None)
+            or state.config.symmetry_context
+        )
+        if self.context is None or not tuple(
+            state.config.projection_target_bindings
+        ):
+            raise ValueError(
+                "3D vector trials require bound Wannier targets and symmetry context."
+            )
+        self.k_points = tuple(state.config.k_points)
+        self.k_shape = tuple(int(len(axis)) for axis in self.k_points)
+        if not is_complete_uniform_k_mesh(self.k_points):
+            raise ValueError(
+                "Streaming vector trials require a complete uniform periodic k mesh."
+            )
+        self.points = np.asarray(state.mesh.vertices, dtype=float)
+        raw_columns = _vector_trial_columns(state, self.context)
+        self.columns = tuple(
+            _prepare_trial_column(state, record, orbit_point, trial)
+            for record, orbit_point, trial in raw_columns
+        )
+        self.trial_count = len(self.columns)
+        if self.trial_count != int(state.config.band_calc_num):
+            raise ValueError(
+                f"Vector trial basis contains {self.trial_count} columns; expected "
+                f"band_calc_num={state.config.band_calc_num}."
+            )
+        self.point_count = int(self.points.shape[0])
+        self.workspace_bytes = max(1 << 20, int(workspace_bytes))
+        self.periods = tuple(int(len(axis)) for axis in self.k_points)
+        translation_axes = _born_von_karman_translation_axes(self.k_points)
+        self.translation_vectors = {
+            index: np.asarray(
+                [translation_axes[axis][index[axis]] for axis in range(len(index))],
+                dtype=float,
+            )
+            for index in np.ndindex(self.k_shape)
+        }
+        k_count = int(np.prod(self.k_shape))
+        workers = max(1, int(state.configured_threads))
+        bytes_per_point = (
+            k_count
+            * 3
+            * np.dtype(np.complex128).itemsize
+            * (self.trial_count + 2 * workers)
+        )
+        self.point_chunk = max(
+            1,
+            min(self.point_count, self.workspace_bytes // max(1, bytes_per_point)),
+        )
+        self._pass_count = 0
+
+    def iter_raw_chunks(self):
+        self._pass_count += 1
+        k_count = int(np.prod(self.k_shape))
+        bytes_per_task = (
+            2
+            * k_count
+            * self.point_chunk
+            * 3
+            * np.dtype(np.complex128).itemsize
+        )
+        LOGGER.info(
+            "Vector trial stream pass=%d k_points=%d spatial_points=%d columns=%d "
+            "point_chunk=%d workspace=%.1f MB",
+            self._pass_count,
+            k_count,
+            self.point_count,
+            self.trial_count,
+            self.point_chunk,
+            self.workspace_bytes / (1024.0**2),
+        )
+        for start in range(0, self.point_count, self.point_chunk):
+            stop = min(start + self.point_chunk, self.point_count)
+            local_points = self.points[start:stop]
+            output = np.empty(
+                self.k_shape
+                + (local_points.shape[0], self.trial_count, 3),
+                dtype=np.complex128,
+            )
+
+            def calculate_column(item):
+                column, prepared = item
+                images = np.empty(
+                    self.k_shape + (local_points.shape[0], 3),
+                    dtype=np.complex128,
+                )
+                for translation_index, translation in self.translation_vectors.items():
+                    images[translation_index] = _evaluate_prepared_trial(
+                        self.state,
+                        prepared,
+                        local_points,
+                        translation,
+                        self.periods,
+                    )
+                transformed = _translation_bloch_fft(
+                    images, self.k_points, self.state.bloch_sign
+                )
+                return column, transformed
+
+            for column, transformed in parallel_map(
+                enumerate(self.columns),
+                calculate_column,
+                self.state.configured_threads,
+                ordered=False,
+                bytes_per_task=bytes_per_task,
+                memory_budget_bytes=self.workspace_bytes,
+            ):
+                output[..., column, :] = transformed
+            yield start, stop, output
+
+    def projection_seed(self) -> ProjectionSeed:
+        """Accumulate normalized trial overlaps without materializing trial fields."""
+
+        inner = self.state.inner_product
+        if getattr(inner, "domain_kind", None) != "points":
+            raise TypeError(
+                "Streaming vector projection currently requires a uniform grid."
+            )
+        metric = np.asarray(inner.metric, dtype=np.complex128).reshape(-1)
+        if np.max(np.abs(metric.imag), initial=0.0) > 1.0e-12:
+            raise ValueError("Vector trial projection requires a real metric.")
+        point_weight = float(inner.point_weight)
+        indices = tuple(self.state.k_indices())
+        norms = {
+            index: np.zeros(self.trial_count, dtype=np.float64)
+            for index in indices
+        }
+        overlaps = {
+            index: np.zeros(
+                (len(self.state.E_idx[index]), self.trial_count),
+                dtype=np.complex128,
+            )
+            for index in indices
+        }
+        for start, stop, trial_chunk in self.iter_raw_chunks():
+            weights = metric.real[start:stop] * point_weight
+            for index in indices:
+                trials = np.asarray(trial_chunk[index], dtype=np.complex128)
+                block = self.state.get_block(*index)[:, start:stop]
+                phase = self.state.get_phase(*index)[start:stop]
+                full_fields = block * phase[None, :, None]
+                norms[index] += np.einsum(
+                    "pic,pic,p->i",
+                    trials.conj(),
+                    trials,
+                    weights,
+                    optimize=True,
+                ).real
+                overlaps[index] += np.einsum(
+                    "mpc,pic,p->mi",
+                    full_fields.conj(),
+                    trials,
+                    weights,
+                    optimize=True,
+                )
+        matrices = np.empty(self.k_shape, dtype=object)
+        for index in indices:
+            invalid = np.flatnonzero(
+                ~np.isfinite(norms[index]) | (norms[index] <= 0.0)
+            )
+            if invalid.size:
+                raise ValueError(
+                    f"3D projection Bloch sums at k={index} have invalid norms "
+                    f"in columns {invalid.tolist()}."
+                )
+            matrices[index] = overlaps[index] / np.sqrt(norms[index])[None, :]
+        return ProjectionSeed(matrices, source="streaming vector trial")
+
+
+def build_vector_bloch_trial_source(
+    state,
+    *,
+    context=None,
+    workspace_bytes: int = 256 << 20,
+) -> VectorTrialFrameSource:
+    return VectorTrialFrameSource(
+        state,
+        context=context,
+        workspace_bytes=workspace_bytes,
+    )
+
+
 def build_vector_bloch_trial_grid(
     state,
     *,
@@ -390,7 +647,7 @@ def build_vector_bloch_trial_grid(
         raise ValueError("3D vector trials require bound Wannier targets and symmetry context.")
     k_points = tuple(state.config.k_points)
     k_shape = tuple(int(len(axis)) for axis in k_points)
-    if not _is_complete_uniform_k_mesh(k_points):
+    if not is_complete_uniform_k_mesh(k_points):
         LOGGER.warning(
             "Vector trial k mesh is not a complete uniform periodic grid; "
             "falling back to direct per-k Bloch sums."
@@ -400,81 +657,19 @@ def build_vector_bloch_trial_grid(
             output[index] = build_vector_bloch_trials(state, index, context=context)
         return output
 
-    points = np.asarray(state.mesh.vertices, dtype=float)
-    columns = _vector_trial_columns(state, context)
-    if len(columns) != int(state.config.band_calc_num):
-        raise ValueError(
-            f"Vector trial basis contains {len(columns)} columns; expected "
-            f"band_calc_num={state.config.band_calc_num}."
-        )
+    source = build_vector_bloch_trial_source(
+        state,
+        context=context,
+        workspace_bytes=workspace_bytes,
+    )
     output = np.empty(k_shape, dtype=object)
     for index in np.ndindex(k_shape):
         output[index] = np.empty(
-            (points.shape[0], len(columns), 3), dtype=np.complex128
+            (source.point_count, source.trial_count, 3), dtype=np.complex128
         )
-
-    translations = _born_von_karman_translation_axes(k_points)
-    periods = tuple(int(len(axis)) for axis in k_points)
-    translation_count = int(np.prod(k_shape))
-    bytes_per_point = max(
-        1,
-        translation_count * 3 * np.dtype(np.complex128).itemsize * 3,
-    )
-    point_chunk = max(
-        1,
-        min(points.shape[0], int(workspace_bytes) // bytes_per_point),
-    )
-    LOGGER.info(
-        "Vector Bloch trial FFT: k_points=%d translations=%d spatial_points=%d "
-        "columns=%d point_chunk=%d cached_trials=%.1f MB",
-        translation_count,
-        translation_count,
-        points.shape[0],
-        len(columns),
-        point_chunk,
-        (
-            translation_count
-            * points.shape[0]
-            * len(columns)
-            * 3
-            * np.dtype(np.complex128).itemsize
-            / (1024.0**2)
-        ),
-    )
-
-    for column, (record, orbit_point, trial) in enumerate(columns):
-        operation = orbit_point.representative_operation
-        for start in range(0, points.shape[0], point_chunk):
-            stop = min(start + point_chunk, points.shape[0])
-            local_points = points[start:stop]
-            images = np.empty(
-                k_shape + (local_points.shape[0], 3), dtype=np.complex128
-            )
-            for translation_index in np.ndindex(k_shape):
-                translation = np.asarray(
-                    [
-                        translations[axis][translation_index[axis]]
-                        for axis in range(len(k_shape))
-                    ],
-                    dtype=float,
-                )
-                shifted_center = np.asarray(
-                    orbit_point.position, dtype=float
-                ) + translation
-                images[translation_index] = _evaluate_transformed_trial(
-                    state,
-                    record,
-                    trial,
-                    local_points,
-                    shifted_center,
-                    operation,
-                    supercell_periods=periods,
-                )
-            transformed = _translation_bloch_fft(
-                images, k_points, state.bloch_sign
-            )
-            for k_index in np.ndindex(k_shape):
-                output[k_index][start:stop, column, :] = transformed[k_index]
+    for start, stop, chunk in source.iter_raw_chunks():
+        for index in np.ndindex(k_shape):
+            output[index][start:stop] = chunk[index]
 
     for index in np.ndindex(k_shape):
         values = output[index]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Iterable
 
 import numpy as np
@@ -205,6 +206,16 @@ class SpaceGroup:
         object.__setattr__(self, "operations", items)
         object.__setattr__(self, "tolerance", float(tolerance))
         object.__setattr__(self, "identity_index", identity_matches[0])
+        buckets: dict[tuple[bool, bytes], list[int]] = {}
+        for index, operation in enumerate(items):
+            key = (operation.antiunitary, operation.rotation.tobytes())
+            buckets.setdefault(key, []).append(index)
+        object.__setattr__(
+            self,
+            "_operation_buckets",
+            {key: tuple(indices) for key, indices in buckets.items()},
+        )
+        object.__setattr__(self, "_product_cache", {})
         self._validate_group_laws()
 
     @property
@@ -212,7 +223,9 @@ class SpaceGroup:
         return self.operations[0].dimension
 
     def operation_index(self, operation: SpaceGroupOperation, *, modulo_lattice: bool = True) -> int:
-        for index, candidate in enumerate(self.operations):
+        key = (operation.antiunitary, operation.rotation.tobytes())
+        for index in self._operation_buckets.get(key, ()):
+            candidate = self.operations[index]
             matches = (
                 candidate.equivalent_mod_lattice(operation, self.tolerance)
                 if modulo_lattice
@@ -235,8 +248,13 @@ class SpaceGroup:
         right = int(right_index)
         if not 0 <= left < len(self.operations) or not 0 <= right < len(self.operations):
             raise IndexError("Space-group operation index is out of range.")
-        exact_product = self.operations[left] * self.operations[right]
-        return self.reduce_operation(exact_product)
+        key = (left, right)
+        cached = self._product_cache.get(key)
+        if cached is None:
+            exact_product = self.operations[left] * self.operations[right]
+            cached = self.reduce_operation(exact_product)
+            self._product_cache[key] = cached
+        return cached
 
     def reduce_operation(self, operation: SpaceGroupOperation) -> SeitzProduct:
         """Reduce an exact Seitz operation to a stored representative."""
@@ -463,6 +481,18 @@ class SiteSymmetryGroup:
             if element.operation.strictly_equal(operation, self.tolerance):
                 return index
         raise ValueError("Operation is not an element of the site-symmetry group.")
+
+    @cached_property
+    def multiplication_table(self) -> np.ndarray:
+        size = len(self.elements)
+        table = np.empty((size, size), dtype=np.int64)
+        for left_index, left in enumerate(self.elements):
+            for right_index, right in enumerate(self.elements):
+                table[left_index, right_index] = self.element_index(
+                    left.operation * right.operation
+                )
+        table.setflags(write=False)
+        return table
 
 
 @dataclass(frozen=True)

@@ -318,8 +318,10 @@ def validate_wannier_symmetry(
     for target_index, target in enumerate(target_items):
         target_offsets.append((target_index, target, offset))
         offset += target.wannier_dimension
-    ordered_entries = []
-    for operation_index, operation in enumerate(group.operations):
+
+    def validate_operation(item):
+        operation_index, operation = item
+        operation_entries = []
         if integration_family == "uniform_grid":
             stencil = None
             valid_inner_product = None
@@ -410,7 +412,7 @@ def validate_wannier_symmetry(
                             expected_norm / max(full_expected_norm, 1.0e-30),
                         )
                     )
-                    ordered_entries.append(
+                    operation_entries.append(
                         (
                             (
                                 target_index,
@@ -430,8 +432,28 @@ def validate_wannier_symmetry(
                             ),
                         )
                     )
-        if stencil is not None:
-            del stencil, valid_inner_product
+        return operation_entries
+
+    from ..compute.parallel import parallel_map
+
+    component_count = 1 if zero_cell.ndim == 2 else int(zero_cell.shape[-1])
+    points = int(mesh.vertices.shape[0])
+    bytes_per_operation = max(
+        points * component_count * np.dtype(np.complex128).itemsize * 4
+        + points * max(2, group.dimension) * 32,
+        1 << 20,
+    )
+    ordered_entries = [
+        entry
+        for operation_entries in parallel_map(
+            tuple(enumerate(group.operations)),
+            validate_operation,
+            state.configured_threads,
+            ordered=True,
+            bytes_per_task=bytes_per_operation,
+        )
+        for entry in operation_entries
+    ]
 
     entries = [entry for _, entry in sorted(ordered_entries, key=lambda item: item[0])]
     max_residual = max((entry.residual for entry in entries), default=0.0)

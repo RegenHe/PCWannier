@@ -27,7 +27,6 @@ class StateCollection:
                 "InputBundle Maxwell metadata does not match the calculation config."
             )
         self.threads = max(1, int(threads))
-        self._precomputed_vector_projection = None
         self.use_overlap_cache = bool(use_overlap_cache)
         self.mesh = bundle.mesh
         self.symmetry = bundle.symmetry

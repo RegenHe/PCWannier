@@ -6,6 +6,7 @@ from typing import Callable
 import numpy as np
 
 from .kspace import neighbor_reciprocal_lattice_vectors
+from .parallel import parallel_map
 
 
 Index3D = tuple[int, int, int]
@@ -32,33 +33,38 @@ def _evaluate_neighbor_subspace(
     *,
     zero_mode_at: Callable[[Index3D], bool],
 ) -> NeighborSubspaceSmoothness:
-    rows: list[tuple[float, Index3D, int, bool]] = []
     b_count = len(state.config.composition_of_b) // 2
-    for raw_index in state.k_indices():
-        index = tuple(int(value) for value in raw_index)
+    links = tuple(
+        (tuple(int(value) for value in raw_index), direction)
+        for raw_index in state.k_indices()
+        for direction in range(b_count)
+    )
+
+    def calculate(link) -> tuple[float, Index3D, int, bool]:
+        index, direction = link
         source_basis = np.asarray(basis_at(index), dtype=np.complex128)
-        for direction in range(b_count):
-            target_raw, _ = neighbor_reciprocal_lattice_vectors(
-                state.config, list(index), direction
+        target_raw, _ = neighbor_reciprocal_lattice_vectors(
+            state.config, list(index), direction
+        )
+        target = tuple(int(value) for value in target_raw)
+        target_basis = np.asarray(basis_at(target), dtype=np.complex128)
+        overlap = np.asarray(overlap_at(index, direction), dtype=np.complex128)
+        reduced = source_basis.conj().T @ overlap @ target_basis
+        singular_values = np.linalg.svd(reduced, compute_uv=False)
+        if singular_values.size == 0 or not np.all(np.isfinite(singular_values)):
+            raise FloatingPointError(
+                f"Invalid neighbor singular values for {label} at k={index}, "
+                f"direction={direction}."
             )
-            target = tuple(int(value) for value in target_raw)
-            target_basis = np.asarray(basis_at(target), dtype=np.complex128)
-            overlap = np.asarray(overlap_at(index, direction), dtype=np.complex128)
-            reduced = source_basis.conj().T @ overlap @ target_basis
-            singular_values = np.linalg.svd(reduced, compute_uv=False)
-            if singular_values.size == 0 or not np.all(np.isfinite(singular_values)):
-                raise FloatingPointError(
-                    f"Invalid neighbor singular values for {label} at k={index}, "
-                    f"direction={direction}."
-                )
-            rows.append(
-                (
-                    float(singular_values[-1]),
-                    index,
-                    direction,
-                    not (zero_mode_at(index) or zero_mode_at(target)),
-                )
-            )
+        return (
+            float(singular_values[-1]),
+            index,
+            direction,
+            not (zero_mode_at(index) or zero_mode_at(target)),
+        )
+
+    threads = max(1, int(getattr(state, "configured_threads", 1)))
+    rows = list(parallel_map(links, calculate, threads, ordered=True))
     if not rows:
         raise ValueError(f"No neighbor links are available for {label} diagnostics.")
     regular = [row for row in rows if row[3]]

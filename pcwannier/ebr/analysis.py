@@ -99,90 +99,174 @@ def build_ebr_matrix(
 ) -> EBRMatrix:
     """Generate EBR columns from existing induced target representations."""
 
-    catalog = _catalog_in_context_setting(context, catalog)
-    _validate_catalog_context(context, catalog)
-    definition = context.model.group_definition
-    if definition is None:
-        raise ValueError("Dynamic EBR generation requires a resolved space-group definition.")
-    if any(operation.antiunitary for operation in context.model.group.operations):
-        raise NotImplementedError(
-            "EBR catalogs for magnetic corepresentations are not implemented."
-        )
-    point_data = []
-    row_keys = []
-    for point in catalog.k_points:
-        elements = little_group(context.model.group, point.k_fractional)
-        operation_indices = tuple(element.operation_index for element in elements)
-        resolved = definition.resolve_little_group(
-            operation_indices,
-            point.k_fractional,
-            bloch_convention=context.model.bloch_convention,
-        )
-        irreps = resolved.require_irreps()
-        point_data.append((point, operation_indices, resolved, irreps))
-        row_keys.extend(SymmetryVectorKey(point.name, irrep.name) for irrep in irreps)
+    return EBRMatrixBuilder(
+        context,
+        catalog,
+        lattice_vectors=lattice_vectors,
+    ).build()
 
-    columns = []
-    dimensions = []
-    values = np.zeros((len(row_keys), len(catalog.ebrs)), dtype=np.int64)
-    row_positions = {key: index for index, key in enumerate(row_keys)}
-    for column_index, ebr in enumerate(catalog.ebrs):
-        orbit = build_crystallographic_orbit(context.model.group, ebr.center)
+
+class EBRMatrixBuilder:
+    """Run-scoped cache for dynamic EBR target and little-group construction."""
+
+    def __init__(
+        self,
+        context: SymmetryContext,
+        catalog: EBRCatalog,
+        *,
+        lattice_vectors=None,
+    ) -> None:
+        self.context = context
+        self.catalog = _catalog_in_context_setting(context, catalog)
+        self.lattice_vectors = lattice_vectors
+        _validate_catalog_context(context, self.catalog)
+        self.definition = context.model.group_definition
+        if self.definition is None:
+            raise ValueError(
+                "Dynamic EBR generation requires a resolved space-group definition."
+            )
+        if any(operation.antiunitary for operation in context.model.group.operations):
+            raise NotImplementedError(
+                "EBR catalogs for magnetic corepresentations are not implemented."
+            )
+        self._orbit_cache = {}
+        self._site_irrep_cache = {}
+        self._target_cache = {}
+        self._validated_wyckoff = set()
+        self.point_data, self.row_keys = self._prepare_points()
+        self.row_positions = {
+            key: index for index, key in enumerate(self.row_keys)
+        }
+
+    def _prepare_points(self):
+        point_data = []
+        row_keys = []
+        for point in self.catalog.k_points:
+            elements = little_group(self.context.model.group, point.k_fractional)
+            operation_indices = tuple(
+                element.operation_index for element in elements
+            )
+            resolved = self.definition.resolve_little_group(
+                operation_indices,
+                point.k_fractional,
+                bloch_convention=self.context.model.bloch_convention,
+            )
+            irreps = resolved.require_irreps()
+            point_data.append((point, operation_indices, resolved, irreps))
+            row_keys.extend(
+                SymmetryVectorKey(point.name, irrep.name) for irrep in irreps
+            )
+        return tuple(point_data), tuple(row_keys)
+
+    def _orbit(self, ebr: EBRDefinition):
+        key = tuple(float(value) for value in ebr.center)
+        orbit = self._orbit_cache.get(key)
+        if orbit is None:
+            orbit = build_crystallographic_orbit(
+                self.context.model.group, ebr.center
+            )
+            self._orbit_cache[key] = orbit
         declared_multiplicity = _wyckoff_multiplicity(ebr.wyckoff)
         if declared_multiplicity != orbit.multiplicity:
             raise ValueError(
                 f"EBR {ebr.name!r} declares Wyckoff {ebr.wyckoff!r}, but its center "
                 f"has orbit multiplicity {orbit.multiplicity}."
             )
-        if lattice_vectors is not None and definition.dimension == 3:
-            definition.validate_wyckoff(ebr.wyckoff, ebr.center, lattice_vectors)
+        if self.lattice_vectors is not None and self.definition.dimension == 3:
+            wyckoff_key = (ebr.wyckoff, key)
+            if wyckoff_key not in self._validated_wyckoff:
+                self.definition.validate_wyckoff(
+                    ebr.wyckoff, ebr.center, self.lattice_vectors
+                )
+                self._validated_wyckoff.add(wyckoff_key)
+        return orbit
+
+    def _target(self, ebr: EBRDefinition):
+        orbit = self._orbit(ebr)
         site_indices = tuple(
-            element.source_operation_index for element in orbit.site_symmetry.elements
+            element.source_operation_index
+            for element in orbit.site_symmetry.elements
         )
-        site_irrep = definition.site_irrep(site_indices, ebr.site_irrep)
+        target_key = (
+            tuple(float(value) for value in ebr.center),
+            site_indices,
+            ebr.site_irrep,
+        )
+        cached_target = self._target_cache.get(target_key)
+        if cached_target is not None:
+            return cached_target
+        irrep_key = (site_indices, ebr.site_irrep)
+        site_irrep = self._site_irrep_cache.get(irrep_key)
+        if site_irrep is None:
+            site_irrep = self.definition.site_irrep(
+                site_indices, ebr.site_irrep
+            )
+            self._site_irrep_cache[irrep_key] = site_irrep
         target = build_wannier_target_from_group_irrep(
             ebr.name,
-            context.model.group,
+            self.context.model.group,
             ebr.center,
             site_irrep,
-            context.model.bloch_convention,
+            self.context.model.bloch_convention,
+            orbit=orbit,
         )
-        dimensions.append(target.wannier_dimension)
-        columns.append(ebr)
-        for point, operation_indices, resolved, irreps in point_data:
-            characters = {
-                context.model.group.operations[index].name or f"g{index}": complex(
-                    np.trace(target.matrix(index, point.k_fractional))
-                )
-                for index in operation_indices
-            }
-            decomposition = decompose_little_group_characters(resolved, characters)
-            threshold = max(100.0 * context.model.algebra_tolerance, 1.0e-7)
-            if decomposition.max_residual > threshold:
-                raise ValueError(
-                    f"Generated EBR {ebr.name!r} has a non-integral decomposition at "
-                    f"{point.name!r} (residual={decomposition.max_residual:.6g})."
-                )
-            represented_dimension = 0
-            for irrep in irreps:
-                multiplicity = int(decomposition.multiplicities[irrep.name])
-                if multiplicity < 0:
-                    raise ValueError(
-                        f"Generated EBR {ebr.name!r} has negative multiplicity at {point.name!r}."
+        self._target_cache[target_key] = target
+        return target
+
+    def build(self) -> EBRMatrix:
+        columns = []
+        dimensions = []
+        values = np.zeros(
+            (len(self.row_keys), len(self.catalog.ebrs)), dtype=np.int64
+        )
+        for column_index, ebr in enumerate(self.catalog.ebrs):
+            target = self._target(ebr)
+            dimensions.append(target.wannier_dimension)
+            columns.append(ebr)
+            for point, operation_indices, resolved, irreps in self.point_data:
+                characters = {
+                    self.context.model.group.operations[index].name
+                    or f"g{index}": complex(
+                        np.trace(target.matrix(index, point.k_fractional))
                     )
-                values[row_positions[SymmetryVectorKey(point.name, irrep.name)], column_index] = multiplicity
-                represented_dimension += multiplicity * irrep.dimension
-            if represented_dimension != target.wannier_dimension:
-                raise ValueError(
-                    f"Generated EBR {ebr.name!r} has dimension {represented_dimension} at "
-                    f"{point.name!r}, expected {target.wannier_dimension}."
+                    for index in operation_indices
+                }
+                decomposition = decompose_little_group_characters(
+                    resolved, characters
                 )
-    return EBRMatrix(
-        tuple(row_keys),
-        tuple(columns),
-        values,
-        np.asarray(dimensions, dtype=np.int64),
-    )
+                threshold = max(
+                    100.0 * self.context.model.algebra_tolerance, 1.0e-7
+                )
+                if decomposition.max_residual > threshold:
+                    raise ValueError(
+                        f"Generated EBR {ebr.name!r} has a non-integral decomposition at "
+                        f"{point.name!r} (residual={decomposition.max_residual:.6g})."
+                    )
+                represented_dimension = 0
+                for irrep in irreps:
+                    multiplicity = int(
+                        decomposition.multiplicities[irrep.name]
+                    )
+                    if multiplicity < 0:
+                        raise ValueError(
+                            f"Generated EBR {ebr.name!r} has negative multiplicity "
+                            f"at {point.name!r}."
+                        )
+                    row_key = SymmetryVectorKey(point.name, irrep.name)
+                    values[self.row_positions[row_key], column_index] = multiplicity
+                    represented_dimension += multiplicity * irrep.dimension
+                if represented_dimension != target.wannier_dimension:
+                    raise ValueError(
+                        f"Generated EBR {ebr.name!r} has dimension "
+                        f"{represented_dimension} at {point.name!r}, expected "
+                        f"{target.wannier_dimension}."
+                    )
+        return EBRMatrix(
+            self.row_keys,
+            tuple(columns),
+            values,
+            np.asarray(dimensions, dtype=np.int64),
+        )
 
 
 def run_ebr_analysis(
@@ -444,6 +528,14 @@ def run_ebr_analysis(
                 for enumeration in enumerations
             ),
             algebraic_solutions=algebraic_count,
+            unique_signed_solutions=sum(
+                enumeration.statistics.unique_signed_solutions
+                for enumeration in enumerations
+            ),
+            completion_solutions=sum(
+                enumeration.statistics.completion_solutions
+                for enumeration in enumerations
+            ),
             realizable_candidates=len(candidates),
             block_realization_count=sum(
                 candidate.block_realization_count for candidate in candidates

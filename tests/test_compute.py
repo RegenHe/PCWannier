@@ -1,13 +1,20 @@
 import numpy as np
 import pytest
 from types import SimpleNamespace
+from threading import Lock
 
 from pcwannier import BlochConvention
 from pcwannier.compute.gradient import Gradient
 from pcwannier.compute.context import CalculationContext
 from pcwannier.compute.initializer import StateInitializer
 from pcwannier.compute.matrix import MSet
-from pcwannier.compute.parallel import memory_limited_threads, parallel_map
+from pcwannier.compute.parallel import (
+    ExecutionContext,
+    memory_limited_threads,
+    numba_parallel_allowed,
+    parallel_map,
+    set_numba_parallel_allowed,
+)
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import BandChannelReference, InputBundle, Mesh
 from pcwannier.matrix_io import save_cell_matrix
@@ -302,6 +309,43 @@ def test_memory_limited_threads_respects_request_and_budget():
     assert memory_limited_threads(8, 128, budget_bytes=512) == 4
     assert memory_limited_threads(2, 128, budget_bytes=512) == 2
     assert memory_limited_threads(8, 1024, budget_bytes=512) == 1
+
+
+def test_execution_context_disables_nested_numba_parallelism_in_workers():
+    with ExecutionContext(4):
+        allowed = list(parallel_map(range(16), lambda _: numba_parallel_allowed(), 4))
+    assert allowed == [False] * 16
+
+
+def test_execution_context_assigns_total_budget_to_main_numba_phase():
+    numba = pytest.importorskip("numba")
+    previous_threads = numba.get_num_threads()
+    with ExecutionContext(2):
+        assert not numba_parallel_allowed()
+        previous_policy = set_numba_parallel_allowed(True)
+        assert not previous_policy
+        assert numba_parallel_allowed()
+        assert numba.get_num_threads() == 2
+        set_numba_parallel_allowed(False)
+        assert numba.get_num_threads() == 1
+    assert numba.get_num_threads() == previous_threads
+
+
+def test_execution_context_cancels_tasks_not_started_after_failure():
+    started = []
+    lock = Lock()
+
+    def fail_first(value):
+        with lock:
+            started.append(value)
+        if value == 0:
+            raise RuntimeError("stop")
+        return value
+
+    with pytest.raises(RuntimeError, match="stop"):
+        with ExecutionContext(4):
+            list(parallel_map(range(100), fail_first, 4))
+    assert len(started) <= 4
 
 
 def test_even_kmesh_half_r_set_has_no_inverse_duplicates():

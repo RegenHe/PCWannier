@@ -19,7 +19,7 @@ from pcwannier.projections import (
 from pcwannier.symmetry import cartesian_field_matrix
 from pcwannier.symmetry.bloch import build_bloch_symmetry_action
 import pcwannier.compute.vector_trials as vector_trials_module
-from pcwannier.compute.wannier import generate_wannier
+from pcwannier.compute.wannier import _uniform_grid_wannier_sum, generate_wannier
 
 
 @pytest.mark.parametrize("bloch_sign", [-1, 1])
@@ -325,6 +325,7 @@ def test_sg213_vector_trials_obey_full_nonsymmorphic_bloch_covariance(tmp_path):
         bloch_sign=context.model.bloch_convention.sign,
         maxwell=config.maxwell_problem,
         inner_product=inner_product,
+        configured_threads=1,
     )
     context, _ = vector_trials_module.prepare_vector_trial_targets(state, context)
     state.symmetry = context
@@ -339,6 +340,19 @@ def test_sg213_vector_trials_obey_full_nonsymmorphic_bloch_covariance(tmp_path):
     fft_trials = vector_trials_module.build_vector_bloch_trial_grid(
         state, context=context, workspace_bytes=8 << 20
     )
+    source = vector_trials_module.build_vector_bloch_trial_source(
+        state, context=context, workspace_bytes=8 << 20
+    )
+    streamed = np.empty(shape, dtype=object)
+    for index in np.ndindex(shape):
+        streamed[index] = np.empty_like(fft_trials[index])
+    for start, stop, chunk in source.iter_raw_chunks():
+        for index in np.ndindex(shape):
+            streamed[index][start:stop] = chunk[index]
+    for index in np.ndindex(shape):
+        norms = inner_product.norms(np.swapaxes(streamed[index], 1, 2))
+        streamed[index] /= np.sqrt(norms)[None, :, None]
+        assert np.allclose(streamed[index], fft_trials[index], atol=2.0e-13)
 
     for source_index in ((0, 0, 0), (1, 1, 1)):
         source_k = np.asarray(
@@ -511,7 +525,16 @@ def test_synthetic_3d_vector_projection_to_wannier_and_hopping(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_calculation(load_input(load_config(incar)), threads=1)
+    bundle = load_input(load_config(incar))
+    field_snapshot = {
+        index: np.asarray(bundle.fields[index]).copy()
+        for index in np.ndindex(bundle.fields.shape)
+    }
+    energy_snapshot = np.asarray(bundle.energy_matrix).copy()
+    metric_snapshot = np.asarray(bundle.metric_material).copy()
+
+    result = run_calculation(bundle, threads=1)
+    repeated = run_calculation(bundle, threads=1)
 
     wannier = result.wanniers[(0, 0, 0)]
     assert wannier.shape == (np.prod(shape), 3, 3)
@@ -524,6 +547,11 @@ def test_synthetic_3d_vector_projection_to_wannier_and_hopping(tmp_path):
         result.hoppings[(0, 0, 0)].conj().T,
         atol=1.0e-12,
     )
+    assert np.allclose(repeated.wannier_norms, result.wannier_norms, atol=1.0e-12)
+    assert np.array_equal(bundle.energy_matrix, energy_snapshot)
+    assert np.array_equal(bundle.metric_material, metric_snapshot)
+    for index, expected in field_snapshot.items():
+        assert np.array_equal(bundle.fields[index], expected)
 
 
 def test_synthetic_3d_etbc_completion_runs_full_wannier_pipeline(tmp_path):
@@ -691,3 +719,117 @@ def test_vector_wannier_norms_follow_six_wannier_columns():
     assert values.shape == (point_count, 6, 3)
     assert norms.shape == (6,)
     assert np.allclose(norms, np.ones(6))
+
+
+def test_uniform_grid_wannier_fourier_path_matches_direct_sum():
+    rng = np.random.default_rng(617)
+    mesh = PeriodicGrid((2, 2), np.eye(2))
+    extended = mesh.__deepcopy__()
+    mapping = extended.extension((2, 2), np.eye(2), 1.0)
+    k_points = (np.asarray([-0.5, 0.0]),) * 2
+    k_shape = (2, 2, 1)
+    blocks = {
+        index: rng.normal(size=(2, mesh.point_count, 3))
+        + 1j * rng.normal(size=(2, mesh.point_count, 3))
+        for index in np.ndindex(k_shape)
+    }
+    config = SimpleNamespace(
+        k_points=k_points,
+        kdim=2,
+        band_calc_num=2,
+        extension=(2, 2),
+        real_lattice_vectors=np.eye(2),
+        reciprocal_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
+    )
+
+    def phase(index):
+        k = np.asarray([k_points[axis][index[axis]] for axis in range(2)])
+        return np.exp(2j * np.pi * (mesh.fractional_vertices @ k))
+
+    state = SimpleNamespace(
+        mesh=mesh,
+        extended_mesh=extended,
+        space_to_original_mapping=mapping,
+        bloch_sign=1,
+        k_shape=k_shape,
+        get_block=lambda *index: blocks[tuple(index)],
+        get_phase=lambda *index: phase(tuple(index)),
+    )
+    context = SimpleNamespace(
+        config=config,
+        state=state,
+        output_state_coefficients_at=lambda *_: np.eye(2),
+    )
+    r = [1, -1, 0]
+
+    actual = _uniform_grid_wannier_sum(context, r)
+    expected = np.zeros_like(actual)
+    for point, (fractional, local) in enumerate(
+        zip(extended.fractional_vertices, mapping)
+    ):
+        for index in np.ndindex(k_shape):
+            k = np.asarray([k_points[axis][index[axis]] for axis in range(2)])
+            expected[point] += blocks[index][:, local, :] * np.exp(
+                2j * np.pi * np.dot(k, fractional - np.asarray(r[:2]))
+            )
+    expected /= np.sqrt(4.0 * 4.0)
+
+    assert np.allclose(actual, expected, atol=2.0e-13, rtol=2.0e-13)
+
+
+def test_uniform_grid_scalar_wannier_fourier_path_matches_direct_sum():
+    rng = np.random.default_rng(618)
+    mesh = PeriodicGrid((2, 2), np.eye(2))
+    extended = mesh.__deepcopy__()
+    mapping = extended.extension((2, 2), np.eye(2), 1.0)
+    k_points = (np.asarray([-0.5, 0.0]),) * 2
+    k_shape = (2, 2, 1)
+    blocks = {
+        index: rng.normal(size=(2, mesh.point_count))
+        + 1j * rng.normal(size=(2, mesh.point_count))
+        for index in np.ndindex(k_shape)
+    }
+    config = SimpleNamespace(
+        k_points=k_points,
+        kdim=2,
+        band_calc_num=2,
+        extension=(2, 2),
+        real_lattice_vectors=np.eye(2),
+        reciprocal_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
+    )
+
+    def phase(index):
+        k = np.asarray([k_points[axis][index[axis]] for axis in range(2)])
+        return np.exp(2j * np.pi * (mesh.fractional_vertices @ k))
+
+    state = SimpleNamespace(
+        mesh=mesh,
+        extended_mesh=extended,
+        space_to_original_mapping=mapping,
+        bloch_sign=1,
+        k_shape=k_shape,
+        get_block=lambda *index: blocks[tuple(index)],
+        get_phase=lambda *index: phase(tuple(index)),
+    )
+    context = SimpleNamespace(
+        config=config,
+        state=state,
+        output_state_coefficients_at=lambda *_: np.eye(2),
+    )
+    r = [-1, 1, 0]
+
+    actual = _uniform_grid_wannier_sum(context, r)
+    expected = np.zeros_like(actual)
+    for point, (fractional, local) in enumerate(
+        zip(extended.fractional_vertices, mapping)
+    ):
+        for index in np.ndindex(k_shape):
+            k = np.asarray([k_points[axis][index[axis]] for axis in range(2)])
+            expected[point] += blocks[index][:, local] * np.exp(
+                2j * np.pi * np.dot(k, fractional - np.asarray(r[:2]))
+            )
+    expected /= np.sqrt(4.0 * 4.0)
+
+    assert np.allclose(actual, expected, atol=2.0e-13, rtol=2.0e-13)

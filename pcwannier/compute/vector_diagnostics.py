@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..data import InputBundle, PeriodicGrid
+from .parallel import parallel_map
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ def diagnose_bundle_vector_fields(
     *,
     quantity: str,
     apply_metric: bool = False,
+    threads: int = 1,
 ) -> VectorFieldDifferentialDiagnostics:
     """Evaluate divergence or curl without modifying the loaded MPB fields."""
 
@@ -40,7 +42,9 @@ def diagnose_bundle_vector_fields(
     dimension = bundle.mesh.dimension
     bloch_sign = int(bundle.bloch_convention.sign)
 
-    for index in np.ndindex(bundle.fields.shape):
+    indices = tuple(np.ndindex(bundle.fields.shape))
+
+    def calculate(index):
         block = np.asarray(bundle.fields[index], dtype=np.complex128)
         if block.ndim != 3 or block.shape[1:] != (bundle.mesh.point_count, dimension):
             raise ValueError(
@@ -66,8 +70,21 @@ def diagnose_bundle_vector_fields(
             bloch_sign=bloch_sign,
         )
         local = divergence if quantity == "longitudinal" else curl
-        residual_grid[index] = local
         actual_bands = np.asarray(bundle.band_indices[index], dtype=int)
+        return tuple(int(value) for value in index), local, actual_bands
+
+    sample_bytes = max(
+        int(np.asarray(bundle.fields[indices[0]]).nbytes) * 6,
+        1 << 20,
+    )
+    for index, local, actual_bands in parallel_map(
+        indices,
+        calculate,
+        max(1, int(threads)),
+        ordered=True,
+        bytes_per_task=sample_bytes,
+    ):
+        residual_grid[index] = local
         for local_band, value in enumerate(local):
             scalar = float(value)
             values.append(scalar)

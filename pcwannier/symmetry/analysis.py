@@ -569,18 +569,44 @@ def run_bloch_symmetry_analysis(
     physical_provider = provider or StateBlochSymmetryProvider(
         state, context, field_kind=spec.field_kind
     )
+    from ..compute.parallel import parallel_map
+
+    def analyze(point: RepresentationPointSpec) -> BlochSymmetryPointAnalysis:
+        return _analyze_bloch_point(
+            state,
+            context,
+            physical_provider,
+            point,
+            split_degenerate_blocks=True,
+            leakage_tolerance=spec.leakage_tolerance,
+            character_tolerance=spec.character_tolerance,
+        )
+
+    get_block = getattr(state, "get_block", None)
+    sample_bytes = (
+        max(int(np.asarray(get_block(0, 0, 0)).nbytes) * 4, 1 << 20)
+        if callable(get_block)
+        else 1 << 20
+    )
+    threads = max(
+        1,
+        int(
+            getattr(
+                state,
+                "configured_threads",
+                getattr(getattr(state, "config", None), "threads", 1),
+            )
+        ),
+    )
     return BlochSymmetryAnalysisResult(
         tuple(
-            _analyze_bloch_point(
-                state,
-                context,
-                physical_provider,
-                point,
-                split_degenerate_blocks=True,
-                leakage_tolerance=spec.leakage_tolerance,
-                character_tolerance=spec.character_tolerance,
+            parallel_map(
+                spec.points,
+                analyze,
+                threads,
+                ordered=True,
+                bytes_per_task=sample_bytes,
             )
-            for point in spec.points
         )
     )
 

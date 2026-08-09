@@ -1,23 +1,7 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
-
-
-def blas_thread_limit(worker_threads: int):
-    if int(worker_threads) <= 1:
-        return nullcontext()
-    try:
-        from threadpoolctl import threadpool_limits
-    except Exception:
-        return nullcontext()
-    return threadpool_limits(limits=1)
-
-
 def threadpool_summary() -> str:
-    try:
-        from threadpoolctl import threadpool_info
-    except Exception:
-        return "unavailable (install optional performance extra for BLAS thread info)"
+    from threadpoolctl import threadpool_info
     info = threadpool_info()
     if not info:
         return "none"

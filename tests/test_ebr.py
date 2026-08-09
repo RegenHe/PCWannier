@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from pcwannier.maxwell import FieldKind
-from pcwannier.ebr import (
+from pcwannier.ebr.models import (
     BandSymmetryVector,
     EBRAnalysisResult,
     EBRCatalog,
@@ -18,20 +18,12 @@ from pcwannier.ebr import (
     EBRKPoint,
     EBRMatrix,
     EBRSearchStatistics,
-    EBRSearchLimitError,
     EBRSubspaceCandidate,
     EBRSubspacePointRepresentation,
     SymmetryVectorKey,
     TETBSolution,
-    build_band_symmetry_vector,
-    build_ebr_matrix,
-    decompose_ebr,
-    enumerate_tetb_decompositions,
-    enumerate_ebr_subspace_solutions,
-    load_ebr_catalog,
-    write_ebr_outputs,
 )
-from pcwannier.ebr.catalog import infer_builtin_catalog_alias
+from pcwannier.ebr.catalog import infer_builtin_catalog_alias, load_ebr_catalog
 from pcwannier.ebr.analysis import (
     _build_subspace_inventory,
     _gamma_zero_mode_dimension,
@@ -40,6 +32,15 @@ from pcwannier.ebr.analysis import (
     _resolve_ebr_mode,
     _subspace_gamma_sectors,
     _validate_subspace_fixed_bands,
+    build_band_symmetry_vector,
+    build_ebr_matrix,
+)
+from pcwannier.ebr.output import write_ebr_outputs
+from pcwannier.ebr.solver import (
+    EBRSearchLimitError,
+    decompose_ebr,
+    enumerate_ebr_subspace_solutions,
+    enumerate_tetb_decompositions,
 )
 from pcwannier.symmetry.analysis import (
     BlochSymmetryAnalysisResult,

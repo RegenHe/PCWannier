@@ -10,7 +10,7 @@ from ..data import (
     InputBundle,
     RunResult,
 )
-from ..etbc import complete_transverse_bundle
+from ..etbc.completion import prepare_transverse_bundle
 from ..symmetry.analysis import (
     regularize_gamma_zero_modes,
     run_bloch_symmetry_analysis,
@@ -37,9 +37,9 @@ from .backend import resolve_backend
 from .context import CalculationContext
 from .gradient import Gradient
 from .initializer import StateInitializer
-from .integration import numba_parallel_policy
 from .matrix import MSet
-from .parallel import ParallelExecutor
+from .parallel import ExecutionContext
+from .prepared import PreparedRun
 from .state import StateCollection
 from .subspace_diagnostics import (
     NeighborSubspaceSmoothness,
@@ -47,12 +47,12 @@ from .subspace_diagnostics import (
     selected_sector_smoothness,
 )
 from .tba import TBAModel
-from .threading import blas_thread_limit, threadpool_summary
+from .threading import threadpool_summary
 from .topology import calculate_topology
 from .vector_diagnostics import diagnose_bundle_vector_fields
 from .wannier import generate_wannier
 from .vector_trials import (
-    build_vector_bloch_trial_grid,
+    build_vector_bloch_trial_source,
     prepare_vector_trial_targets,
 )
 
@@ -60,9 +60,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 def run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
-    with blas_thread_limit(threads):
-        with numba_parallel_policy(max(1, int(threads)) <= 1), ParallelExecutor(threads):
-            return _run_calculation(bundle, threads=threads, backend=backend)
+    with ExecutionContext(threads):
+        return _run_calculation(bundle, threads=threads, backend=backend)
 
 
 def run_bloch_symmetry_preanalysis(
@@ -77,57 +76,56 @@ def run_bloch_symmetry_preanalysis(
         raise ValueError(
             "Bloch symmetry preanalysis requires symmetry_file and representation_analysis."
         )
-    with blas_thread_limit(threads):
-        with numba_parallel_policy(max(1, int(threads)) <= 1), ParallelExecutor(threads):
-            resolved_backend = resolve_backend(backend or bundle.config.compute_backend)
-            physical = _analyze_bundle_channel(
-                bundle,
+    with ExecutionContext(threads):
+        resolved_backend = resolve_backend(backend or bundle.config.compute_backend)
+        physical = _analyze_bundle_channel(
+            bundle,
+            threads=threads,
+            resolved_backend=resolved_backend,
+            channel_name="physical",
+        )
+        auxiliary_channels = {}
+        for channel_name, load_auxiliary in bundle.auxiliary_bundle_loaders.items():
+            auxiliary = load_auxiliary()
+            auxiliary_channels[channel_name] = _analyze_bundle_channel(
+                auxiliary,
                 threads=threads,
                 resolved_backend=resolved_backend,
-                channel_name="physical",
+                channel_name=channel_name,
             )
-            auxiliary_channels = {}
-            for channel_name, load_auxiliary in bundle.auxiliary_bundle_loaders.items():
-                auxiliary = load_auxiliary()
-                auxiliary_channels[channel_name] = _analyze_bundle_channel(
-                    auxiliary,
-                    threads=threads,
-                    resolved_backend=resolved_backend,
-                    channel_name=channel_name,
-                )
-                del auxiliary
-            gamma_regularization = None
-            if bundle.config.gamma_zero_regularization:
-                longitudinal_zero_bands = bundle.auxiliary_zero_mode_bands.get(
-                    "longitudinal"
-                )
-                if longitudinal_zero_bands is None:
-                    raise ValueError(
-                        "Gamma zero regularization requires longitudinal zero-mode metadata."
-                    )
-                gamma_point = physical.analysis.point("Gamma")
-                storage_index = tuple(gamma_point.k_index) + (0,) * (
-                    3 - len(gamma_point.k_index)
-                )
-                longitudinal_bands = np.asarray(
-                    longitudinal_zero_bands[storage_index], dtype=int
-                )
-                physical.analysis, gamma_regularization = regularize_gamma_zero_modes(
-                    physical.analysis,
-                    bundle.symmetry,
-                    tuple(int(value) for value in longitudinal_bands),
-                    bundle.config.real_lattice_vectors,
-                    energy_tolerance=bundle.config.gamma_zero_mode_tolerance,
-                )
-                log_gamma_zero_regularization(gamma_regularization)
-            return BlochSymmetryRunResult(
-                config=bundle.config,
-                symmetry=bundle.symmetry,
-                primary=physical,
-                auxiliary_channels=auxiliary_channels,
-                gamma_zero_regularization=gamma_regularization,
-                band_channels=dict(bundle.band_channels),
+            del auxiliary
+        gamma_regularization = None
+        if bundle.config.gamma_zero_regularization:
+            longitudinal_zero_bands = bundle.auxiliary_zero_mode_bands.get(
+                "longitudinal"
             )
+            if longitudinal_zero_bands is None:
+                raise ValueError(
+                    "Gamma zero regularization requires longitudinal zero-mode metadata."
+                )
+            gamma_point = physical.analysis.point("Gamma")
+            storage_index = tuple(gamma_point.k_index) + (0,) * (
+                3 - len(gamma_point.k_index)
+            )
+            longitudinal_bands = np.asarray(
+                longitudinal_zero_bands[storage_index], dtype=int
+            )
+            physical.analysis, gamma_regularization = regularize_gamma_zero_modes(
+                physical.analysis,
+                bundle.symmetry,
+                tuple(int(value) for value in longitudinal_bands),
+                bundle.config.real_lattice_vectors,
+                energy_tolerance=bundle.config.gamma_zero_mode_tolerance,
+            )
+            log_gamma_zero_regularization(gamma_regularization)
+        return BlochSymmetryRunResult(
+            config=bundle.config,
+            symmetry=bundle.symmetry,
+            primary=physical,
+            auxiliary_channels=auxiliary_channels,
+            gamma_zero_regularization=gamma_regularization,
+            band_channels=dict(bundle.band_channels),
+        )
 
 
 def _analyze_bundle_channel(
@@ -170,6 +168,7 @@ def _analyze_bundle_channel(
             bundle,
             quantity=quantity,
             apply_metric=is_electric and quantity == "longitudinal",
+            threads=threads,
         )
         LOGGER.info(
             "Vector-field diagnostic: channel=%s quantity=%s max=%.6g mean=%.6g "
@@ -265,6 +264,84 @@ def _prepare_state(
     return state, report
 
 
+def _prepare_wannier_run(
+    bundle: InputBundle,
+    *,
+    threads: int,
+    resolved_backend: str,
+) -> PreparedRun:
+    """Prepare immutable run inputs before symmetry and localization stages."""
+
+    config = bundle.config
+    etbc_enabled = (
+        config.wannier_subspace == "T+L"
+        and config.longitudinal_source == "etbc"
+    )
+    state, report = _prepare_state(
+        bundle,
+        threads=threads,
+        resolved_backend=resolved_backend,
+        use_overlap_cache=not etbc_enabled,
+    )
+    trial_covariance_diagnostics = ()
+    if config.projection_target_bindings:
+        if bundle.symmetry is None:
+            raise ValueError("Three-dimensional vector projections require symmetry_file.")
+        prepared_symmetry, trial_covariance_diagnostics = prepare_vector_trial_targets(
+            state, bundle.symmetry
+        )
+        bundle = replace(bundle, symmetry=prepared_symmetry)
+        state.symmetry = prepared_symmetry
+
+    etbc_result = None
+    projection_seed = None
+    if etbc_enabled:
+        with timed_step(
+            "construct ETBC auxiliary modes",
+            LOGGER,
+            rank_tolerance=config.etbc_rank_tolerance,
+            auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
+        ):
+            trial_source = build_vector_bloch_trial_source(
+                state, context=bundle.symmetry
+            )
+            etbc_artifacts = prepare_transverse_bundle(
+                state,
+                trial_source,
+                auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
+                rank_tolerance=config.etbc_rank_tolerance,
+            )
+            del trial_source
+        etbc_result = etbc_artifacts.result
+        bundle = etbc_artifacts.augmented_bundle
+        projection_seed = etbc_artifacts.projection_seed
+        state, report = _prepare_state(
+            bundle,
+            threads=threads,
+            resolved_backend=resolved_backend,
+        )
+        del etbc_artifacts
+        LOGGER.info(
+            "ETBC completion: N_T=%s N_L=%s N_W=%s min_nonzero_singular=%s "
+            "max_TL_overlap=%.6g max_augmented_gram=%.6g gamma_regularized=%s",
+            etbc_result.transverse_dimension,
+            etbc_result.auxiliary_dimension,
+            etbc_result.wannier_dimension,
+            etbc_result.minimum_nonzero_singular_value,
+            etbc_result.maximum_transverse_auxiliary_overlap,
+            etbc_result.maximum_augmented_orthonormality_error,
+            etbc_result.gamma_regularized_indices,
+        )
+    return PreparedRun(
+        bundle=bundle,
+        state=state,
+        orthogonality_report=report,
+        projection_seed=projection_seed,
+        etbc=etbc_result,
+        trial_covariance_diagnostics=tuple(trial_covariance_diagnostics),
+    )
+
+
 def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
     config = bundle.config
     if int(config.kdim) == 3:
@@ -299,73 +376,17 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         bundle.mesh.vertices.shape[0],
         bundle.mesh.elements.shape[0],
     )
-    etbc_enabled = (
-        config.wannier_subspace == "T+L"
-        and config.longitudinal_source == "etbc"
-    )
-    state, report = _prepare_state(
+    prepared = _prepare_wannier_run(
         bundle,
         threads=threads,
         resolved_backend=resolved_backend,
-        use_overlap_cache=not etbc_enabled,
     )
-    trial_covariance_diagnostics = ()
-    if config.projection_target_bindings:
-        if bundle.symmetry is None:
-            raise ValueError("Three-dimensional vector projections require symmetry_file.")
-        bundle.symmetry, trial_covariance_diagnostics = prepare_vector_trial_targets(
-            state, bundle.symmetry
-        )
-        state.symmetry = bundle.symmetry
-    etbc_result = None
-    if etbc_enabled:
-        with timed_step(
-            "construct ETBC auxiliary modes",
-            LOGGER,
-            rank_tolerance=config.etbc_rank_tolerance,
-            auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
-        ):
-            trial_grid = build_vector_bloch_trial_grid(
-                state, context=bundle.symmetry
-            )
-
-            def take_trial(index):
-                values = trial_grid[index]
-                if values is None:
-                    raise RuntimeError(
-                        f"ETBC trial frame at k={index} was requested more than once."
-                    )
-                trial_grid[index] = None
-                return values
-
-            try:
-                etbc_result = complete_transverse_bundle(
-                    state,
-                    take_trial,
-                    auxiliary_eigenvalue=config.etbc_auxiliary_eigenvalue,
-                    rank_tolerance=config.etbc_rank_tolerance,
-                )
-            finally:
-                del trial_grid
-        bundle = etbc_result.augmented_bundle
-        state, report = _prepare_state(
-            bundle,
-            threads=threads,
-            resolved_backend=resolved_backend,
-        )
-        state._precomputed_vector_projection = etbc_result.trial_projection_matrices
-        finite_singular = etbc_result.minimum_nonzero_singular_value
-        LOGGER.info(
-            "ETBC completion: N_T=%s N_L=%s N_W=%s min_nonzero_singular=%s "
-            "max_TL_overlap=%.6g max_augmented_gram=%.6g gamma_regularized=%s",
-            etbc_result.transverse_dimension,
-            etbc_result.auxiliary_dimension,
-            etbc_result.wannier_dimension,
-            finite_singular,
-            etbc_result.maximum_transverse_auxiliary_overlap,
-            etbc_result.maximum_augmented_orthonormality_error,
-            etbc_result.gamma_regularized_indices,
-        )
+    bundle = prepared.bundle
+    state = prepared.state
+    report = prepared.orthogonality_report
+    projection_seed = prepared.projection_seed
+    etbc_result = prepared.etbc
+    trial_covariance_diagnostics = prepared.trial_covariance_diagnostics
     symmetry_analysis = None
     symmetry_provider = None
     if bundle.symmetry is not None and (
@@ -383,6 +404,18 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 state, bundle.symmetry, provider=symmetry_provider
             )
         log_symmetry_analysis(symmetry_analysis)
+    if (
+        projection_seed is None
+        and config.projection_target_bindings
+        and getattr(state.inner_product, "domain_kind", None) == "points"
+    ):
+        with timed_step("prepare streaming vector projection", LOGGER):
+            trial_source = build_vector_bloch_trial_source(
+                state, context=bundle.symmetry
+            )
+            projection_seed = trial_source.projection_seed()
+            del trial_source
+        prepared = replace(prepared, projection_seed=projection_seed)
     with timed_step("extend mesh", LOGGER, extension=config.extension):
         state.extend(config.extension)
     LOGGER.info(
@@ -408,7 +441,12 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 "subspace by disentanglement."
             ),
         )
-    initializer = StateInitializer(state, mset, threads=threads)
+    initializer = StateInitializer(
+        state,
+        mset,
+        threads=threads,
+        projection_seed=projection_seed,
+    )
     if config.symmetry_constrained:
         with timed_step("projection initialization", LOGGER):
             initializer.prepare()

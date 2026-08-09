@@ -7,9 +7,11 @@ import numpy as np
 
 from ..conventions import BlochFieldRepresentation
 from ..compute.parallel import memory_limited_threads, parallel_map
+from ..compute.prepared import ProjectionSeed
 from ..data import BandChannelReference, InputBundle
 from .models import (
     ETBCCompletionResult,
+    ETBCCompletionArtifacts,
     ETBCKPointDiagnostics,
     ETBCKPointResult,
 )
@@ -317,14 +319,422 @@ def _gamma_augmented_frame(
     )
 
 
-def complete_transverse_bundle(
+def _streaming_internal_chunk(physical_state, index, start: int, stop: int):
+    block = physical_state.get_block(*index)[:, start:stop]
+    transform = np.asarray(
+        physical_state.get_transform(False)[index], dtype=np.complex128
+    )
+    if block.ndim != 3:
+        raise ValueError("Streaming ETBC requires three-component vector fields.")
+    periodic = np.einsum("npc,ni->ipc", block, transform, optimize=True)
+    phase = physical_state.get_phase(*index)[start:stop]
+    return periodic, periodic * phase[None, :, None]
+
+
+def _complete_transverse_bundle_streaming(
+    physical_state,
+    trial_source,
+    *,
+    auxiliary_eigenvalue: float,
+    rank_tolerance: float,
+) -> ETBCCompletionArtifacts:
+    """Two-pass ETBC completion without retaining the full trial k-grid."""
+
+    config = physical_state.config
+    indices = tuple(physical_state.k_indices())
+    counts = [len(physical_state.E_idx[index]) for index in indices]
+    if not counts or min(counts) != max(counts):
+        raise ValueError(
+            "ETBC requires the same isolated transverse-band dimension at every k point."
+        )
+    n_t = int(counts[0])
+    n_w = int(trial_source.trial_count)
+    n_l = n_w - n_t
+    if n_w != int(config.band_calc_num) or n_t <= 0 or n_l <= 0:
+        raise ValueError(f"ETBC requires N_W>N_T>0; got N_T={n_t}, N_W={n_w}.")
+    inner = physical_state.inner_product
+    if getattr(inner, "domain_kind", None) != "points":
+        raise TypeError("Streaming ETBC currently requires a uniform-grid inner product.")
+    metric = np.asarray(inner.metric, dtype=np.complex128).reshape(-1)
+    if np.max(np.abs(metric.imag), initial=0.0) > 1.0e-12:
+        raise ValueError("Streaming ETBC requires a real metric material.")
+    point_weight = float(inner.point_weight)
+
+    raw_grams = {
+        index: np.zeros((n_w, n_w), dtype=np.complex128) for index in indices
+    }
+    raw_cross = {
+        index: np.zeros((n_t, n_w), dtype=np.complex128) for index in indices
+    }
+    transverse_grams = {
+        index: np.zeros((n_t, n_t), dtype=np.complex128) for index in indices
+    }
+    gamma_indices = {
+        index
+        for index in indices
+        if _is_gamma(config, index)
+        and np.any(
+            np.abs(np.asarray(physical_state.E[index], dtype=float))
+            <= float(config.gamma_zero_mode_tolerance)
+        )
+    }
+    gamma_trials = {
+        index: np.empty((n_w, trial_source.point_count, 3), dtype=np.complex128)
+        for index in gamma_indices
+    }
+
+    for start, stop, trial_chunk in trial_source.iter_raw_chunks():
+        weights = metric.real[start:stop] * point_weight
+        for index in indices:
+            trials = np.asarray(trial_chunk[index], dtype=np.complex128)
+            _, transverse = _streaming_internal_chunk(
+                physical_state, index, start, stop
+            )
+            raw_grams[index] += np.einsum(
+                "pic,pjc,p->ij",
+                trials.conj(),
+                trials,
+                weights,
+                optimize=True,
+            )
+            raw_cross[index] += np.einsum(
+                "tpc,pic,p->ti",
+                transverse.conj(),
+                trials,
+                weights,
+                optimize=True,
+            )
+            transverse_grams[index] += np.einsum(
+                "tpc,upc,p->tu",
+                transverse.conj(),
+                transverse,
+                weights,
+                optimize=True,
+            )
+            if index in gamma_trials:
+                gamma_trials[index][:, start:stop, :] = np.swapaxes(
+                    trials, 0, 1
+                )
+
+    coefficients = {}
+    projections = np.empty(physical_state.k_shape, dtype=object)
+    singular_by_k = {}
+    trial_eigenvalues_by_k = {}
+    diagnostics_by_k = {}
+    gamma_augmented = {}
+    gamma_hamiltonians = {}
+    gamma_regularized = []
+    algebra_tolerance = max(1.0e-8, 100.0 * float(rank_tolerance))
+
+    for index in indices:
+        gram_raw = _hermitian(raw_grams[index])
+        raw_norms = np.real(np.diag(gram_raw))
+        if np.any(~np.isfinite(raw_norms)) or np.any(raw_norms <= 0.0):
+            raise ValueError(
+                f"ETBC trial frame at k={index} has invalid norms {raw_norms.tolist()}."
+            )
+        normalization = np.diag(1.0 / np.sqrt(raw_norms))
+        gram = _hermitian(normalization @ gram_raw @ normalization)
+        trial_eigenvalues, trial_vectors = np.linalg.eigh(gram)
+        scale = max(float(np.max(trial_eigenvalues)), np.finfo(float).tiny)
+        threshold = float(rank_tolerance) * scale
+        if float(np.min(trial_eigenvalues)) <= threshold:
+            raise ValueError(
+                f"ETBC trial frame at k={index} is rank deficient: "
+                f"eigenvalues={trial_eigenvalues.tolist()}, threshold={threshold:.6g}."
+            )
+        lowdin = trial_vectors @ np.diag(
+            1.0 / np.sqrt(trial_eigenvalues)
+        ) @ trial_vectors.conj().T
+        orthogonalizer = normalization @ lowdin
+        overlap = raw_cross[index] @ orthogonalizer
+        _, singular_values, vh = np.linalg.svd(overlap, full_matrices=True)
+        largest = max(float(singular_values[0]), np.finfo(float).tiny)
+        rank = int(
+            np.count_nonzero(singular_values > float(rank_tolerance) * largest)
+        )
+        if index not in gamma_indices and rank != n_t:
+            raise ValueError(
+                f"ETBC transverse/trial overlap at k={index} has rank {rank}, "
+                f"expected {n_t}; singular_values={singular_values.tolist()}."
+            )
+        transverse_error = float(
+            np.linalg.norm(
+                _hermitian(transverse_grams[index]) - np.eye(n_t), ord="fro"
+            )
+        )
+        if transverse_error > algebra_tolerance:
+            raise ValueError(
+                "ETBC requires an orthonormal physical transverse frame; "
+                f"k={index}, residual={transverse_error:.6g}."
+            )
+        physical_energies = np.asarray(physical_state.E[index], dtype=float)
+        transform = np.asarray(
+            physical_state.get_transform(False)[index], dtype=np.complex128
+        )
+        h_transverse = transform.conj().T @ np.diag(physical_energies) @ transform
+        zero_positions = np.flatnonzero(
+            np.abs(physical_energies) <= float(config.gamma_zero_mode_tolerance)
+        )
+        if index in gamma_indices:
+            normalized_trials = _mix_fields(
+                gamma_trials[index], normalization
+            )
+            orthogonal_trials = _mix_fields(normalized_trials, lowdin)
+            transverse_full = physical_state.get_internal_block(
+                *index, full_bloch=True
+            )
+            augmented, h_augmented, errors = _gamma_augmented_frame(
+                transverse_full,
+                orthogonal_trials,
+                h_transverse,
+                zero_positions,
+                inner,
+                auxiliary_dimension=n_l,
+                auxiliary_eigenvalue=auxiliary_eigenvalue,
+                rank_tolerance=rank_tolerance,
+                zero_tolerance=float(config.gamma_zero_mode_tolerance),
+            )
+            gamma_augmented[index] = augmented
+            gamma_hamiltonians[index] = h_augmented
+            projections[index] = inner.overlap(
+                augmented, normalized_trials, chunk_size=64
+            )
+            gamma_regularized.append(index)
+            auxiliary_error, cross_error, augmented_error = errors
+            singular_tuple = ()
+            coefficients[index] = None
+        else:
+            if _is_gamma(config, index) and zero_positions.size not in {0, 2}:
+                raise ValueError(
+                    "ETBC Gamma point contains an unsupported number of selected "
+                    f"zero modes: {zero_positions.tolist()}."
+                )
+            y_l = _canonicalize_nullspace(vh.conj().T[:, n_t:])
+            auxiliary_coefficients = orthogonalizer @ y_l
+            coefficients[index] = auxiliary_coefficients
+            auxiliary_gram = _hermitian(
+                auxiliary_coefficients.conj().T
+                @ gram_raw
+                @ auxiliary_coefficients
+            )
+            cross = raw_cross[index] @ auxiliary_coefficients
+            augmented_gram = np.block(
+                [
+                    [transverse_grams[index], cross],
+                    [cross.conj().T, auxiliary_gram],
+                ]
+            )
+            auxiliary_error = float(
+                np.linalg.norm(auxiliary_gram - np.eye(n_l), ord="fro")
+            )
+            cross_error = float(np.linalg.norm(cross, ord="fro"))
+            augmented_error = float(
+                np.linalg.norm(augmented_gram - np.eye(n_w), ord="fro")
+            )
+            if max(auxiliary_error, cross_error, augmented_error) > algebra_tolerance:
+                raise ValueError(
+                    f"ETBC constructed an invalid frame at k={index}: "
+                    f"auxiliary={auxiliary_error:.6g}, cross={cross_error:.6g}, "
+                    f"augmented={augmented_error:.6g}."
+                )
+            normalized_right = gram_raw @ normalization
+            projections[index] = np.concatenate(
+                (
+                    raw_cross[index] @ normalization,
+                    auxiliary_coefficients.conj().T @ normalized_right,
+                ),
+                axis=0,
+            )
+            singular_tuple = tuple(float(value) for value in singular_values)
+            gamma_hamiltonians[index] = np.block(
+                [
+                    [h_transverse, np.zeros((n_t, n_l), dtype=np.complex128)],
+                    [
+                        np.zeros((n_l, n_t), dtype=np.complex128),
+                        float(auxiliary_eigenvalue)
+                        * np.eye(n_l, dtype=np.complex128),
+                    ],
+                ]
+            )
+        singular_by_k[index] = singular_tuple
+        trial_eigenvalues_by_k[index] = tuple(
+            float(value) for value in trial_eigenvalues
+        )
+        diagnostics_by_k[index] = (
+            transverse_error,
+            auxiliary_error,
+            cross_error,
+            augmented_error,
+        )
+
+    augmented_fields = np.empty(physical_state.k_shape, dtype=object)
+    for index in indices:
+        if index in gamma_augmented:
+            phase = physical_state.get_phase(*index)[None, :, None]
+            augmented_fields[index] = np.ascontiguousarray(
+                gamma_augmented[index] * np.conj(phase)
+            )
+        else:
+            values = np.empty(
+                (n_w, trial_source.point_count, 3), dtype=np.complex128
+            )
+            values[:n_t] = physical_state.get_internal_block(
+                *index, full_bloch=False
+            )
+            augmented_fields[index] = values
+
+    for start, stop, trial_chunk in trial_source.iter_raw_chunks():
+        for index in indices:
+            coefficient = coefficients[index]
+            if coefficient is None:
+                continue
+            auxiliary_full = np.einsum(
+                "pic,il->lpc",
+                np.asarray(trial_chunk[index], dtype=np.complex128),
+                coefficient,
+                optimize=True,
+            )
+            phase = physical_state.get_phase(*index)[start:stop]
+            augmented_fields[index][n_t:, start:stop, :] = (
+                auxiliary_full * np.conj(phase)[None, :, None]
+            )
+
+    augmented_energies = np.empty(physical_state.k_shape, dtype=object)
+    augmented_indices = np.empty(physical_state.k_shape, dtype=object)
+    augmented_inner = np.empty(physical_state.k_shape, dtype=object)
+    augmented_zero = np.empty(physical_state.k_shape, dtype=object)
+    base_hamiltonians = np.empty(physical_state.k_shape, dtype=object)
+    diagnostics = []
+    l_offset = int(np.asarray(physical_state.energy_matrix).shape[-1])
+    for index in indices:
+        direct_gram = _hermitian(
+            inner.overlap(
+                augmented_fields[index], augmented_fields[index], chunk_size=64
+            )
+        )
+        direct_error = float(
+            np.linalg.norm(direct_gram - np.eye(n_w), ord="fro")
+        )
+        old = diagnostics_by_k[index]
+        if direct_error > algebra_tolerance:
+            raise ValueError(
+                f"Streaming ETBC augmented frame at k={index} failed direct Gram "
+                f"validation: residual={direct_error:.6g}."
+            )
+        diagnostics.append(
+            ETBCKPointDiagnostics(
+                tuple(int(value) for value in index),
+                n_t,
+                n_l,
+                singular_by_k[index],
+                trial_eigenvalues_by_k[index],
+                old[0],
+                old[1],
+                old[2],
+                max(old[3], direct_error),
+                index in gamma_indices,
+            )
+        )
+        physical_energies = np.asarray(physical_state.E[index], dtype=float)
+        energies = np.concatenate(
+            (
+                physical_energies,
+                np.full(n_l, float(auxiliary_eigenvalue), dtype=float),
+            )
+        )
+        physical_ids = np.asarray(physical_state.E_idx[index], dtype=int)
+        augmented_energies[index] = energies
+        augmented_indices[index] = np.concatenate(
+            (physical_ids, l_offset + np.arange(n_l, dtype=int))
+        ).tolist()
+        augmented_inner[index] = []
+        augmented_zero[index] = np.abs(energies) <= float(
+            config.gamma_zero_mode_tolerance
+        )
+        base_hamiltonians[index] = _hermitian(gamma_hamiltonians[index])
+
+    energy_matrix = np.concatenate(
+        (
+            np.asarray(physical_state.energy_matrix, dtype=float),
+            np.full(
+                physical_state.k_shape + (n_l,),
+                float(auxiliary_eigenvalue),
+                dtype=float,
+            ),
+        ),
+        axis=-1,
+    )
+    channels = dict(physical_state.band_channels)
+    for index in indices:
+        for actual_band in np.asarray(physical_state.E_idx[index], dtype=int):
+            channels.setdefault(
+                int(actual_band), BandChannelReference("H", int(actual_band))
+            )
+    channels.update(
+        {
+            l_offset + position: BandChannelReference("L", position)
+            for position in range(n_l)
+        }
+    )
+    longitudinal_zero = np.empty(physical_state.k_shape, dtype=object)
+    for index in np.ndindex(physical_state.k_shape):
+        longitudinal_zero[index] = (
+            list(range(n_l))
+            if abs(float(auxiliary_eigenvalue))
+            <= float(config.gamma_zero_mode_tolerance)
+            else []
+        )
+    bundle = InputBundle(
+        config=config,
+        maxwell=physical_state.maxwell,
+        bloch_convention=physical_state.bloch_convention,
+        mesh=physical_state.mesh,
+        fields=augmented_fields,
+        metric_material=physical_state.metric_material,
+        energies=augmented_energies,
+        band_indices=augmented_indices,
+        inner_band_indices=augmented_inner,
+        energy_matrix=energy_matrix,
+        field_representation=BlochFieldRepresentation.PERIODIC_PART,
+        symmetry=physical_state.symmetry,
+        analysis_field_kind=physical_state.maxwell.symmetry_field_kind,
+        zero_modes=augmented_zero,
+        band_channels=channels,
+        auxiliary_zero_mode_bands={"longitudinal": longitudinal_zero},
+        base_hamiltonians=base_hamiltonians,
+    )
+    result = ETBCCompletionResult(
+        n_t,
+        n_l,
+        n_w,
+        float(auxiliary_eigenvalue),
+        tuple(diagnostics),
+        tuple(gamma_regularized),
+    )
+    return ETBCCompletionArtifacts(
+        result=result,
+        augmented_bundle=bundle,
+        projection_seed=ProjectionSeed(projections, source="ETBC trial"),
+    )
+
+
+def prepare_transverse_bundle(
     physical_state,
     trial_provider: Callable[[tuple[int, int, int]], np.ndarray],
     *,
     auxiliary_eigenvalue: float = 0.0,
     rank_tolerance: float = 1.0e-10,
-) -> ETBCCompletionResult:
-    """Complete a fixed isolated transverse band group with trial-space modes."""
+) -> ETBCCompletionArtifacts:
+    """Build run-scoped ETBC artifacts for a fixed transverse band group."""
+
+    if hasattr(trial_provider, "iter_raw_chunks"):
+        return _complete_transverse_bundle_streaming(
+            physical_state,
+            trial_provider,
+            auxiliary_eigenvalue=float(auxiliary_eigenvalue),
+            rank_tolerance=float(rank_tolerance),
+        )
 
     config = physical_state.config
     counts = [len(physical_state.E_idx[index]) for index in physical_state.k_indices()]
@@ -349,7 +759,6 @@ def complete_transverse_bundle(
     augmented_inner = np.empty(k_shape, dtype=object)
     augmented_zero = np.empty(k_shape, dtype=object)
     base_hamiltonians = np.empty(k_shape, dtype=object)
-    nullspaces = np.empty(k_shape, dtype=object)
     projection_matrices = np.empty(k_shape, dtype=object)
     diagnostics: list[ETBCKPointDiagnostics] = []
     gamma_regularized: list[tuple[int, int, int]] = []
@@ -412,7 +821,6 @@ def complete_transverse_bundle(
                 zero_tolerance=zero_tolerance,
             )
             singular_values: tuple[float, ...] = ()
-            nullspace = None
             auxiliary_error, cross_error, augmented_error = errors
             diagnostic = ETBCKPointDiagnostics(
                 tuple(int(value) for value in index),
@@ -444,7 +852,6 @@ def complete_transverse_bundle(
             h_augmented = np.zeros((n_w, n_w), dtype=np.complex128)
             h_augmented[:n_t, :n_t] = h_transverse
             h_augmented[n_t:, n_t:] = float(auxiliary_eigenvalue) * np.eye(n_l)
-            nullspace = result.nullspace_coefficients
             diagnostic = ETBCKPointDiagnostics(
                 tuple(int(value) for value in index),
                 n_t,
@@ -487,7 +894,6 @@ def complete_transverse_bundle(
             band_indices,
             zero_modes,
             _hermitian(h_augmented),
-            nullspace,
             diagnostic,
             gamma_special,
             projection,
@@ -500,7 +906,6 @@ def complete_transverse_bundle(
         band_indices,
         zero_modes,
         h_augmented,
-        nullspace,
         diagnostic,
         gamma_special,
         projection,
@@ -511,7 +916,6 @@ def complete_transverse_bundle(
         augmented_inner[index] = []
         augmented_zero[index] = zero_modes
         base_hamiltonians[index] = h_augmented
-        nullspaces[index] = nullspace
         projection_matrices[index] = projection
         diagnostics.append(diagnostic)
         if gamma_special:
@@ -565,14 +969,41 @@ def complete_transverse_bundle(
         auxiliary_zero_mode_bands={"longitudinal": longitudinal_zero},
         base_hamiltonians=base_hamiltonians,
     )
-    return ETBCCompletionResult(
-        bundle,
+    result = ETBCCompletionResult(
         n_t,
         n_l,
         n_w,
         float(auxiliary_eigenvalue),
         tuple(diagnostics),
-        nullspaces,
-        projection_matrices,
         tuple(gamma_regularized),
     )
+    return ETBCCompletionArtifacts(
+        result=result,
+        augmented_bundle=bundle,
+        projection_seed=ProjectionSeed(
+            projection_matrices,
+            source="ETBC trial",
+        ),
+    )
+
+
+def complete_transverse_bundle(
+    physical_state,
+    trial_provider: Callable[[tuple[int, int, int]], np.ndarray],
+    *,
+    auxiliary_eigenvalue: float = 0.0,
+    rank_tolerance: float = 1.0e-10,
+) -> ETBCCompletionResult:
+    """Complete a transverse bundle and return persistent diagnostics only.
+
+    Augmented fields and the projection seed are run-scoped artifacts. The
+    calculation runner imports :func:`prepare_transverse_bundle` from this
+    concrete module and releases those large arrays after initialization.
+    """
+
+    return prepare_transverse_bundle(
+        physical_state,
+        trial_provider,
+        auxiliary_eigenvalue=auxiliary_eigenvalue,
+        rank_tolerance=rank_tolerance,
+    ).result

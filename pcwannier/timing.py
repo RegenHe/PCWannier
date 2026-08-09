@@ -35,6 +35,21 @@ def _format_details(details: dict) -> str:
 
 
 def _format_memory_delta(start, end) -> str:
-    if start.rss_mb is None or end.rss_mb is None:
+    parts = []
+    if start.rss_mb is not None and end.rss_mb is not None:
+        parts.extend(
+            (
+                f"rss_delta={end.rss_mb - start.rss_mb:+.1f} MB",
+                f"rss={end.rss_mb:.1f} MB",
+            )
+        )
+    if start.peak_rss_mb is not None and end.peak_rss_mb is not None:
+        parts.extend(
+            (
+                f"peak_delta={end.peak_rss_mb - start.peak_rss_mb:+.1f} MB",
+                f"peak_rss={end.peak_rss_mb:.1f} MB",
+            )
+        )
+    if not parts:
         return ""
-    return f" (rss_delta={end.rss_mb - start.rss_mb:+.1f} MB, rss={end.rss_mb:.1f} MB)"
+    return " (" + ", ".join(parts) + ")"

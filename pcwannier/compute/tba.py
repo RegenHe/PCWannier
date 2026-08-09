@@ -389,11 +389,7 @@ class TBAModel:
         output = np.linalg.eigvalsh(self._hermitian_batch(projected))
         errors = np.max(np.abs(output - raw), axis=1)
         worst = int(np.argmax(errors))
-        basis = (
-            self.config.symmetry_output_basis
-            if self.config.symmetry_constrained
-            else ("fem" if self.config.disable_orth else "strict")
-        )
+        basis = self.config.output_basis
         return OutputSpectrumDiagnostics(
             basis,
             float(errors[worst]),

@@ -32,9 +32,6 @@ class CalculationContext:
 
     def output_state_coefficients_at(self, i: int, j: int, k: int):
         """Coefficients used for final Wannier and tight-binding outputs."""
-        if bool(self.config.symmetry_constrained) and self.symmetry_gauge is not None:
-            fem_output = self.config.symmetry_output_basis == "fem"
-        else:
-            fem_output = bool(self.config.disable_orth)
+        fem_output = self.config.output_basis == "fem"
         transform = self.state.get_transform(fem_output)
         return transform[i, j, k] @ self.bloch_gauge_at(i, j, k)

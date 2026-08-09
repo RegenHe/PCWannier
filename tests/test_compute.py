@@ -47,9 +47,7 @@ def test_calculation_context_separates_internal_and_output_coefficients():
     mat_v[0, 0, 0] = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
     mat_u[0, 0, 0] = np.eye(2, dtype=np.complex128)
     config = SimpleNamespace(
-        symmetry_constrained=True,
-        symmetry_output_basis="strict",
-        disable_orth=True,
+        output_basis="strict",
     )
     ctx = CalculationContext(
         config,
@@ -64,14 +62,11 @@ def test_calculation_context_separates_internal_and_output_coefficients():
     assert np.allclose(ctx.internal_state_coefficients_at(0, 0, 0), correction @ gauge)
     assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), correction @ gauge)
 
-    config.symmetry_output_basis = "fem"
+    config.output_basis = "fem"
     assert np.allclose(ctx.internal_state_coefficients_at(0, 0, 0), correction @ gauge)
     assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), gauge)
 
-    config.symmetry_constrained = False
-    config.disable_orth = True
-    assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), gauge)
-    config.disable_orth = False
+    config.output_basis = "strict"
     assert np.allclose(ctx.output_state_coefficients_at(0, 0, 0), correction @ gauge)
 
 
@@ -831,8 +826,7 @@ def _synthetic_spectrum_model(raw_energies, projected_hamiltonian, basis):
     config = SimpleNamespace(
         band_calc_num=len(raw_energies),
         symmetry_constrained=True,
-        symmetry_output_basis=basis,
-        disable_orth=True,
+        output_basis=basis,
         representation_degeneracy_absolute=1.0e-8,
         representation_degeneracy_relative=1.0e-10,
     )

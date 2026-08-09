@@ -349,7 +349,7 @@ def _config(base_dir: Path):
         compute_backend="python",
         symmetry_context=None,
         symmetry_constrained=False,
-        symmetry_output_basis="strict",
+        output_basis="strict",
         use_cached_data=[],
         mesh_file="mesh.mphtxt",
         M_file="M.txt",

@@ -247,20 +247,12 @@ def _prepare_state(
             report, need_orth = state.check_orthogonality()
         if need_orth:
             raise RuntimeError("Orthogonalization failed.")
-        if config.symmetry_constrained:
+        if config.output_basis == "fem":
             fem_report, _ = state.check_orthogonality(apply_transform=False)
             LOGGER.info(
-                "Orthogonalization mode: strict internally, symmetry output basis=%s; "
+                "Orthogonalization mode: strict internally, output basis=%s; "
                 "FEM-normalized basis max_diag_err=%.6g max_offdiag=%.6g",
-                config.symmetry_output_basis,
-                float(np.max(fem_report[..., 1])),
-                float(np.max(fem_report[..., 2])),
-            )
-        elif config.disable_orth:
-            fem_report, _ = state.check_orthogonality(apply_transform=False)
-            LOGGER.info(
-                "Orthogonalization mode: mixed (strict internally, FEM-normalized output); "
-                "output max_diag_err=%.6g max_offdiag=%.6g",
+                config.output_basis,
                 float(np.max(fem_report[..., 1])),
                 float(np.max(fem_report[..., 2])),
             )
@@ -538,6 +530,23 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                     projector_tolerance=disentangle_projector_tolerance,
                 )
             initializer.matV = symmetry_disentanglement.optimal_frame
+            # Souza subspace iteration fixes the projector but leaves an
+            # arbitrary frame inside it.  Re-align that frame to the trial
+            # orbitals before MV localization, then restore the exact target
+            # representation on each symmetry star.  The ordinary
+            # disentanglement path performs the same projection alignment.
+            initializer.align_to_projection()
+            symmetry_gauge = construct_symmetry_gauge(
+                state,
+                bundle.symmetry,
+                initializer.matV,
+                threads=threads,
+                tolerance=gauge_spec.tolerance,
+                max_iterations=gauge_spec.max_iterations,
+                svd_relative_tolerance=gauge_spec.svd_relative_tolerance,
+                provider=symmetry_provider,
+            )
+            initializer.matV = symmetry_gauge.gauge
             gauge_residuals = evaluate_symmetry_gauge(
                 state,
                 bundle.symmetry,
@@ -583,26 +592,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         )
         _log_symmetry_gauge(symmetry_gauge)
         _log_symmetry_localization(symmetry_localization)
-        LOGGER.info("Symmetry-constrained output basis: %s", config.symmetry_output_basis)
-        if (
-            config.symmetry_output_basis == "strict"
-            and config.disable_orth
-            and state.is_orthogonalized
-        ):
-            LOGGER.warning(
-                "disable_orth=true is overridden by symmetry_output_basis=strict; final Wannier/TBA "
-                "outputs include the non-unitary orthogonalization correction. Set "
-                "symmetry_output_basis=fem to preserve the normalized FEM spectrum."
-            )
-        elif (
-            config.symmetry_output_basis == "fem"
-            and not config.disable_orth
-            and state.is_orthogonalized
-        ):
-            LOGGER.warning(
-                "symmetry_output_basis=fem overrides disable_orth=false for final Wannier/TBA outputs; "
-                "internal symmetry calculations remain strictly orthonormalized."
-            )
+        LOGGER.info("Symmetry-constrained output basis: %s", config.output_basis)
     else:
         with timed_step("gradient optimization", LOGGER, max_iter=config.max_iter, epsilon=config.epsilon):
             gradient.iter(config.err_diff, config.max_iter, config.epsilon)
@@ -635,7 +625,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
             bundle.symmetry.model.targets,
         )
     if symmetry_gauge is not None and gauge_spec.validate_wannier:
-        strict_symmetry_basis = config.symmetry_output_basis == "strict"
+        strict_symmetry_basis = config.output_basis == "strict"
         input_limited_tolerance = max(
             float(gauge_spec.real_space_tolerance),
             float(symmetry_gauge.residuals.max_residual),
@@ -670,7 +660,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         log_wannier_symmetry(
             "Wannier symmetry: basis=%s max_residual=%.6g mean_residual=%.6g "
             "minimum_retained_norm=%.6g requested_tolerance=%.6g effective_tolerance=%.6g%s",
-            config.symmetry_output_basis,
+            config.output_basis,
             validation.max_residual,
             validation.mean_residual,
             validation.minimum_retained_norm,

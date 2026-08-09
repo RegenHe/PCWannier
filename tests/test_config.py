@@ -36,7 +36,7 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.P_file == "./P.txt"
     assert cfg.wannier_subspace == "T"
     assert cfg.invert_longitudinal_energies is False
-    assert cfg.projector_preserving_band_interpolation is True
+    assert cfg.projector_preserving_band_interpolation is False
     assert cfg.symmetry_report_file == "./sym.txt"
     assert cfg.ebr_catalog == "auto"
     assert cfg.ebr_mode == "auto"
@@ -52,7 +52,7 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.maxwell_problem.metric_material == MaterialKind.EPSILON
     assert cfg.maxwell_problem.curl_material == MaterialKind.MU
     assert cfg.symmetry_constrained is True
-    assert cfg.symmetry_output_basis == "strict"
+    assert cfg.output_basis == "fem"
     assert cfg.representation_character_tolerance == pytest.approx(1.0e-2)
     assert cfg.symmetry_context is not None
     assert cfg.symmetry_context.model.symmetry_gauge.enabled
@@ -167,7 +167,7 @@ def test_energy_window_parser(tmp_path):
                 "disentangle_err_diff = 1e-7",
                 "disentangle_projector_tolerance = 2e-7",
                 "disentangle_mixing = 0.75",
-                "symmetry_output_basis = FEM",
+                "output_basis = STRICT",
                 "extension = 1, 1",
                 "projections",
                 "a; [0, 0]; 0; [1, 0, 5]",
@@ -188,17 +188,17 @@ def test_energy_window_parser(tmp_path):
     assert cfg.disentangle_err_diff == pytest.approx(1e-7)
     assert cfg.disentangle_projector_tolerance == pytest.approx(2e-7)
     assert cfg.disentangle_mixing == pytest.approx(0.75)
-    assert cfg.symmetry_output_basis == "fem"
+    assert cfg.output_basis == "strict"
 
 
-def test_invalid_symmetry_output_basis_is_rejected():
+def test_invalid_output_basis_is_rejected():
     cfg = IncarConfig(
         lattice_const=1.0,
         real_lattice_vectors=[[1.0, 0.0], [0.0, 1.0]],
-        symmetry_output_basis="mixed",
+        output_basis="mixed",
     )
 
-    with pytest.raises(ValueError, match="symmetry_output_basis"):
+    with pytest.raises(ValueError, match="output_basis"):
         preprocess_config(cfg)
 
 

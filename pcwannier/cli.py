@@ -173,7 +173,7 @@ def main(argv=None) -> int:
             len(symmetry_model.targets),
             target_summary,
             config.symmetry_constrained,
-            config.symmetry_output_basis,
+            config.output_basis,
             symmetry_model.bloch_convention.name,
             symmetry_model.bloch_convention.sign,
             (

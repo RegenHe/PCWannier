@@ -60,7 +60,7 @@ class IncarConfig:
     symmetry_file: str | bool = False
     magnetic_bias_direction: list[float] | None = None
     symmetry_constrained: bool = False
-    symmetry_output_basis: str = "strict"
+    output_basis: str = "fem"
     symmetry_tolerance: float = 1.0e-8
     symmetry_algebra_tolerance: float = 1.0e-10
     symmetry_max_iter: int = 20
@@ -111,7 +111,6 @@ class IncarConfig:
 
     left_dataset_file: str | bool = False
     hermitian: bool = True
-    disable_orth: bool = True
     M_in: bool = False
     use_cached_data: list[str] = field(default_factory=list)
 
@@ -664,7 +663,7 @@ class IncarParser:
             "wannier_subspace",
             "longitudinal_source",
             "symmetry_file",
-            "symmetry_output_basis",
+            "output_basis",
             "ebr_catalog",
             "ebr_mode",
             "dataset_file",
@@ -822,7 +821,6 @@ class IncarParser:
             "hybrid_Wilson_loop",
             "Chern_number",
             "decompose",
-            "disable_orth",
             "proj_binarize",
             "v_proj",
             "E_is_real",
@@ -1443,9 +1441,9 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         raise ValueError("etbc_auxiliary_eigenvalue must be finite.")
     if not np.isfinite(cfg.etbc_rank_tolerance) or not 0.0 < cfg.etbc_rank_tolerance < 1.0:
         raise ValueError("etbc_rank_tolerance must lie in (0, 1).")
-    cfg.symmetry_output_basis = str(cfg.symmetry_output_basis).strip().lower()
-    if cfg.symmetry_output_basis not in {"strict", "fem"}:
-        raise ValueError("symmetry_output_basis must be 'strict' or 'fem'.")
+    cfg.output_basis = str(cfg.output_basis).strip().lower()
+    if cfg.output_basis not in {"strict", "fem"}:
+        raise ValueError("output_basis must be 'strict' or 'fem'.")
     if not np.isfinite(cfg.disentangle_mixing) or not 0.0 < cfg.disentangle_mixing <= 1.0:
         raise ValueError("disentangle_mixing must lie in (0, 1].")
     if not np.isfinite(cfg.symmetry_tolerance) or cfg.symmetry_tolerance <= 0.0:

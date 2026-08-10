@@ -223,9 +223,31 @@ def test_p4mm_catalog_and_dynamic_2d_ebr_matrix(p4mm_matrix):
     )
 
     assert _resolve_ebr_mode(
-        SimpleNamespace(ebr_mode="auto", wannier_subspace="T"),
+        SimpleNamespace(ebr_subspace_dimension=None, wannier_subspace="T"),
         SimpleNamespace(model=SimpleNamespace(dimension=2)),
     ) == "regular"
+
+
+@pytest.mark.parametrize(
+    ("dimension", "wannier_subspace", "subspace_dimension", "expected"),
+    (
+        (2, "T", None, "regular"),
+        (3, "T", None, "transverse"),
+        (3, "T+L", None, "regular"),
+        (2, "T", 6, "subspace"),
+        (3, "T+L", 8, "subspace"),
+    ),
+)
+def test_ebr_analysis_kind_is_inferred_from_physical_configuration(
+    dimension, wannier_subspace, subspace_dimension, expected
+):
+    config = SimpleNamespace(
+        ebr_subspace_dimension=subspace_dimension,
+        wannier_subspace=wannier_subspace,
+    )
+    context = SimpleNamespace(model=SimpleNamespace(dimension=dimension))
+
+    assert _resolve_ebr_mode(config, context) == expected
 
 
 @pytest.mark.parametrize("name", WALLPAPER_CATALOGS)

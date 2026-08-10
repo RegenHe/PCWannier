@@ -4,6 +4,7 @@ from dataclasses import replace
 from functools import lru_cache, reduce
 from itertools import product
 from math import gcd
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -273,8 +274,14 @@ def run_ebr_analysis(
     analysis: BlochSymmetryRunResult | BlochSymmetryAnalysisResult,
     context: SymmetryContext,
     config: IncarConfig,
+    *,
+    catalog: EBRCatalog | str | Path | None = None,
 ) -> EBRAnalysisResult:
-    """Generate the requested EBR problem and solve it without Wannier calculations."""
+    """Generate and solve an EBR problem for the context's space group.
+
+    The incar-facing path always selects the built-in catalog from the resolved
+    space group.  A custom catalog remains available to programmatic callers.
+    """
 
     physical_analysis = (
         analysis.primary.analysis if hasattr(analysis, "primary") else analysis
@@ -282,14 +289,18 @@ def run_ebr_analysis(
     band_channels = dict(getattr(analysis, "band_channels", {}))
     if not isinstance(physical_analysis, BlochSymmetryAnalysisResult):
         raise TypeError("run_ebr_analysis expects a Bloch symmetry analysis result.")
-    catalog_reference = str(config.ebr_catalog).strip()
-    if catalog_reference.casefold() == "auto":
+    if catalog is None:
         catalog_reference = infer_builtin_catalog_alias(
             _context_catalog_identifier(context)
         )
+        resolved_catalog = load_ebr_catalog(catalog_reference)
+    elif isinstance(catalog, EBRCatalog):
+        resolved_catalog = catalog
+    else:
+        resolved_catalog = load_ebr_catalog(catalog, base_dir=config.base_dir)
     catalog = _catalog_in_context_setting(
         context,
-        load_ebr_catalog(catalog_reference, base_dir=config.base_dir),
+        resolved_catalog,
     )
     matrix = build_ebr_matrix(
         context,
@@ -330,7 +341,7 @@ def run_ebr_analysis(
         )
         target_dimension = config.ebr_subspace_dimension
         if target_dimension is None:
-            raise ValueError("ebr_subspace_dimension is required for ebr_mode=subspace.")
+            raise RuntimeError("Internal EBR mode selection lost the subspace dimension.")
         fixed_bands = tuple(
             int(value)
             for value in (
@@ -1377,9 +1388,8 @@ def _context_catalog_identifier(context: SymmetryContext) -> int | str:
 
 
 def _resolve_ebr_mode(config, context: SymmetryContext) -> str:
-    mode = str(config.ebr_mode).strip().lower()
-    if mode != "auto":
-        return mode
+    if config.ebr_subspace_dimension is not None:
+        return "subspace"
     if context.model.dimension == 2:
         return "regular"
     return "regular" if config.wannier_subspace == "T+L" else "transverse"

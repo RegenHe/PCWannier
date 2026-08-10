@@ -98,7 +98,7 @@ def infer_builtin_catalog_alias(space_group: int | str) -> str:
     if not resource.is_file():
         raise ValueError(
             f"No built-in EBR catalog is available for space group {space_group!r}; "
-            "set ebr_catalog to a custom YAML file."
+            "use run_ebr_analysis(..., catalog=...) with a custom YAML catalog."
         )
     return Path(filename).stem
 

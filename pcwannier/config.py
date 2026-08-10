@@ -75,8 +75,6 @@ class IncarConfig:
     representation_character_tolerance: float = 1.0e-2
     wannier_targets: list[dict[str, Any]] | None = None
     representation_analysis: list[dict[str, Any]] | None = None
-    ebr_catalog: str = "auto"
-    ebr_mode: str = "auto"
     ebr_subspace_dimension: int | None = None
     ebr_subspace_fixed_bands: np.ndarray | None = None
     ebr_max_auxiliary_bands: int = 6
@@ -664,8 +662,6 @@ class IncarParser:
             "longitudinal_source",
             "symmetry_file",
             "output_basis",
-            "ebr_catalog",
-            "ebr_mode",
             "dataset_file",
             "left_dataset_file",
             "metric_file",
@@ -1475,24 +1471,24 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         or cfg.representation_character_tolerance <= 0.0
     ):
         raise ValueError("representation_character_tolerance must be positive and finite.")
-    cfg.ebr_mode = str(cfg.ebr_mode).strip().lower()
-    if cfg.ebr_mode not in {"auto", "regular", "transverse", "subspace"}:
-        raise ValueError("ebr_mode must be auto, regular, transverse, or subspace.")
-    if not str(cfg.ebr_catalog).strip():
-        raise ValueError("ebr_catalog must not be empty.")
     if cfg.ebr_max_auxiliary_bands < 0:
         raise ValueError("ebr_max_auxiliary_bands must be non-negative.")
     if cfg.ebr_max_states <= 0:
         raise ValueError("ebr_max_states must be positive.")
     if cfg.ebr_subspace_dimension is not None and cfg.ebr_subspace_dimension < 2:
         raise ValueError("ebr_subspace_dimension must be at least two.")
-    if cfg.ebr_mode == "subspace" and cfg.ebr_subspace_dimension is None:
-        raise ValueError("ebr_mode=subspace requires ebr_subspace_dimension.")
     _validate_band_window(
         "ebr_subspace_fixed_bands",
         cfg.ebr_subspace_fixed_bands,
         allow_false=True,
     )
+    if (
+        cfg.ebr_subspace_fixed_bands is not None
+        and cfg.ebr_subspace_dimension is None
+    ):
+        raise ValueError(
+            "ebr_subspace_fixed_bands requires ebr_subspace_dimension."
+        )
     if (
         cfg.ebr_subspace_fixed_bands is not None
         and cfg.ebr_subspace_dimension is not None

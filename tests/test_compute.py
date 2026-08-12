@@ -649,7 +649,17 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
     assert not strict_needs_orth
     assert np.max(strict_report[..., 3]) < 1e-10
     assert mixed_needs_orth
+    assert np.max(mixed_report[..., 1]) < 1e-12
     assert np.max(mixed_report[..., 2]) > 1e-3
+    expected_normalization = np.diag(1.0 / np.sqrt(np.real(np.diag(raw_s))))
+    assert np.allclose(
+        state.normalization_transform[0, 0, 0], expected_normalization
+    )
+    assert np.allclose(
+        state.normalization_transform[0, 0, 0]
+        @ state.transform_correction[0, 0, 0],
+        state.transform[0, 0, 0],
+    )
     assert overlap_calls == 1
     assert np.array_equal(state.S[0, 0, 0], raw_s)
     assert state.fields is not bundle.fields

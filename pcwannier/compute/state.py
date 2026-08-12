@@ -175,14 +175,23 @@ class StateCollection:
             tau = max(tol_rel * np.max(lam), atol_abs)
             invsqrt = 1.0 / np.sqrt(np.maximum(lam, tau))
             tfull = vecs @ np.diag(invsqrt) @ vecs.conj().T
-            tdiag = np.diag(np.diag(tfull))
+            diagonal_norms = np.real(np.diag(smat))
+            if (
+                not np.all(np.isfinite(diagonal_norms))
+                or np.any(diagonal_norms <= 0.0)
+            ):
+                raise ValueError(
+                    f"State normalization requires positive finite diagonal overlaps "
+                    f"at ({i}, {j}, {k}); got {diagonal_norms.tolist()}."
+                )
+            tdiag = np.diag(1.0 / np.sqrt(diagonal_norms)).astype(
+                np.complex128, copy=False
+            )
             block = self.get_block(i, j, k)
             scaled = np.empty_like(block)
             for n in range(block.shape[0]):
-                if tdiag[n, n] == 0.0:
-                    raise ValueError(f"Normalization failed at ({i}, {j}, {k}, {n}).")
                 scaled[n] = block[n] * tdiag[n, n]
-            return idx, tfull, tdiag, np.linalg.inv(tdiag) @ tfull, scaled
+            return idx, tfull, tdiag, np.linalg.solve(tdiag, tfull), scaled
 
         for idx, tfull, tdiag, tcorr, scaled in parallel_map(self.k_indices(), calc_idx, self.configured_threads):
             i, j, k = idx

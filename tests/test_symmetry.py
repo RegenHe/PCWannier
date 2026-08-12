@@ -89,7 +89,7 @@ def test_p4g_glide_uses_one_bloch_convention_for_field_target_and_factor():
     constant = np.ones((1, 4), dtype=np.complex128)
 
     for sign in (1, -1):
-        convention = BlochConvention(sign, f"test-{sign}")
+        convention = BlochConvention(sign)
         model = compose_symmetry_model(
             base,
             SymmetryCalculationSpec(

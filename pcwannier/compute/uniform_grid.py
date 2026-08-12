@@ -117,7 +117,6 @@ class UniformGridInnerProduct:
     """Metric inner product using equal weights on periodic grid samples."""
 
     IMPLEMENTATION_VERSION = "uniform-grid-inner-product-v1"
-    integration_family = "uniform_grid"
     domain_kind = "points"
     uses_full_bloch_fields = False
 

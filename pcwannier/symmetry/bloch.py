@@ -160,8 +160,8 @@ class BarycentricStencil:
         return output
 
 
-class PeriodicGridInterpolator:
-    """Multilinear interpolation on a half-open periodic regular grid."""
+class PeriodicFourierInterpolator:
+    """Symmetry sampling on a half-open periodic Fourier collocation grid."""
 
     periodic_node_classes: tuple[tuple[int, ...], ...] = ()
 
@@ -189,8 +189,8 @@ class PeriodicGridInterpolator:
     ) -> np.ndarray:
         """Sample ``f(R^-1(r-tau))`` with an exact Fourier translation.
 
-        MPB fields live on a periodic Fourier grid. Fractional translations
-        that are not commensurate with that grid must therefore be applied in
+        Fields on this grid use a Fourier representation. Fractional translations
+        that are not commensurate with the samples must therefore be applied in
         reciprocal space; multilinear interpolation attenuates the field and
         breaks nonsymmorphic sewing unitarity.
         """
@@ -512,7 +512,7 @@ class BlochSymmetryAction:
         source_k = np.asarray(source_k_fractional, dtype=float)
         transformed_k = operation.act_reciprocal(source_k)
         stencil = self._stencil(operation)
-        if isinstance(self.interpolator, PeriodicGridInterpolator):
+        if isinstance(self.interpolator, PeriodicFourierInterpolator):
             sampled = self.interpolator.apply_space_group(
                 values,
                 self.fractional_vertices,
@@ -656,13 +656,18 @@ def build_bloch_symmetry_action(
     bloch_sign: int,
     tolerance: float,
 ) -> BlochSymmetryAction:
-    family = getattr(mesh, "integration_family", "finite_element")
-    if family == "uniform_grid":
-        interpolator = PeriodicGridInterpolator(mesh, tolerance=tolerance)
-    elif family == "finite_element":
+    from ..conventions import SpatialDiscretization
+
+    discretization = getattr(mesh, "discretization", None)
+    if discretization is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION:
+        interpolator = PeriodicFourierInterpolator(mesh, tolerance=tolerance)
+    elif discretization is SpatialDiscretization.TRIANGLE_FEM_P1:
         interpolator = None
     else:
-        raise ValueError(f"Unknown spatial integration family {family!r}.")
+        raise ValueError(
+            "Spatial domain does not declare a supported discretization: "
+            f"{discretization!r}."
+        )
     return BlochSymmetryAction(
         fractional_vertices,
         mesh.elements,

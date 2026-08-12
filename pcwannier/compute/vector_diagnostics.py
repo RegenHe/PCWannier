@@ -27,7 +27,7 @@ def diagnose_bundle_vector_fields(
     apply_metric: bool = False,
     threads: int = 1,
 ) -> VectorFieldDifferentialDiagnostics:
-    """Evaluate divergence or curl without modifying the loaded MPB fields."""
+    """Evaluate divergence or curl on periodic Fourier-grid vector fields."""
 
     if not isinstance(bundle.mesh, PeriodicGrid) or bundle.mesh.dimension != 3:
         raise ValueError("Vector differential diagnostics require a 3D periodic grid.")

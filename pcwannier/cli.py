@@ -156,7 +156,7 @@ def main(argv=None) -> int:
         LOGGER.info(
             "symmetry file=%s group=%s point_group=%s spglib=%s spgrep=%s "
             "operations=%s targets=%s target_dimensions=%s "
-            "constrained_localization=%s output_basis=%s bloch_convention=%s(sign=%s) "
+            "constrained_localization=%s output_basis=%s source=%s bloch_sign=%s "
             "magnetic_bias=%s unitary=%s antiunitary=%s",
             config.symmetry_resolved_path
             or config.symmetry_resolved_reference
@@ -174,7 +174,7 @@ def main(argv=None) -> int:
             target_summary,
             config.symmetry_constrained,
             config.output_basis,
-            symmetry_model.bloch_convention.name,
+            config.dataset_type,
             symmetry_model.bloch_convention.sign,
             (
                 None

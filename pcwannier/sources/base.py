@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from ..conventions import BlochConvention
+import numpy as np
+
+from ..conventions import (
+    BlochConvention,
+    BlochFieldRepresentation,
+    SpatialDiscretization,
+)
 from ..maxwell import FieldComponents
 
 if TYPE_CHECKING:
@@ -13,11 +19,39 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class LoadedSourceChannel:
+    """Lazy source output for one auxiliary physical field channel."""
+
+    loader: Callable[[], "LoadedSourceData"]
+    S_file: str | bool | None = None
+    D_file: str | bool | None = None
+
+
+@dataclass(frozen=True)
+class LoadedSourceData:
+    """Source-normalized arrays without calculation or symmetry policy."""
+
+    mesh: Mesh | PeriodicGrid
+    fields: np.ndarray
+    metric_material: np.ndarray
+    energies: np.ndarray
+    band_indices: np.ndarray
+    inner_band_indices: np.ndarray
+    energy_matrix: np.ndarray
+    zero_modes: np.ndarray | None = None
+    band_channels: dict[int, object] | None = None
+    auxiliary_channels: dict[str, LoadedSourceChannel] | None = None
+    base_hamiltonians: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
 class SourceAdapter:
     name: str
     bloch_convention: BlochConvention
+    field_representation: BlochFieldRepresentation
+    discretization: SpatialDiscretization
     supported_field_components: frozenset[FieldComponents]
-    input_loader: Callable[[IncarConfig], InputBundle]
+    input_loader: Callable[[IncarConfig], LoadedSourceData]
     mesh_loader: Callable[[str | Path], Mesh | PeriodicGrid]
     required_config_fields: tuple[str, ...] = (
         "mesh_file",

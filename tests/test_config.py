@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from pcwannier import (
+    BlochConvention,
     EnergyWindow,
     FieldComponents,
     FieldKind,
@@ -54,7 +55,7 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.symmetry_context is not None
     assert cfg.symmetry_context.model.symmetry_gauge.enabled
     assert cfg.symmetry_context.model.bloch_convention.sign == -1
-    assert cfg.symmetry_context.model.bloch_convention.name == "comsol"
+    assert cfg.symmetry_context.model.bloch_convention == BlochConvention(-1)
     assert cfg.symmetry_context.model.boundary_tolerance == pytest.approx(1.0e-6)
 
 

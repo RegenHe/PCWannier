@@ -4,6 +4,7 @@ import logging
 import numpy as np
 from dataclasses import replace
 
+from ..conventions import SpatialDiscretization
 from ..data import (
     BlochSymmetryChannelResult,
     BlochSymmetryRunResult,
@@ -34,6 +35,11 @@ from ..symmetry.reporting import (
     log_symmetry_analysis,
 )
 from .backend import resolve_backend
+from .augmentation import (
+    combine_transverse_longitudinal,
+    exclude_zero_modes,
+    zero_mode_band_indices,
+)
 from .context import CalculationContext
 from .gradient import Gradient
 from .initializer import StateInitializer
@@ -85,20 +91,23 @@ def run_bloch_symmetry_preanalysis(
             channel_name="physical",
         )
         auxiliary_channels = {}
+        longitudinal_zero_bands = None
         for channel_name, load_auxiliary in bundle.auxiliary_bundle_loaders.items():
-            auxiliary = load_auxiliary()
+            raw_auxiliary = load_auxiliary()
+            if channel_name == "longitudinal":
+                longitudinal_zero_bands = zero_mode_band_indices(raw_auxiliary)
+                auxiliary = exclude_zero_modes(raw_auxiliary)
+            else:
+                auxiliary = raw_auxiliary
             auxiliary_channels[channel_name] = _analyze_bundle_channel(
                 auxiliary,
                 threads=threads,
                 resolved_backend=resolved_backend,
                 channel_name=channel_name,
             )
-            del auxiliary
+            del auxiliary, raw_auxiliary
         gamma_regularization = None
         if bundle.config.gamma_zero_regularization:
-            longitudinal_zero_bands = bundle.auxiliary_zero_mode_bands.get(
-                "longitudinal"
-            )
             if longitudinal_zero_bands is None:
                 raise ValueError(
                     "Gamma zero regularization requires longitudinal zero-mode metadata."
@@ -137,7 +146,7 @@ def _analyze_bundle_channel(
 ) -> BlochSymmetryChannelResult:
     if bundle.symmetry is None:
         raise ValueError("Bloch symmetry channel is missing its symmetry context.")
-    field_kind = bundle.analysis_field_kind or bundle.maxwell.symmetry_field_kind
+    field_kind = bundle.maxwell.symmetry_field_kind
     analysis_context = bundle.symmetry
     if channel_name == "longitudinal" and bundle.zero_modes is not None:
         specification = analysis_context.model.representation_analysis
@@ -273,6 +282,17 @@ def _prepare_wannier_run(
     """Prepare immutable run inputs before symmetry and localization stages."""
 
     config = bundle.config
+    if config.wannier_subspace == "T+L" and config.longitudinal_source == "file":
+        try:
+            load_longitudinal = bundle.auxiliary_bundle_loaders["longitudinal"]
+        except KeyError as exc:
+            raise ValueError(
+                "T+L file mode requires a longitudinal auxiliary channel."
+            ) from exc
+        with timed_step("prepare T+L augmented input", LOGGER):
+            longitudinal = load_longitudinal()
+            bundle = combine_transverse_longitudinal(bundle, longitudinal)
+            del longitudinal
     etbc_enabled = (
         config.wannier_subspace == "T+L"
         and config.longitudinal_source == "etbc"
@@ -354,14 +374,14 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 "Three-dimensional Wannier volume figures are not implemented; set wannier_figures=false."
             )
     resolved_backend = resolve_backend(backend or config.compute_backend)
-    integration_family = getattr(
-        bundle.mesh,
-        "integration_family",
-        "finite_element",
-    )
+    discretization = getattr(bundle.mesh, "discretization", None)
+    if not isinstance(discretization, SpatialDiscretization):
+        raise ValueError(
+            "Input spatial domain does not declare a supported discretization."
+        )
     integration_name = (
         "uniform"
-        if integration_family == "uniform_grid"
+        if discretization is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION
         else config.integration_mode
     )
     LOGGER.info(
@@ -370,7 +390,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         threads,
         resolved_backend,
         integration_name,
-        integration_family,
+        discretization.value,
         threadpool_summary(),
         bundle.fields.shape,
         bundle.mesh.vertices.shape[0],

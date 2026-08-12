@@ -52,7 +52,12 @@ def test_etbc_facade_excludes_large_internal_artifacts():
 
 def test_sources_facade_only_exports_registry_and_adapter_api():
     assert set(sources.__all__) == {
+        "BlochConvention",
+        "BlochFieldRepresentation",
+        "LoadedSourceChannel",
+        "LoadedSourceData",
         "SourceAdapter",
+        "SpatialDiscretization",
         "load_input",
         "load_mesh",
         "resolve_source",

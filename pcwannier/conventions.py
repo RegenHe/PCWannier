@@ -9,13 +9,17 @@ class BlochConvention:
     """Sign convention in psi_k = exp(sign * i k.r) u_k."""
 
     sign: int = 1
-    name: str = "standard"
 
     def __post_init__(self) -> None:
         if self.sign not in {-1, 1}:
             raise ValueError("Bloch convention sign must be -1 or 1.")
-        if not str(self.name).strip():
-            raise ValueError("Bloch convention name must not be empty.")
+
+
+class SpatialDiscretization(str, Enum):
+    """Source-neutral spatial representation used by numerical algorithms."""
+
+    TRIANGLE_FEM_P1 = "triangle_fem_p1"
+    PERIODIC_FOURIER_COLLOCATION = "periodic_fourier_collocation"
 
 
 class BlochFieldRepresentation(str, Enum):

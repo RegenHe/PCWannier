@@ -8,15 +8,19 @@ import re
 import numpy as np
 from scipy.spatial import cKDTree
 
-from ..conventions import BlochConvention, BlochFieldRepresentation
+from ..conventions import (
+    BlochConvention,
+    BlochFieldRepresentation,
+    SpatialDiscretization,
+)
 from ..config import EnergyWindow, IncarConfig
-from ..data import InputBundle, Mesh, RawData
+from ..data import Mesh, RawData
 from ..maxwell import FieldComponents
 from ..timing import timed_step
-from .base import SourceAdapter
+from .base import LoadedSourceData, SourceAdapter
 
 LOGGER = logging.getLogger(__name__)
-COMSOL_BLOCH_CONVENTION = BlochConvention(-1, "comsol")
+COMSOL_BLOCH_CONVENTION = BlochConvention(-1)
 
 
 def load_comsol_mesh(filename: str | Path) -> Mesh:
@@ -236,7 +240,7 @@ def match_data_to_mesh(
     return mesh_to_data_idx, mesh_dists
 
 
-def load_comsol_input(config: IncarConfig) -> InputBundle:
+def load_comsol_input(config: IncarConfig) -> LoadedSourceData:
     mesh_path, dataset_path, metric_path, energy_path = _required_input_paths(config)
     if config.maxwell_problem is None:
         raise ValueError("Maxwell field configuration has not been initialized.")
@@ -304,10 +308,7 @@ def load_comsol_input(config: IncarConfig) -> InputBundle:
         metric_material.shape,
     )
 
-    return InputBundle(
-        config=config,
-        maxwell=config.maxwell_problem,
-        bloch_convention=COMSOL_BLOCH_CONVENTION,
+    return LoadedSourceData(
         mesh=mesh,
         fields=fields,
         metric_material=metric_material,
@@ -315,8 +316,6 @@ def load_comsol_input(config: IncarConfig) -> InputBundle:
         band_indices=band_indices,
         inner_band_indices=inner_band_indices,
         energy_matrix=energy_matrix,
-        field_representation=BlochFieldRepresentation.FULL_BLOCH,
-        symmetry=config.symmetry_context,
     )
 
 
@@ -663,6 +662,8 @@ def _validate_dataset_order(order: list[str], sizes: dict[str, int | None]) -> N
 COMSOL_SOURCE = SourceAdapter(
     name="comsol",
     bloch_convention=COMSOL_BLOCH_CONVENTION,
+    field_representation=BlochFieldRepresentation.FULL_BLOCH,
+    discretization=SpatialDiscretization.TRIANGLE_FEM_P1,
     supported_field_components=frozenset({FieldComponents.EZ, FieldComponents.HZ}),
     input_loader=load_comsol_input,
     mesh_loader=load_comsol_mesh,

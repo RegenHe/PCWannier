@@ -618,7 +618,7 @@ def test_strict_and_mixed_orthogonality_reports_are_distinct():
     bundle = InputBundle(
         config=config,
         maxwell=MaxwellProblem.for_components("Ez"),
-        bloch_convention=BlochConvention(-1, "synthetic"),
+        bloch_convention=BlochConvention(-1),
         mesh=mesh,
         fields=fields,
         metric_material=np.ones(3),
@@ -937,7 +937,7 @@ def _two_band_overlap_state(metric_material=None, components="Ez", integration_m
         InputBundle(
             config=config,
             maxwell=MaxwellProblem.for_components(components),
-            bloch_convention=BlochConvention(-1, "synthetic"),
+            bloch_convention=BlochConvention(-1),
             mesh=mesh,
             fields=fields,
             metric_material=metric,

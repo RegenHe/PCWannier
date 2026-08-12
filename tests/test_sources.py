@@ -1,18 +1,22 @@
 import numpy as np
 import pytest
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from scipy.spatial import cKDTree
 
 from pcwannier import BlochConvention
 import pcwannier.sources as sources_module
+from pcwannier.conventions import BlochFieldRepresentation, SpatialDiscretization
 from pcwannier.compute.backend import is_numba_available
 from pcwannier.compute.integration import MetricInnerProduct
+from pcwannier.compute.integration import create_metric_inner_product
 from pcwannier.compute.integration import numba_parallel_policy
-from pcwannier.data import Mesh, RawData
-from pcwannier.maxwell import FieldComponents
+from pcwannier.data import Mesh, PeriodicGrid, RawData
+from pcwannier.maxwell import FieldComponents, MaxwellProblem
 from pcwannier.outputs import _interpolate_real_mesh
-from pcwannier.sources import load_input, resolve_source
-from pcwannier.sources.base import SourceAdapter
+from pcwannier.sources import load_input, load_mesh, resolve_source
+from pcwannier.sources.base import LoadedSourceData, SourceAdapter
 from pcwannier.sources.comsol import (
     _metric_on_mesh,
     _validate_header_k_grid,
@@ -20,41 +24,162 @@ from pcwannier.sources.comsol import (
     load_comsol_data,
     match_data_to_mesh,
 )
+from pcwannier.symmetry.bloch import build_bloch_symmetry_action
 
 
 def test_source_registry_owns_bloch_convention():
     source = resolve_source("COMSOL")
 
     assert source.name == "comsol"
-    assert source.bloch_convention == BlochConvention(-1, "comsol")
+    assert source.bloch_convention == BlochConvention(-1)
     with pytest.raises(ValueError, match="Unknown data source"):
         resolve_source("not-registered")
 
 
-@pytest.mark.parametrize(
-    ("returned_convention", "message"),
-    [
-        (None, "without a valid BlochConvention"),
-        (BlochConvention(1, "wrong"), "returned Bloch convention"),
-    ],
-)
-def test_source_dispatch_rejects_missing_or_mismatched_convention(
-    monkeypatch,
-    returned_convention,
-    message,
-):
+def test_source_dispatch_requires_normalized_source_data(monkeypatch):
     source = SourceAdapter(
         name="synthetic",
-        bloch_convention=BlochConvention(-1, "synthetic"),
+        bloch_convention=BlochConvention(-1),
+        field_representation=BlochFieldRepresentation.FULL_BLOCH,
+        discretization=SpatialDiscretization.TRIANGLE_FEM_P1,
         supported_field_components=frozenset({FieldComponents.EZ}),
-        input_loader=lambda _config: SimpleNamespace(bloch_convention=returned_convention),
+        input_loader=lambda _config: SimpleNamespace(),
         mesh_loader=lambda _path: None,
     )
     monkeypatch.setitem(sources_module._SOURCES, "synthetic", source)
     config = SimpleNamespace(dataset_type="synthetic", field_components="Ez")
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="LoadedSourceData"):
         load_input(config)
+
+
+def test_source_dispatch_rejects_discretization_mismatch(monkeypatch):
+    grid = PeriodicGrid((2, 2), np.eye(2))
+    fields = np.empty((1, 1, 1), dtype=object)
+    fields[0, 0, 0] = np.ones((1, 4), dtype=np.complex128)
+    cells = np.empty((1, 1, 1), dtype=object)
+    cells[0, 0, 0] = [0]
+    energies = np.empty((1, 1, 1), dtype=object)
+    energies[0, 0, 0] = np.array([1.0])
+    loaded = LoadedSourceData(
+        grid,
+        fields,
+        np.ones(4),
+        energies,
+        cells,
+        cells.copy(),
+        np.ones((1, 1, 1, 1)),
+    )
+    source = SourceAdapter(
+        name="synthetic",
+        bloch_convention=BlochConvention(1),
+        field_representation=BlochFieldRepresentation.PERIODIC_PART,
+        discretization=SpatialDiscretization.TRIANGLE_FEM_P1,
+        supported_field_components=frozenset({FieldComponents.EZ}),
+        input_loader=lambda _config: loaded,
+        mesh_loader=lambda _path: grid,
+    )
+    monkeypatch.setitem(sources_module._SOURCES, "synthetic", source)
+    config = SimpleNamespace(
+        dataset_type="synthetic",
+        field_components="Ez",
+        maxwell_problem=MaxwellProblem.for_components("Ez"),
+        symmetry_context=None,
+    )
+
+    with pytest.raises(ValueError, match="declared discretization"):
+        load_input(config)
+
+
+def test_mesh_dispatch_rejects_discretization_mismatch(monkeypatch, tmp_path):
+    grid = PeriodicGrid((2, 2), np.eye(2))
+    source = SourceAdapter(
+        name="synthetic-mesh",
+        bloch_convention=BlochConvention(1),
+        field_representation=BlochFieldRepresentation.PERIODIC_PART,
+        discretization=SpatialDiscretization.TRIANGLE_FEM_P1,
+        supported_field_components=frozenset({FieldComponents.EZ}),
+        input_loader=lambda _config: None,
+        mesh_loader=lambda _path: grid,
+    )
+    monkeypatch.setitem(sources_module._SOURCES, source.name, source)
+    config = SimpleNamespace(
+        dataset_type=source.name,
+        mesh_file="grid.dat",
+        input_path=lambda value: tmp_path / value,
+    )
+
+    with pytest.raises(ValueError, match="mesh loader returned"):
+        load_mesh(config)
+
+
+def test_inner_product_rejects_domain_without_discretization():
+    domain = SimpleNamespace()
+    with pytest.raises(ValueError, match="does not declare"):
+        create_metric_inner_product(domain, np.ones(1))
+
+
+def test_arbitrary_source_name_uses_fourier_discretization_capabilities(monkeypatch):
+    grid = PeriodicGrid((2, 2), np.eye(2))
+    fields = np.empty((1, 1, 1), dtype=object)
+    fields[0, 0, 0] = np.ones((1, 4), dtype=np.complex128)
+    bands = np.empty((1, 1, 1), dtype=object)
+    bands[0, 0, 0] = [0]
+    energies = np.empty((1, 1, 1), dtype=object)
+    energies[0, 0, 0] = np.array([2.0])
+    loaded = LoadedSourceData(
+        grid,
+        fields,
+        np.full(4, 2.0),
+        energies,
+        bands,
+        bands.copy(),
+        np.full((1, 1, 1, 1), 2.0),
+    )
+    source = SourceAdapter(
+        name="fourier-export",
+        bloch_convention=BlochConvention(1),
+        field_representation=BlochFieldRepresentation.PERIODIC_PART,
+        discretization=SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION,
+        supported_field_components=frozenset({FieldComponents.EZ}),
+        input_loader=lambda _config: loaded,
+        mesh_loader=lambda _path: grid,
+    )
+    monkeypatch.setitem(sources_module._SOURCES, source.name, source)
+    config = SimpleNamespace(
+        dataset_type=source.name,
+        field_components="Ez",
+        maxwell_problem=MaxwellProblem.for_components("Ez"),
+        symmetry_context=None,
+    )
+
+    bundle = load_input(config)
+    inner = create_metric_inner_product(bundle.mesh, bundle.metric_material)
+    action = build_bloch_symmetry_action(
+        bundle.mesh,
+        bundle.mesh.fractional_vertices,
+        np.eye(2),
+        bloch_sign=bundle.bloch_convention.sign,
+        tolerance=1.0e-10,
+    )
+
+    assert np.isclose(inner.norm(np.ones(4)), 2.0)
+    assert action.interpolator.__class__.__name__ == "PeriodicFourierInterpolator"
+
+
+def test_sources_package_does_not_import_calculation_layers():
+    source_root = Path(__file__).parents[1] / "pcwannier" / "sources"
+    forbidden = {"compute", "symmetry", "etbc", "ebr"}
+    violations = []
+    for path in source_root.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            parts = node.module.split(".")
+            if any(part in forbidden for part in parts):
+                violations.append((path.name, node.lineno, node.module))
+    assert violations == []
 
 
 def test_comsol_real_only_reader_uses_utf8_comments(tmp_path):

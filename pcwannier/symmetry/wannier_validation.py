@@ -7,6 +7,7 @@ import logging
 import numpy as np
 from scipy.spatial import cKDTree
 
+from ..conventions import SpatialDiscretization
 from ..compute.wannier import generate_wannier
 from .field_action import cartesian_field_matrix
 from .bloch import fractional_mesh_vertices
@@ -271,7 +272,7 @@ def validate_wannier_symmetry(
         group.tolerance * float(ctx.config.lattice_const),
         np.finfo(float).eps * max(float(np.max(np.abs(mesh.vertices))), 1.0) * 128.0,
     )
-    integration_family = getattr(mesh, "integration_family", "finite_element")
+    discretization = getattr(mesh, "discretization", None)
     needed_shifts = {
         tuple(int(value) for value in action.lattice_shift)
         for target in target_items
@@ -280,12 +281,12 @@ def validate_wannier_symmetry(
     }
     cell_fields: dict[tuple[int, ...], np.ndarray] | None
     translated_indices: dict[tuple[int, ...], np.ndarray] = {}
-    if integration_family == "uniform_grid":
+    if discretization is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION:
         interpolator = _RegularGridInterpolator(mesh, group.tolerance)
         cell_fields = None
         for shift in sorted(needed_shifts):
             translated_indices[shift] = _uniform_translation_indices(mesh, shift)
-    elif integration_family == "finite_element":
+    elif discretization is SpatialDiscretization.TRIANGLE_FEM_P1:
         interpolator = _TriangleInterpolator(
             mesh.vertices,
             mesh.elements,
@@ -297,7 +298,7 @@ def validate_wannier_symmetry(
                 _, fields, _ = generate_wannier(ctx, list(shift))
                 cell_fields[shift] = fields
     else:
-        raise ValueError(f"Unknown spatial integration family {integration_family!r}.")
+        raise ValueError(f"Unsupported spatial discretization {discretization!r}.")
     if state.extended_inner_product is None:
         raise RuntimeError("Extended metric inner product has not been initialized.")
     full_inner_product = state.extended_inner_product
@@ -322,7 +323,7 @@ def validate_wannier_symmetry(
     def validate_operation(item):
         operation_index, operation = item
         operation_entries = []
-        if integration_family == "uniform_grid":
+        if discretization is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION:
             stencil = None
             valid_inner_product = None
         else:
@@ -367,7 +368,7 @@ def validate_wannier_symmetry(
                         offset + target.wannier_index(row, action.target_index)
                         for row in range(irrep_dimension)
                     )
-                    if integration_family == "uniform_grid":
+                    if discretization is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION:
                         (
                             residual_norm,
                             transformed_norm,

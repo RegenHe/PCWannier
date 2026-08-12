@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..conventions import SpatialDiscretization
+
 from .context import CalculationContext
 from .kspace import get_kxyz, is_complete_uniform_k_mesh
 from .parallel import memory_limited_threads, parallel_map
@@ -155,8 +157,8 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
     vector_field = state.get_block(0, 0, 0).ndim == 3
     wsum_shape = (nv, band_count, 3) if vector_field else (nv, band_count)
     if (
-        getattr(getattr(state, "mesh", None), "integration_family", None)
-        == "uniform_grid"
+        getattr(getattr(state, "mesh", None), "discretization", None)
+        is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION
         and is_complete_uniform_k_mesh(config.k_points)
     ):
         wsum = _uniform_grid_wannier_sum(ctx, r_use)
@@ -168,8 +170,8 @@ def generate_wannier(ctx: CalculationContext, r: list[int] | None = None):
     mapping = np.asarray(state.space_to_original_mapping, dtype=np.intp)
     vertices = np.asarray(state.extended_mesh.vertices, dtype=float)
     if (
-        getattr(getattr(state, "mesh", None), "integration_family", None)
-        != "uniform_grid"
+        getattr(getattr(state, "mesh", None), "discretization", None)
+        is not SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION
         or not is_complete_uniform_k_mesh(config.k_points)
     ):
         extension_scale = np.sqrt(

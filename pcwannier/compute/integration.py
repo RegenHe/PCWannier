@@ -199,14 +199,19 @@ def create_metric_inner_product(
 ) -> MetricInnerProductProtocol:
     """Create the metric inner product selected by the spatial discretization."""
 
-    family = getattr(domain, "integration_family", "finite_element")
-    if family == "uniform_grid":
+    from ..conventions import SpatialDiscretization
+
+    discretization = getattr(domain, "discretization", None)
+    if discretization is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION:
         from .uniform_grid import UniformGridInnerProduct
 
         return UniformGridInnerProduct(domain, metric, backend=backend)
-    if family != "finite_element":
-        raise ValueError(f"Unknown spatial integration family {family!r}.")
-    return MetricInnerProduct(domain, metric, mode=mode, backend=backend)
+    if discretization is SpatialDiscretization.TRIANGLE_FEM_P1:
+        return MetricInnerProduct(domain, metric, mode=mode, backend=backend)
+    raise ValueError(
+        "Spatial domain does not declare a supported discretization: "
+        f"{discretization!r}."
+    )
 
 
 @contextmanager

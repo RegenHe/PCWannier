@@ -12,6 +12,7 @@ from pcwannier.compute.uniform_grid import (
     integrate_scalar,
     periodic_grid_coordinates,
 )
+from pcwannier.compute.augmentation import combine_transverse_longitudinal
 from pcwannier.compute.vector_diagnostics import (
     diagnose_bundle_vector_fields,
     periodic_vector_field_residuals,
@@ -29,7 +30,7 @@ from pcwannier.outputs import (
 from pcwannier.sources import load_input
 from pcwannier.sources.mpb import load_mpb_grid
 from pcwannier.symmetry.bloch import (
-    PeriodicGridInterpolator,
+    PeriodicFourierInterpolator,
     build_bloch_symmetry_action,
 )
 from pcwannier.symmetry.group import SpaceGroupOperation
@@ -254,7 +255,7 @@ def test_electric_vector_diagnostic_uses_metric_weighted_field(tmp_path):
         fields=field_grid,
         metric_material=epsilon,
         config=SimpleNamespace(k_points=[[0.0], [0.0], [0.0]]),
-        bloch_convention=BlochConvention(1, "test"),
+        bloch_convention=BlochConvention(1),
         band_indices=band_grid,
     )
     diagnostics = diagnose_bundle_vector_fields(
@@ -271,7 +272,7 @@ def test_periodic_grid_centers_single_sample_direction():
     grid = PeriodicGrid((3, 1), np.eye(2))
 
     assert np.allclose(grid.fractional_vertices[:, 1], 0.0)
-    stencil = PeriodicGridInterpolator(grid).stencil(grid.fractional_vertices)
+    stencil = PeriodicFourierInterpolator(grid).stencil(grid.fractional_vertices)
     values = np.arange(grid.point_count, dtype=float)[None, :]
     assert stencil.weights is None
     assert stencil.vertex_indices.dtype.itemsize <= 4
@@ -281,7 +282,7 @@ def test_periodic_grid_centers_single_sample_direction():
 
 def test_multilinear_stencil_applies_large_queries_in_consistent_chunks():
     grid = PeriodicGrid((2, 2, 2), np.eye(3))
-    interpolator = PeriodicGridInterpolator(grid)
+    interpolator = PeriodicFourierInterpolator(grid)
     query = np.tile(np.array([[-0.25, -0.25, -0.25]]), (33000, 1))
     stencil = interpolator.stencil(query)
     values = np.arange(16, dtype=float).reshape(2, 8).astype(np.complex128)
@@ -548,7 +549,7 @@ def test_mpb_source_loads_three_dimensional_electric_fields_with_epsilon_metric(
 
     assert bundle.maxwell.primary_field is PrimaryField.ELECTRIC
     assert bundle.maxwell.metric_material is MaterialKind.EPSILON
-    assert bundle.analysis_field_kind is FieldKind.ELECTRIC_POLAR_VECTOR
+    assert bundle.maxwell.symmetry_field_kind is FieldKind.ELECTRIC_POLAR_VECTOR
     assert bundle.fields[0, 0, 0].shape == (2, 8, 3)
     assert np.array_equal(bundle.fields[0, 0, 0], raw[0].reshape(2, 8, 3))
     assert np.array_equal(bundle.metric_material, epsilon.reshape(-1))
@@ -603,7 +604,7 @@ def test_mpb_source_loads_scalar_ez_from_electric_vector_export(tmp_path):
     bundle = load_input(load_config(incar, mode="bloch_symmetry"))
 
     assert bundle.maxwell.primary_field is PrimaryField.ELECTRIC
-    assert bundle.analysis_field_kind is FieldKind.ELECTRIC_Z
+    assert bundle.maxwell.symmetry_field_kind is FieldKind.ELECTRIC_Z
     assert np.array_equal(
         bundle.fields[0, 0, 0][0],
         raw[0, 0, ..., 0, 2].reshape(-1),
@@ -671,16 +672,22 @@ def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regul
     assert config.invert_longitudinal_energies is True
     bundle = load_input(config)
 
-    assert bundle.fields[0, 0, 0].shape == (5, 8, 3)
-    assert bundle.band_indices[0, 0, 0] == [0, 1, 2, 3, 4]
-    assert bundle.band_channels[0].label == "H:0"
-    assert bundle.band_channels[3].label == "L:0"
-    assert not bundle.auxiliary_bundle_loaders
-    assert bundle.auxiliary_zero_mode_bands["longitudinal"][0, 0, 0] == [0]
-    selected = bundle.symmetry.model.representation_analysis.points[0].band_indices
+    assert bundle.fields[0, 0, 0].shape == (3, 8, 3)
+    assert set(bundle.auxiliary_bundle_loaders) == {"longitudinal"}
+    longitudinal_bundle = bundle.auxiliary_bundle_loaders["longitudinal"]()
+    assert longitudinal_bundle.fields[0, 0, 0].shape == (2, 8, 3)
+
+    combined = combine_transverse_longitudinal(bundle, longitudinal_bundle)
+    assert combined.fields[0, 0, 0].shape == (5, 8, 3)
+    assert combined.band_indices[0, 0, 0] == [0, 1, 2, 3, 4]
+    assert combined.band_channels[0].label == "H:0"
+    assert combined.band_channels[3].label == "L:0"
+    assert not combined.auxiliary_bundle_loaders
+    assert combined.auxiliary_zero_mode_bands["longitudinal"][0, 0, 0] == [0]
+    selected = combined.symmetry.model.representation_analysis.points[0].band_indices
     assert selected == (0, 1, 2, 3, 4)
-    zero_fields = bundle.fields[0, 0, 0][[0, 1, 3]]
-    gram = UniformGridInnerProduct(bundle.mesh, bundle.metric_material).overlap(
+    zero_fields = combined.fields[0, 0, 0][[0, 1, 3]]
+    gram = UniformGridInnerProduct(combined.mesh, combined.metric_material).overlap(
         zero_fields, zero_fields
     )
     assert np.allclose(gram, np.eye(3), atol=1.0e-14)
@@ -688,7 +695,7 @@ def test_mpb_transverse_plus_longitudinal_combines_independent_windows_and_regul
 
 def test_periodic_grid_quasiperiodic_stencil_tracks_each_corner_shift():
     grid = PeriodicGrid((2, 2), np.eye(2))
-    stencil = PeriodicGridInterpolator(grid).stencil(
+    stencil = PeriodicFourierInterpolator(grid).stencil(
         np.array([[0.5, -0.5], [0.5, 0.5]])
     )
     assert stencil.vertex_indices.shape == (2,)
@@ -806,7 +813,7 @@ def test_mpb_source_loads_reordered_hdf5_kpoints(tmp_path):
 
     assert isinstance(bundle.mesh, PeriodicGrid)
     assert bundle.mesh.shape == shape
-    assert bundle.bloch_convention == BlochConvention(1, "mpb")
+    assert bundle.bloch_convention == BlochConvention(1)
     assert bundle.field_representation is BlochFieldRepresentation.PERIODIC_PART
     assert np.array_equal(bundle.metric_material, np.ones(4))
     for flat, index in enumerate(np.ndindex((2, 2, 1))):

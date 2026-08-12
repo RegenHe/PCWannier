@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.tri import LinearTriInterpolator, Triangulation
 
 from .config import EnergyWindow, IncarConfig
+from .conventions import SpatialDiscretization
 from .data import (
     BandResult,
     BlochSymmetryRunResult,
@@ -351,9 +352,10 @@ def _interpolate_complex(triang: Triangulation, values: np.ndarray, points: np.n
 
 def _interpolate_real_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, tile_count: int) -> np.ndarray:
     """Interpolate a tiled non-conforming mesh without building a global triangle finder."""
-    if getattr(mesh, "integration_family", "finite_element") == "uniform_grid":
+    discretization = getattr(mesh, "discretization", None)
+    if discretization is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION:
         if not isinstance(mesh, PeriodicGrid):
-            raise TypeError("Uniform-grid interpolation requires PeriodicGrid metadata.")
+            raise TypeError("Fourier-grid interpolation requires PeriodicGrid metadata.")
         if mesh.dimension == 3:
             interpolated = _interpolate_uniform_grid(mesh, values, points)
             if interpolated.ndim != 1:
@@ -365,6 +367,8 @@ def _interpolate_real_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, t
             mesh.elements,
         )
         return _interpolate_real(triang, values, points)
+    if discretization is not SpatialDiscretization.TRIANGLE_FEM_P1:
+        raise ValueError(f"Unsupported spatial discretization {discretization!r}.")
 
     tile_count = max(1, int(tile_count))
     if mesh.elements.shape[0] % tile_count != 0:
@@ -392,7 +396,8 @@ def _interpolate_real_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, t
 def _interpolate_complex_mesh(mesh: Mesh, values: np.ndarray, points: np.ndarray, tile_count: int) -> np.ndarray:
     values = np.asarray(values)
     if (
-        getattr(mesh, "integration_family", "finite_element") == "uniform_grid"
+        getattr(mesh, "discretization", None)
+        is SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION
         and isinstance(mesh, PeriodicGrid)
         and mesh.dimension == 3
     ):

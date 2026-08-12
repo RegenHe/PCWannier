@@ -217,7 +217,7 @@ def test_uniform_3d_screw_sewing_matches_its_nonsymmorphic_factor_system():
         "screw_2_1_z",
     )
     group = SpaceGroup((identity, screw), tolerance=1.0e-10)
-    convention = BlochConvention(1, "mpb-test")
+    convention = BlochConvention(1)
     model = SymmetryModel(3, 1.0e-10, group, (), bloch_convention=convention)
     k_axes = (np.array([0.0]), np.array([0.0]), np.array([-0.5]))
     context = build_symmetry_context(model, k_axes)

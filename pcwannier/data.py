@@ -9,7 +9,11 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from .config import IncarConfig
-from .conventions import BlochConvention, BlochFieldRepresentation
+from .conventions import (
+    BlochConvention,
+    BlochFieldRepresentation,
+    SpatialDiscretization,
+)
 from .maxwell import FieldKind, MaxwellProblem
 
 if TYPE_CHECKING:
@@ -49,6 +53,8 @@ def periodic_axis_coordinates(
 
 
 class Mesh:
+    discretization = SpatialDiscretization.TRIANGLE_FEM_P1
+
     def __init__(self, vertices: np.ndarray, elements: np.ndarray, edge: np.ndarray | None = None) -> None:
         self.vertices = np.asarray(vertices, dtype=float)
         self.elements = np.asarray(elements, dtype=np.intp)
@@ -220,12 +226,13 @@ class PeriodicGrid:
     """Uniform periodic sampling grid in one crystallographic cell.
 
     The lattice vectors are stored as rows. ``sample_offset=0`` gives the
-    half-open MPB grid u_i = i / N - 1/2.  The class exposes 2D plot
+    half-open grid u_i = i / N - 1/2.  Samples represent a periodic Fourier
+    collocation grid. The class exposes 2D plot
     triangles for existing output code, but numerical integration never uses
     those triangles.
     """
 
-    integration_family = "uniform_grid"
+    discretization = SpatialDiscretization.PERIODIC_FOURIER_COLLOCATION
 
     def __init__(
         self,
@@ -440,7 +447,6 @@ class InputBundle:
     energy_matrix: np.ndarray
     field_representation: BlochFieldRepresentation = BlochFieldRepresentation.FULL_BLOCH
     symmetry: SymmetryContext | None = None
-    analysis_field_kind: FieldKind | None = None
     zero_modes: np.ndarray | None = None
     band_channels: dict[int, BandChannelReference] = field(default_factory=dict)
     auxiliary_zero_mode_bands: dict[str, np.ndarray] = field(default_factory=dict)

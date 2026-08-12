@@ -4,6 +4,7 @@ import ast
 import cmath
 from functools import lru_cache
 from importlib import resources
+import logging
 import math
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,9 @@ from .representation import (
 )
 from .specs import SymmetryCalculationSpec
 from .tables import ConcreteFiniteGroup, FiniteGroupTable
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _FINITE_GROUP_FILES = (
@@ -121,6 +125,7 @@ def load_space_group_from_spglib(
     tolerance: float = 1.0e-8,
     algebra_tolerance: float = 1.0e-10,
     finite_groups: FiniteGroupLibrary | None = None,
+    lattice_vectors=None,
 ) -> SpaceGroupDefinition:
     """Load a finite set of Seitz representatives from spglib's database."""
 
@@ -136,6 +141,21 @@ def load_space_group_from_spglib(
         raise ValueError("spglib returned invalid space-group rotations.")
     if translations.shape != (rotations.shape[0], 3):
         raise ValueError("spglib returned invalid space-group translations.")
+
+    if lattice_vectors is not None:
+        rotations, translations, setting = _operations_for_lattice(
+            rotations,
+            translations,
+            lattice_vectors,
+            str(group_type.international_short),
+            tolerance,
+        )
+        LOGGER.info(
+            "spglib Hall %d operations adapted to %s lattice setting: count=%d",
+            hall_number,
+            setting,
+            len(rotations),
+        )
 
     order = sorted(
         range(len(rotations)),
@@ -176,11 +196,13 @@ def load_symmetry_from_spglib(
     *,
     tolerance: float = 1.0e-8,
     algebra_tolerance: float = 1.0e-10,
+    lattice_vectors=None,
 ) -> SymmetryModel:
     definition = load_space_group_from_spglib(
         symbol,
         tolerance=tolerance,
         algebra_tolerance=algebra_tolerance,
+        lattice_vectors=lattice_vectors,
     )
     return SymmetryModel(
         definition.dimension,
@@ -191,6 +213,145 @@ def load_symmetry_from_spglib(
         None,
         definition,
         algebra_tolerance=definition.algebra_tolerance,
+    )
+
+
+def _operations_for_lattice(
+    rotations: np.ndarray,
+    translations: np.ndarray,
+    lattice_vectors,
+    international_symbol: str,
+    tolerance: float,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Express database Seitz operations in the configured lattice basis.
+
+    spglib's database uses the conventional Hall setting.  A calculation may
+    instead use a primitive cell, in which centering translations become
+    ordinary lattice translations and must be removed from the representative
+    set.
+    """
+
+    lattice = np.asarray(lattice_vectors, dtype=float)
+    if lattice.shape != (3, 3) or not np.all(np.isfinite(lattice)):
+        raise ValueError("A finite 3x3 lattice is required to adapt spglib operations.")
+    if abs(float(np.linalg.det(lattice))) <= np.finfo(float).tiny:
+        raise ValueError("The lattice used to adapt spglib operations is singular.")
+
+    direct_residual = _maximum_isometry_residual(rotations, lattice)
+    threshold = max(1.0e-8, 100.0 * float(tolerance))
+    if direct_residual <= threshold:
+        return rotations, translations, "conventional"
+
+    centering = international_symbol.strip()[:1].upper()
+    primitive_basis = _conventional_primitive_basis(centering)
+    if primitive_basis is None:
+        raise ValueError(
+            f"spglib operations for {international_symbol!r} are not isometries of the "
+            f"configured lattice (residual={direct_residual:.6g}), and centering "
+            f"{centering!r} has no supported primitive transformation."
+        )
+
+    inverse = np.linalg.inv(primitive_basis)
+    transformed_rotations = []
+    transformed_translations = []
+    for rotation, translation in zip(rotations, translations):
+        raw_rotation = inverse @ rotation @ primitive_basis
+        integer_rotation = np.rint(raw_rotation).astype(np.int64)
+        if not np.allclose(
+            raw_rotation,
+            integer_rotation,
+            rtol=0.0,
+            atol=threshold,
+        ):
+            raise ValueError(
+                f"Hall operation cannot be represented by an integer rotation in the "
+                f"configured {centering}-primitive basis: {raw_rotation.tolist()}."
+            )
+        transformed_rotations.append(integer_rotation)
+        transformed_translations.append(inverse @ translation)
+
+    unique_rotations, unique_translations = _deduplicate_seitz_representatives(
+        np.asarray(transformed_rotations, dtype=np.int64),
+        np.asarray(transformed_translations, dtype=float),
+        tolerance,
+    )
+    primitive_residual = _maximum_isometry_residual(unique_rotations, lattice)
+    if primitive_residual > threshold:
+        raise ValueError(
+            f"Neither the conventional nor the standard {centering}-primitive Hall "
+            f"setting matches the configured lattice. Isometry residuals are "
+            f"{direct_residual:.6g} and {primitive_residual:.6g}, respectively. "
+            "Use a symmetry YAML expressed in the calculation's fractional basis."
+        )
+    return unique_rotations, unique_translations, f"{centering}-primitive"
+
+
+def _maximum_isometry_residual(rotations: np.ndarray, lattice: np.ndarray) -> float:
+    basis = lattice.T
+    inverse = np.linalg.inv(basis)
+    identity = np.eye(3)
+    return max(
+        float(np.linalg.norm((basis @ rotation @ inverse).T @ (basis @ rotation @ inverse) - identity))
+        for rotation in rotations
+    )
+
+
+def _conventional_primitive_basis(centering: str) -> np.ndarray | None:
+    """Return columns of a standard primitive basis in conventional fractions."""
+
+    matrices = {
+        "F": np.asarray(
+            [[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]]
+        ),
+        "I": np.asarray(
+            [[-0.5, 0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, -0.5]]
+        ),
+        "A": np.asarray(
+            [[1.0, 0.0, 0.0], [0.0, 0.5, -0.5], [0.0, 0.5, 0.5]]
+        ),
+        "B": np.asarray(
+            [[0.5, -0.5, 0.0], [0.0, 0.0, 1.0], [0.5, 0.5, 0.0]]
+        ),
+        "C": np.asarray(
+            [[0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [0.0, 0.0, 1.0]]
+        ),
+    }
+    return matrices.get(centering)
+
+
+def _deduplicate_seitz_representatives(
+    rotations: np.ndarray,
+    translations: np.ndarray,
+    tolerance: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    unique_rotations = []
+    unique_translations = []
+    for rotation, translation in zip(rotations, translations):
+        reduced_translation = np.mod(translation, 1.0)
+        reduced_translation[
+            np.abs(reduced_translation - 1.0) <= tolerance
+        ] = 0.0
+        duplicate = False
+        for previous_rotation, previous_translation in zip(
+            unique_rotations, unique_translations
+        ):
+            if not np.array_equal(rotation, previous_rotation):
+                continue
+            difference = reduced_translation - previous_translation
+            if np.allclose(
+                difference - np.rint(difference),
+                0.0,
+                rtol=0.0,
+                atol=tolerance,
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            unique_rotations.append(rotation)
+            unique_translations.append(reduced_translation)
+    return (
+        np.asarray(unique_rotations, dtype=np.int64),
+        np.asarray(unique_translations, dtype=float),
     )
 
 

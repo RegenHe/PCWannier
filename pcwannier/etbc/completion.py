@@ -252,22 +252,27 @@ def _gamma_augmented_frame(
     extra_count = auxiliary_dimension - 1
     if extra_count > 0:
         fixed = np.concatenate((constants, positive), axis=0)
-        residual_trials = _project_out(orthogonal_trials, fixed, inner_product)
-        gram = _hermitian(
-            inner_product.overlap(residual_trials, residual_trials, chunk_size=64)
+        overlap = np.asarray(
+            inner_product.overlap(fixed, orthogonal_trials, chunk_size=64),
+            dtype=np.complex128,
         )
-        eigenvalues, eigenvectors = np.linalg.eigh(gram)
-        order = np.argsort(eigenvalues)[::-1]
-        selected = order[:extra_count]
-        scale = max(float(np.max(eigenvalues)), np.finfo(float).tiny)
-        threshold = rank_tolerance * scale
-        if selected.size != extra_count or np.any(eigenvalues[selected] <= threshold):
+        _, singular_values, right_adjoint = np.linalg.svd(
+            overlap, full_matrices=True
+        )
+        scale = max(float(np.max(singular_values, initial=0.0)), 1.0)
+        rank = int(np.count_nonzero(singular_values > rank_tolerance * scale))
+        expected_rank = fixed.shape[0]
+        nullity = orthogonal_trials.shape[0] - rank
+        if rank != expected_rank or nullity != extra_count:
             raise ValueError(
-                "ETBC Gamma trial complement cannot supply the remaining auxiliary "
-                f"directions; eigenvalues={eigenvalues.tolist()}, need={extra_count}."
+                "ETBC Gamma trial overlap does not contain the required fixed "
+                "representations and complementary auxiliary space: "
+                f"singular_values={singular_values.tolist()}, rank={rank}, "
+                f"expected_rank={expected_rank}, nullity={nullity}, "
+                f"need={extra_count}."
             )
-        coefficients = eigenvectors[:, selected] / np.sqrt(eigenvalues[selected])[None, :]
-        extra = _mix_fields(residual_trials, coefficients)
+        coefficients = right_adjoint.conj().T[:, rank:]
+        extra = _mix_fields(orthogonal_trials, coefficients)
         auxiliary = np.concatenate((constants[2:3], extra), axis=0)
     else:
         auxiliary = constants[2:3]

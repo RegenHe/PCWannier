@@ -176,6 +176,61 @@ class PeriodicGridInterpolator:
             )
         if self.sample_offset.shape != (self.dimension,):
             raise ValueError("Periodic grid sample offset has an invalid shape.")
+        self._rotation_stencils: dict[bytes, BarycentricStencil] = {}
+        self._rotation_lock = RLock()
+
+    def apply_space_group(
+        self,
+        values: np.ndarray,
+        fractional_vertices: np.ndarray,
+        operation: SpaceGroupOperation,
+        *,
+        fallback: BarycentricStencil,
+    ) -> np.ndarray:
+        """Sample ``f(R^-1(r-tau))`` with an exact Fourier translation.
+
+        MPB fields live on a periodic Fourier grid. Fractional translations
+        that are not commensurate with that grid must therefore be applied in
+        reciprocal space; multilinear interpolation attenuates the field and
+        breaks nonsymmorphic sewing unitarity.
+        """
+
+        if fallback.weights is None:
+            return fallback.apply(values)
+        key = np.asarray(operation.rotation, dtype=np.int64).tobytes()
+        with self._rotation_lock:
+            rotation_stencil = self._rotation_stencils.get(key)
+        if rotation_stencil is None:
+            inverse_rotation = np.linalg.inv(operation.rotation)
+            rotation_preimages = (
+                np.asarray(fractional_vertices, dtype=float) @ inverse_rotation.T
+            )
+            candidate = self.stencil(rotation_preimages)
+            if candidate.weights is not None:
+                # Unequal axis sizes or an unusual sample offset can make even
+                # the rotational part nonconforming. Keep the general fallback
+                # for that case rather than applying an invalid FFT shift.
+                return fallback.apply(values)
+            with self._rotation_lock:
+                rotation_stencil = self._rotation_stencils.setdefault(key, candidate)
+
+        rotated = np.asarray(rotation_stencil.apply(values), dtype=np.complex128)
+        grid_shape = (rotated.shape[0],) + self.shape + rotated.shape[2:]
+        grid_values = rotated.reshape(grid_shape)
+        spatial_axes = tuple(range(1, self.dimension + 1))
+        phase_argument = np.zeros(self.shape, dtype=float)
+        translation = np.asarray(operation.translation, dtype=float)
+        for axis, size in enumerate(self.shape):
+            frequencies = np.fft.fftfreq(size, d=1.0 / size)
+            reshape = [1] * self.dimension
+            reshape[axis] = size
+            phase_argument += frequencies.reshape(reshape) * translation[axis]
+        phase = np.exp(-2j * np.pi * phase_argument)[None, ...]
+        if rotated.ndim == 3:
+            phase = phase[..., None]
+        coefficients = np.fft.fftn(grid_values, axes=spatial_axes)
+        shifted = np.fft.ifftn(coefficients * phase, axes=spatial_axes)
+        return np.ascontiguousarray(shifted.reshape(rotated.shape))
 
     def stencil(self, points) -> BarycentricStencil:
         query = np.asarray(points, dtype=float)
@@ -457,7 +512,15 @@ class BlochSymmetryAction:
         source_k = np.asarray(source_k_fractional, dtype=float)
         transformed_k = operation.act_reciprocal(source_k)
         stencil = self._stencil(operation)
-        sampled = stencil.apply(values)
+        if isinstance(self.interpolator, PeriodicGridInterpolator):
+            sampled = self.interpolator.apply_space_group(
+                values,
+                self.fractional_vertices,
+                operation,
+                fallback=stencil,
+            )
+        else:
+            sampled = stencil.apply(values)
         transformed = self._apply_components(sampled, operation, field_kind)
         if operation.antiunitary:
             if time_reversal is None:

@@ -25,6 +25,7 @@ from pcwannier.ebr.models import (
 )
 from pcwannier.ebr.catalog import infer_builtin_catalog_alias, load_ebr_catalog
 from pcwannier.ebr.analysis import (
+    _approximate_ebr_diagnostics,
     _build_subspace_inventory,
     _gamma_zero_mode_dimension,
     _has_transverse_gamma_singularity,
@@ -137,6 +138,24 @@ def sg224_matrix() -> EBRMatrix:
 
 
 @pytest.fixture(scope="module")
+def sg227_matrix() -> EBRMatrix:
+    lattice = np.asarray(
+        (
+            (0.0, 0.5, 0.5),
+            (0.5, 0.0, 0.5),
+            (0.5, 0.5, 0.0),
+        )
+    )
+    model = load_symmetry_from_spglib("hall:526", lattice_vectors=lattice)
+    context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
+    return build_ebr_matrix(
+        context,
+        load_ebr_catalog("sg227"),
+        lattice_vectors=lattice,
+    )
+
+
+@pytest.fixture(scope="module")
 def p4mm_matrix() -> EBRMatrix:
     path = resources.files("pcwannier.symmetry").joinpath(
         "space_groups", "p4mm.yaml"
@@ -182,6 +201,45 @@ def test_catalog_alias_and_strict_custom_schema(tmp_path):
     with pytest.raises(ValueError, match="forbidden"):
         load_ebr_catalog(custom)
 
+
+def test_sg227_catalog_builds_in_fcc_primitive_setting(sg227_matrix):
+    catalog = load_ebr_catalog("227")
+
+    assert catalog.space_group_number == 227
+    assert catalog.hall_number == 526
+    assert sg227_matrix.values.shape == (22, 22)
+    assert tuple(definition.name for definition in sg227_matrix.columns)[-6:] == (
+        "A1g@16d",
+        "A2g@16d",
+        "Eg@16d",
+        "A1u@16d",
+        "A2u@16d",
+        "Eu@16d",
+    )
+    assert sg227_matrix.dimensions.tolist() == [
+        2,
+        2,
+        4,
+        6,
+        6,
+        2,
+        2,
+        4,
+        6,
+        6,
+        4,
+        4,
+        8,
+        4,
+        4,
+        8,
+        4,
+        4,
+        8,
+        4,
+        4,
+        8,
+    ]
 
 def test_sg213_catalog_uses_maximal_wyckoff_positions(sg213_matrix):
     catalog = load_ebr_catalog("213")
@@ -887,7 +945,7 @@ def test_t_plus_l_treats_the_three_dimensional_gamma_zero_block_as_regular():
     )
 
 
-def test_band_vector_rejects_nonexact_physical_decomposition():
+def test_band_vector_rejects_point_without_exact_or_approximate_decomposition():
     catalog = EBRCatalog(
         "fixture",
         1,
@@ -909,8 +967,50 @@ def test_band_vector_rejects_nonexact_physical_decomposition():
         (),
         None,
     )
-    with pytest.raises(ValueError, match="no exact physical decomposition"):
+    with pytest.raises(ValueError, match="no usable physical decomposition"):
         build_band_symmetry_vector(BlochSymmetryAnalysisResult((point,)), catalog)
+
+
+def test_band_vector_uses_accepted_approximate_block_decomposition():
+    catalog = EBRCatalog(
+        "fixture",
+        1,
+        1,
+        (EBRKPoint("Gamma", np.zeros(1)),),
+        (EBRDefinition("A@1a", "1a", np.zeros(1), "A"),),
+    )
+    approximate = SimpleNamespace(multiplicities={"A": 1}, max_residual=2.0e-12)
+    block = SimpleNamespace(
+        band_indices=(0,),
+        energies=(1.0,),
+        decomposition=None,
+        approximate_decomposition=approximate,
+        character_fit_error=3.0e-12,
+        leakage=0.02,
+    )
+    resolved = SimpleNamespace(
+        require_irreps=lambda: (SimpleNamespace(name="A", dimension=1),)
+    )
+    point = SimpleNamespace(
+        name="Gamma",
+        k_fractional=np.zeros(1),
+        requested_k_fractional=np.zeros(1),
+        band_indices=(0,),
+        degenerate_blocks=(block,),
+        physical_decomposition=None,
+        resolved_little_group=resolved,
+        antiunitary_operation_names=(),
+    )
+
+    vector = build_band_symmetry_vector(SimpleNamespace(points=(point,)), catalog)
+
+    assert np.array_equal(vector.multiplicities, [1])
+    assert vector.total_dimension == 1
+    diagnostics = _approximate_ebr_diagnostics(
+        SimpleNamespace(points=(point,)), catalog, 1.0e-8
+    )
+    assert "bands(0-based)=(0,)" in diagnostics[0]
+    assert "character_error=3e-12" in diagnostics[0]
 
 
 def test_ebr_json_output_round_trip(tmp_path):

@@ -28,7 +28,10 @@ from pcwannier.outputs import (
 )
 from pcwannier.sources import load_input
 from pcwannier.sources.mpb import load_mpb_grid
-from pcwannier.symmetry.bloch import PeriodicGridInterpolator
+from pcwannier.symmetry.bloch import (
+    PeriodicGridInterpolator,
+    build_bloch_symmetry_action,
+)
 from pcwannier.symmetry.group import SpaceGroupOperation
 from pcwannier.symmetry.wannier_validation import (
     _RegularGridInterpolator,
@@ -288,6 +291,35 @@ def test_multilinear_stencil_applies_large_queries_in_consistent_chunks():
     assert stencil.weights is not None
     assert actual.shape == (2, len(query))
     assert np.allclose(actual, actual[:, :1])
+
+
+def test_mpb_symmetry_uses_spectral_noncommensurate_translation():
+    grid = PeriodicGrid((6, 6, 6), np.eye(3))
+    fractional = grid.fractional_vertices
+    wavevector = np.asarray([1, -2, 1], dtype=float)
+    values = np.exp(2j * np.pi * (fractional @ wavevector))[None, :]
+    operation = SpaceGroupOperation(
+        np.eye(3, dtype=int),
+        np.asarray([0.25, 0.0, 0.0]),
+        name="quarter_translation",
+    )
+    action = build_bloch_symmetry_action(
+        grid,
+        fractional,
+        np.eye(3),
+        bloch_sign=1,
+        tolerance=1.0e-10,
+    )
+
+    transformed = action.apply(
+        values,
+        operation,
+        np.zeros(3),
+        FieldKind.SCALAR,
+    )
+    expected = np.exp(-2j * np.pi * np.dot(wavevector, operation.translation)) * values
+
+    assert np.allclose(transformed, expected, rtol=0.0, atol=2.0e-14)
 
 
 def test_chunked_uniform_wannier_symmetry_norms_match_identity_action():

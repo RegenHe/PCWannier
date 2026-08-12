@@ -80,6 +80,49 @@ def test_pm3m_database_and_little_groups():
     assert "Eg" in {irrep.name for irrep in xpoint.irreps}
 
 
+def test_fd3m_database_is_rebased_to_fcc_primitive_lattice():
+    lattice = np.asarray(
+        [[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]]
+    )
+    model = load_symmetry_from_spglib("hall:525", lattice_vectors=lattice)
+
+    assert len(model.group.operations) == 48
+    assert model.group_definition is not None
+    assert model.group_definition.point_group.symbol == "m-3m"
+    inverse_basis = np.linalg.inv(lattice.T)
+    for operation in model.group.operations:
+        cartesian = lattice.T @ operation.rotation @ inverse_basis
+        assert np.linalg.norm(cartesian.T @ cartesian - np.eye(3)) < 1.0e-12
+
+    axes = [np.asarray([-0.5, -0.25, 0.0, 0.25])] * 3
+    context = build_symmetry_context(model, axes)
+    assert len(context.k_mappings) == 48
+    assert all(len(mappings) == 64 for mappings in context.k_mappings)
+
+
+def test_fd3m_database_keeps_conventional_centering_translations():
+    model = load_symmetry_from_spglib("hall:525", lattice_vectors=np.eye(3))
+
+    assert len(model.group.operations) == 192
+
+
+def test_fd3m_primitive_wyckoff_uses_conventional_multiplicity():
+    lattice = np.asarray(
+        [[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]]
+    )
+    model = load_symmetry_from_spglib("hall:526", lattice_vectors=lattice)
+
+    assert model.group_definition.identify_wyckoff(
+        [0.125, 0.125, 0.125], lattice
+    ) == (8, "a")
+    assert len(
+        {
+            tuple(np.round(operation.act_real([0.125, 0.125, 0.125]) % 1.0, 12))
+            for operation in model.group.operations
+        }
+    ) == 2
+
+
 def test_three_dimensional_axial_vector_inversion_and_mirror():
     inversion = SpaceGroupOperation(-np.eye(3, dtype=int), np.zeros(3))
     mirror_z = SpaceGroupOperation(np.diag([1, 1, -1]), np.zeros(3))

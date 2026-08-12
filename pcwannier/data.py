@@ -13,7 +13,6 @@ from .conventions import BlochConvention, BlochFieldRepresentation
 from .maxwell import FieldKind, MaxwellProblem
 
 if TYPE_CHECKING:
-    from .compute.projector_interpolation import ProjectorBandInterpolationDiagnostics
     from .etbc import ETBCCompletionResult
     from .symmetry.analysis import (
         BlochSymmetryAnalysisResult,
@@ -531,7 +530,6 @@ class RunResult:
     trial_covariance_diagnostics: tuple[Any, ...] = ()
     etbc: ETBCCompletionResult | None = None
     transverse_projectors: np.ndarray | None = None
-    projector_interpolation_diagnostics: ProjectorBandInterpolationDiagnostics | None = None
 
 
 @dataclass

@@ -22,6 +22,29 @@ import pcwannier.compute.vector_trials as vector_trials_module
 from pcwannier.compute.wannier import _uniform_grid_wannier_sum, generate_wannier
 
 
+def test_skew_lattice_minimum_image_uses_cartesian_metric():
+    lattice = np.asarray(
+        (
+            (0.0, 0.5, 0.5),
+            (0.5, 0.0, 0.5),
+            (0.5, 0.5, 0.0),
+        )
+    )
+    fractional = np.asarray([[0.6, 0.6, -0.4]])
+    component_wrapped = fractional - np.floor(fractional + 0.5)
+
+    reduced = vector_trials_module._minimum_image_fractional(
+        fractional,
+        lattice,
+        np.ones(3),
+    )
+
+    assert np.allclose(np.mod(reduced - fractional, 1.0), 0.0, atol=1.0e-14)
+    assert np.linalg.norm(reduced @ lattice) < np.linalg.norm(
+        component_wrapped @ lattice
+    )
+
+
 @pytest.mark.parametrize("bloch_sign", [-1, 1])
 def test_translation_bloch_fft_matches_direct_sum(bloch_sign):
     k_points = (
@@ -195,7 +218,7 @@ def test_etbc_config_uses_targets_without_longitudinal_files(tmp_path):
                 "extension = 1,1,1",
                 "wannier_figures = false",
                 "symmetry_file = Pm-3m",
-                "symmetry_constrained = false",
+                "symmetry_constrained = true",
                 "projections",
                 "3c; [0.5,0.5,0.0]; (z=[0,0,1], x=[1,0,0]); [1,0,0,5]@[0,0,1]",
                 "end",
@@ -600,7 +623,7 @@ def test_synthetic_3d_etbc_completion_runs_full_wannier_pipeline(tmp_path):
                 "max_iter = 0",
                 "wannier_figures = false",
                 "symmetry_file = Pm-3m",
-                "symmetry_constrained = false",
+                "symmetry_constrained = true",
                 "projections",
                 "1a; [0,0,0]; (z=[0,0,1], x=[1,0,0]); "
                 "[1,0,0,4]@[1,0,0]; [1,0,0,4]@[0,1,0]; [1,0,0,4]@[0,0,1]",

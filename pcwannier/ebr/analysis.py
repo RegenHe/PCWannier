@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import lru_cache, reduce
 from itertools import product
 from math import gcd
@@ -44,6 +44,78 @@ if TYPE_CHECKING:
     from ..data import BlochSymmetryRunResult
 
 
+@dataclass(frozen=True)
+class _EBRDecompositionSelection:
+    multiplicities: dict[str, int]
+    max_residual: float
+    approximate_blocks: tuple[tuple[int, ...], ...] = ()
+
+
+def _ebr_block_decomposition(block):
+    """Return an integer irrep label suitable for discrete EBR counting."""
+
+    exact = getattr(block, "decomposition", None)
+    if exact is not None:
+        return exact, False
+    approximate = getattr(block, "approximate_decomposition", None)
+    if approximate is not None:
+        return approximate, True
+    return None, False
+
+
+def _ebr_point_decomposition(point) -> _EBRDecompositionSelection | None:
+    exact = getattr(point, "physical_decomposition", None)
+    if exact is not None:
+        return _EBRDecompositionSelection(
+            dict(exact.multiplicities), float(exact.max_residual)
+        )
+
+    blocks = tuple(getattr(point, "degenerate_blocks", ()))
+    if not blocks:
+        return None
+    multiplicities: dict[str, int] = {}
+    residual = 0.0
+    approximate_blocks = []
+    for block in blocks:
+        decomposition, approximate = _ebr_block_decomposition(block)
+        if decomposition is None:
+            return None
+        for name, value in decomposition.multiplicities.items():
+            multiplicities[name] = multiplicities.get(name, 0) + int(value)
+        residual = max(residual, float(decomposition.max_residual))
+        if approximate:
+            approximate_blocks.append(tuple(int(value) for value in block.band_indices))
+    return _EBRDecompositionSelection(
+        multiplicities,
+        residual,
+        tuple(approximate_blocks),
+    )
+
+
+def _approximate_ebr_diagnostics(
+    analysis: BlochSymmetryAnalysisResult,
+    catalog: EBRCatalog,
+    tolerance: float,
+) -> tuple[str, ...]:
+    diagnostics = []
+    for catalog_point in catalog.k_points:
+        point = _matching_analysis_point(analysis, catalog_point, tolerance)
+        for block in point.degenerate_blocks:
+            if block.decomposition is not None or block.approximate_decomposition is None:
+                continue
+            error = (
+                "unknown"
+                if block.character_fit_error is None
+                else f"{float(block.character_fit_error):.6g}"
+            )
+            diagnostics.append(
+                "EBR counting uses approximate irrep label at "
+                f"{point.name}: bands(0-based)={tuple(block.band_indices)}; "
+                f"character_error={error}; leakage={float(block.leakage):.6g}."
+            )
+    return tuple(diagnostics)
+
+
 def build_band_symmetry_vector(
     analysis: BlochSymmetryAnalysisResult,
     catalog: EBRCatalog,
@@ -58,13 +130,14 @@ def build_band_symmetry_vector(
     for catalog_point in catalog.k_points:
         point = _matching_analysis_point(analysis, catalog_point, tolerance)
         _require_unitary_point(point)
-        decomposition = point.physical_decomposition
+        decomposition = _ebr_point_decomposition(point)
         if decomposition is None:
             raise ValueError(
-                f"Representation point {point.name!r} has no exact physical decomposition; "
-                "approximate or leakage-limited irrep labels cannot be used for EBR analysis."
+                f"Representation point {point.name!r} has no usable physical "
+                "decomposition; every selected block needs an exact or accepted "
+                "approximate irrep label for EBR analysis."
             )
-        if decomposition.max_residual > tolerance:
+        if not decomposition.approximate_blocks and decomposition.max_residual > tolerance:
             raise ValueError(
                 f"Representation point {point.name!r} decomposition residual "
                 f"{decomposition.max_residual:.6g} exceeds {tolerance:.6g}."
@@ -168,11 +241,6 @@ class EBRMatrixBuilder:
             )
             self._orbit_cache[key] = orbit
         declared_multiplicity = _wyckoff_multiplicity(ebr.wyckoff)
-        if declared_multiplicity != orbit.multiplicity:
-            raise ValueError(
-                f"EBR {ebr.name!r} declares Wyckoff {ebr.wyckoff!r}, but its center "
-                f"has orbit multiplicity {orbit.multiplicity}."
-            )
         if self.lattice_vectors is not None and self.definition.dimension == 3:
             wyckoff_key = (ebr.wyckoff, key)
             if wyckoff_key not in self._validated_wyckoff:
@@ -180,6 +248,11 @@ class EBRMatrixBuilder:
                     ebr.wyckoff, ebr.center, self.lattice_vectors
                 )
                 self._validated_wyckoff.add(wyckoff_key)
+        elif declared_multiplicity != orbit.multiplicity:
+            raise ValueError(
+                f"EBR {ebr.name!r} declares Wyckoff {ebr.wyckoff!r}, but its center "
+                f"has orbit multiplicity {orbit.multiplicity}."
+            )
         return orbit
 
     def _target(self, ebr: EBRDefinition):
@@ -308,7 +381,13 @@ def run_ebr_analysis(
         lattice_vectors=config.real_lattice_vectors,
     )
     mode = _resolve_ebr_mode(config, context)
-    diagnostics = []
+    diagnostics = list(
+        _approximate_ebr_diagnostics(
+            physical_analysis,
+            catalog,
+            context.model.tolerance,
+        )
+    )
     if mode == "regular":
         vector = build_band_symmetry_vector(physical_analysis, catalog)
         vector = vector.reordered(matrix.row_keys)
@@ -675,7 +754,8 @@ def _build_subspace_inventory(
                 and _is_zero_block(block, zero_tolerance)
             ):
                 continue
-            if block.decomposition is None:
+            decomposition, _ = _ebr_block_decomposition(block)
+            if decomposition is None:
                 if skipped_blocks is not None:
                     reason = block.irrep_unavailable_reason or "no exact irrep decomposition"
                     skipped_blocks.append(
@@ -683,7 +763,7 @@ def _build_subspace_inventory(
                         f"{tuple(block.band_indices)}; reason={reason}."
                     )
                 continue
-            for name, multiplicity in block.decomposition.multiplicities.items():
+            for name, multiplicity in decomposition.multiplicities.items():
                 counts[name] = counts.get(name, 0) + int(multiplicity)
         for name in names:
             rows.append(SymmetryVectorKey(catalog_point.name, name))
@@ -767,13 +847,16 @@ def _match_subspace_representations(
                 and catalog_point.name == catalog.gamma_point.name
                 and _is_zero_block(block, zero_tolerance)
             )
-            and block.decomposition is not None
+            and _ebr_block_decomposition(block)[0] is not None
         )
         fixed = set(fixed_band_indices)
         options = []
         for block in blocks:
+            decomposition, _ = _ebr_block_decomposition(block)
+            if decomposition is None:
+                raise RuntimeError("Internal EBR block filtering lost its decomposition.")
             full = np.asarray(
-                [block.decomposition.multiplicities.get(name, 0) for name in names],
+                [decomposition.multiplicities.get(name, 0) for name in names],
                 dtype=np.int64,
             )
             represented_dimension = int(full @ irrep_dimensions)
@@ -925,7 +1008,7 @@ def _validate_subspace_fixed_bands(
             )
             if is_gamma_zero:
                 include_gamma_zero_modes = True
-            elif block.decomposition is None:
+            elif _ebr_block_decomposition(block)[0] is None:
                 reason = block.irrep_unavailable_reason or "no exact irrep decomposition"
                 raise ValueError(
                     f"Fixed EBR subspace band at {point.name!r} belongs to incomplete "
@@ -1009,11 +1092,11 @@ def _build_transverse_symmetry_vector(
         _require_unitary_point(point)
         selected_dimensions.append(len(point.band_indices))
         if catalog_point.name != catalog.gamma_point.name:
-            decomposition = point.physical_decomposition
+            decomposition = _ebr_point_decomposition(point)
             if decomposition is None:
                 raise ValueError(
-                    f"Non-Gamma representation point {point.name!r} has no exact physical "
-                    "decomposition and cannot be used for TETB enumeration."
+                    f"Non-Gamma representation point {point.name!r} has no usable exact "
+                    "or accepted approximate decomposition for TETB enumeration."
                 )
             point_values = decomposition.multiplicities
         else:
@@ -1055,8 +1138,9 @@ def _transverse_gamma_multiplicities(
     )
     zero_dimension = sum(len(block.band_indices) for block in zero_blocks)
     if zero_dimension != 2:
-        if point.physical_decomposition is not None:
-            return dict(point.physical_decomposition.multiplicities)
+        decomposition = _ebr_point_decomposition(point)
+        if decomposition is not None:
+            return dict(decomposition.multiplicities)
         raise ValueError(
             "Transverse EBR analysis requires exactly two unresolved zero-frequency Gamma "
             f"modes; found dimension {zero_dimension}."
@@ -1069,11 +1153,13 @@ def _transverse_gamma_multiplicities(
     for block in point.degenerate_blocks:
         if block.band_indices in zero_band_sets:
             continue
-        if block.decomposition is None:
+        decomposition, _ = _ebr_block_decomposition(block)
+        if decomposition is None:
             raise ValueError(
-                f"Nonzero Gamma block {block.band_indices} has no exact irrep decomposition."
+                f"Nonzero Gamma block {block.band_indices} has no usable exact or "
+                "accepted approximate irrep decomposition."
             )
-        for name, multiplicity in block.decomposition.multiplicities.items():
+        for name, multiplicity in decomposition.multiplicities.items():
             output[name] = output.get(name, 0) + int(multiplicity)
     return output
 

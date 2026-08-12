@@ -198,7 +198,7 @@ def test_tba_uses_full_source_basis_hamiltonian_before_wannier_gauge():
     )
 
 
-def test_projector_band_interpolation_preserves_sectors_without_changing_hoppings():
+def test_tba_bands_use_hoppings_and_export_sampled_transverse_projectors():
     shape = (2, 1, 1)
     energies = np.empty(shape, dtype=object)
     indices = np.empty(shape, dtype=object)
@@ -251,43 +251,29 @@ def test_projector_band_interpolation_preserves_sectors_without_changing_hopping
         state=state,
         output_state_coefficients_at=lambda i, _j, _k: gauges[i],
     )
-    ordinary = TBAModel(ctx)
-    constrained = TBAModel(
-        ctx,
-        projector_preserving=True,
-        fixed_longitudinal_eigenvalue=0.0,
+    model = TBAModel(ctx)
+    hoppings = model.collect_hoppings()
+    neighbors = model._band_neighbors(hoppings)
+    direct_factory = model._h_of_k_factory(
+        hoppings[(0, 0, 0)],
+        neighbors,
+        model._hoppings_for_neighbors(hoppings, neighbors),
     )
-    file_longitudinal = TBAModel(ctx, projector_preserving=True)
+    band_factory = model._band_hamiltonian_factory(hoppings)
+    k_cart = model._kfrac_to_kcart(np.asarray([[0.25, 0.0, 0.0]]))
 
-    ordinary_hoppings = ordinary.collect_hoppings()
-    constrained_hoppings = constrained.collect_hoppings()
-    assert ordinary_hoppings.keys() == constrained_hoppings.keys()
-    for key in ordinary_hoppings:
-        assert np.allclose(ordinary_hoppings[key], constrained_hoppings[key])
+    assert np.allclose(band_factory(k_cart), direct_factory(k_cart))
 
-    h_of_k = constrained._band_hamiltonian_factory(constrained_hoppings)
-    interpolated = h_of_k(constrained._kfrac_to_kcart(np.asarray([[0.25, 0.0, 0.0]])))
-    eigenvalues = np.linalg.eigvalsh(interpolated[0])
-
-    assert np.min(np.abs(eigenvalues)) < 1.0e-13
-    assert constrained.projector_interpolation_diagnostics is not None
-    assert (
-        constrained.projector_interpolation_diagnostics
-        .maximum_flattened_projector_idempotency_error
-        < 1.0e-13
-    )
-
-    file_hoppings = file_longitudinal.collect_hoppings()
-    projector_grid = file_longitudinal.transverse_projectors()
+    projector_grid = model.transverse_projectors()
     assert projector_grid.shape == shape
     assert np.allclose(
         projector_grid[0, 0, 0] @ projector_grid[0, 0, 0],
         projector_grid[0, 0, 0],
         atol=1.0e-13,
     )
-    file_h_of_k = file_longitudinal._band_hamiltonian_factory(file_hoppings)
-    sampled = file_h_of_k(
-        file_longitudinal._kfrac_to_kcart(
+    assert np.trace(projector_grid[0, 0, 0]).real == pytest.approx(2.0)
+    sampled = band_factory(
+        model._kfrac_to_kcart(
             np.asarray([[-0.5, 0.0, 0.0], [0.0, 0.0, 0.0]])
         )
     )

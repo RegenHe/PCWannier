@@ -527,16 +527,17 @@ class SpaceGroupDefinition:
             )
         import spglib
 
-        symmetry = spglib.get_symmetry_from_database(int(self.hall_number))
-        if symmetry is None:
+        database_symmetry = spglib.get_symmetry_from_database(int(self.hall_number))
+        if database_symmetry is None:
             raise ValueError(f"spglib could not load Hall number {self.hall_number}.")
+
         point = np.asarray(center, dtype=float)
         lattice = np.asarray(lattice_vectors, dtype=float)
         if point.shape != (3,) or lattice.shape != (3, 3):
             raise ValueError("Wyckoff identification requires a 3D center and 3x3 lattice.")
         candidates = []
-        for rotation, translation in zip(symmetry["rotations"], symmetry["translations"]):
-            transformed = np.mod(np.asarray(rotation, dtype=int) @ point + translation, 1.0)
+        for operation in self.group.operations:
+            transformed = np.mod(operation.act_real(point), 1.0)
             if not any(
                 np.allclose(
                     transformed - previous - np.rint(transformed - previous),
@@ -559,13 +560,8 @@ class SpaceGroupDefinition:
         generic_orbit = None
         for generic_point in generic_candidates:
             orbit = []
-            for rotation, translation in zip(
-                symmetry["rotations"], symmetry["translations"]
-            ):
-                transformed = np.mod(
-                    np.asarray(rotation, dtype=int) @ generic_point + translation,
-                    1.0,
-                )
+            for operation in self.group.operations:
+                transformed = np.mod(operation.act_real(generic_point), 1.0)
                 if not any(
                     np.allclose(
                         transformed - previous - np.rint(transformed - previous),
@@ -576,7 +572,7 @@ class SpaceGroupDefinition:
                     for previous in orbit
                 ):
                     orbit.append(transformed)
-            if len(orbit) == len(symmetry["rotations"]):
+            if len(orbit) == len(self.group.operations):
                 generic_orbit = np.asarray(orbit, dtype=float)
                 break
         if generic_orbit is None:
@@ -605,7 +601,13 @@ class SpaceGroupDefinition:
             raise ValueError(
                 f"The generated orbit has inconsistent Wyckoff letters: {letters}."
             )
-        return len(candidates), letters[0]
+        database_order = len(database_symmetry["rotations"])
+        if database_order % len(self.group.operations) != 0:
+            raise ValueError(
+                "The configured primitive space group is inconsistent with its Hall setting."
+            )
+        centering_index = database_order // len(self.group.operations)
+        return len(candidates) * centering_index, letters[0]
 
     def validate_wyckoff(self, label: str, center, lattice_vectors) -> None:
         multiplicity, letter = self.identify_wyckoff(center, lattice_vectors)

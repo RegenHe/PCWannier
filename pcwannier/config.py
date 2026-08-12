@@ -45,7 +45,6 @@ class IncarConfig:
     wannier_subspace: str = "T"
     longitudinal_source: str = "file"
     invert_longitudinal_energies: bool = False
-    projector_preserving_band_interpolation: bool = False
     etbc_auxiliary_eigenvalue: float = 0.0
     etbc_rank_tolerance: float = 1.0e-10
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None
@@ -407,6 +406,11 @@ class IncarParser:
             raise ValueError(f"Unterminated incar block(s): {', '.join(unterminated)}.")
 
         cfg.validate_required(mode=self.mode)
+        if self.mode == "bloch_symmetry":
+            # Physical Bloch preanalysis does not construct a target gauge or
+            # run Wannier localization.  Ignore calculation-only constraints
+            # before centralized validation, as promised by the CLI mode.
+            cfg.symmetry_constrained = False
         preprocess_config(cfg)
         if self.mode != "bloch_symmetry" and cfg.projections is not None:
             from .projections import ProjectionRecord3D
@@ -463,6 +467,7 @@ class IncarParser:
                     str(cfg.symmetry_file),
                     tolerance=cfg.symmetry_tolerance,
                     algebra_tolerance=cfg.symmetry_algebra_tolerance,
+                    lattice_vectors=cfg.real_lattice_vectors,
                 )
                 cfg.symmetry_resolved_reference = f"spglib:{model.group_definition.name}"
             else:
@@ -824,7 +829,6 @@ class IncarParser:
             "symmetry_validate_wannier",
             "gamma_zero_regularization",
             "invert_longitudinal_energies",
-            "projector_preserving_band_interpolation",
         }:
             normalized = value.strip().lower()
             if normalized not in {"true", "false"}:
@@ -1409,10 +1413,6 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
                 raise ValueError("longitudinal_source=etbc requires a three-dimensional lattice.")
             if cfg.inner_window is not False:
                 raise ValueError("longitudinal_source=etbc currently requires inner_window=false.")
-            if cfg.symmetry_constrained:
-                raise NotImplementedError(
-                    "longitudinal_source=etbc does not yet support symmetry-constrained localization."
-                )
             ignored = []
             for name, inactive in (
                 ("longitudinal_field_file", False),

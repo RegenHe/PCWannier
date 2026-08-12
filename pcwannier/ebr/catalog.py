@@ -18,6 +18,8 @@ _BUILTIN_ALIASES = {
     "sg213": "sg213.yaml",
     "224": "sg224.yaml",
     "sg224": "sg224.yaml",
+    "227": "sg227.yaml",
+    "sg227": "sg227.yaml",
     # Common short wallpaper-group symbols.
     "cm": "c1m1.yaml",
     "cmm": "c2mm.yaml",

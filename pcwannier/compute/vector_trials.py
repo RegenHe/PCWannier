@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from itertools import product
 import logging
 
 import numpy as np
@@ -21,6 +22,39 @@ from .parallel import parallel_map
 from .prepared import ProjectionSeed
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _minimum_image_fractional(
+    fractional: np.ndarray,
+    lattice: np.ndarray,
+    periods: np.ndarray,
+) -> np.ndarray:
+    """Reduce displacements using the Cartesian metric of a skew lattice."""
+
+    values = np.asarray(fractional, dtype=float)
+    basis = np.asarray(lattice, dtype=float)
+    period_values = np.asarray(periods, dtype=float).reshape(-1)
+    if values.ndim != 2 or values.shape[1] != period_values.size:
+        raise ValueError("Fractional displacements and periods have incompatible shapes.")
+    if basis.shape != (period_values.size, period_values.size):
+        raise ValueError("Minimum-image lattice has an invalid shape.")
+    nearest = np.floor(values / period_values[None, :] + 0.5).astype(np.int64)
+    best = None
+    best_norm = None
+    for offset in product((-1, 0, 1), repeat=period_values.size):
+        image = nearest + np.asarray(offset, dtype=np.int64)[None, :]
+        candidate = values - image * period_values[None, :]
+        cartesian = candidate @ basis
+        norm = np.einsum("pi,pi->p", cartesian, cartesian, optimize=True)
+        if best is None:
+            best = candidate
+            best_norm = norm
+            continue
+        update = norm < best_norm
+        best[update] = candidate[update]
+        best_norm[update] = norm[update]
+    assert best is not None
+    return best
 
 
 @dataclass(frozen=True)
@@ -75,8 +109,10 @@ def _evaluate_prepared_trial(
     displacement = points_cartesian - center[None, :]
     fractional = (displacement / scale) @ prepared.inverse_lattice
     period_values = np.asarray(periods, dtype=float)
-    fractional -= period_values[None, :] * np.floor(
-        fractional / period_values[None, :] + 0.5
+    fractional = _minimum_image_fractional(
+        fractional,
+        lattice,
+        period_values,
     )
     displacement = (fractional @ lattice) * scale
     values = prepared.trial.evaluate(
@@ -124,10 +160,12 @@ def _evaluate_transformed_trial(
         scale = float(state.config.lattice_const)
         fractional = (displacement / scale) @ np.linalg.inv(lattice)
         # The trial lives on the finite Born-von Karman torus selected by the
-        # k mesh.  Minimum-image reduction makes the finite real-space
-        # representative independent of the arbitrary output extension.
-        fractional -= periods[None, :] * np.floor(
-            fractional / periods[None, :] + 0.5
+        # k mesh. Use the Cartesian metric: component-wise wrapping is not a
+        # symmetry-covariant nearest-image rule for skew primitive lattices.
+        fractional = _minimum_image_fractional(
+            fractional,
+            lattice,
+            periods,
         )
         displacement = (fractional @ lattice) * scale
     rotation = _cartesian_rotation(

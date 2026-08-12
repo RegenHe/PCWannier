@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Mapping, Sequence
 
 import numpy as np
 
+from ..compute.parallel import parallel_map
 from .bloch import StateBlochSymmetryProvider
 from .constraints import propagate_physical_frame, semilinear_value
 from .representation import SymmetryContext
@@ -315,7 +316,6 @@ def construct_symmetry_gauge(
     provider: StateBlochSymmetryProvider | None = None,
 ) -> SymmetryGaugeResult:
     """Construct an isolated-band symmetry gauge on every k point."""
-    del threads  # Sewing uses shared arrays; the small gauge algebra is deterministic and ordered.
     targets = context.model.targets
     if not targets:
         raise ValueError("Symmetry gauge construction requires at least one Wannier target.")
@@ -325,6 +325,12 @@ def construct_symmetry_gauge(
 
     partition = build_symmetry_stars(context)
     provider = provider or StateBlochSymmetryProvider(state, context)
+    _prefetch_sewing_matrices(
+        context,
+        provider,
+        band_indices_by_k,
+        threads=max(1, int(threads)),
+    )
     gauge = np.empty(state.k_shape, dtype=object)
     representative_diagnostics = []
     path_residual = 0.0
@@ -497,6 +503,52 @@ def construct_symmetry_gauge(
         band_indices_by_k,
         physical_sewing_defect=physical_sewing_defect,
     )
+
+
+def _prefetch_sewing_matrices(
+    context: SymmetryContext,
+    provider: StateBlochSymmetryProvider,
+    band_indices_by_k: np.ndarray,
+    *,
+    threads: int,
+) -> None:
+    """Populate the run-scoped sewing cache operation by operation."""
+
+    matrix_count = sum(len(mappings) for mappings in context.k_mappings)
+    if matrix_count == 0:
+        return
+    LOGGER.info(
+        "Prefetch symmetry sewing matrices: count=%d threads=%d",
+        matrix_count,
+        threads,
+    )
+
+    def integrate(mapping) -> None:
+        source_bands = _bands_at_grid(
+            band_indices_by_k, mapping.source_k_index
+        )
+        target_bands = _bands_at_grid(
+            band_indices_by_k, mapping.target_k_index
+        )
+        provider.sewing_matrix_between_mapping(
+            mapping,
+            source_bands,
+            target_bands,
+        )
+
+    for mappings in context.k_mappings:
+        if not mappings:
+            continue
+        # The first request builds the operation-specific spatial stencil.
+        integrate(mappings[0])
+        for _ in parallel_map(
+            mappings[1:],
+            integrate,
+            threads,
+            ordered=False,
+            bytes_per_task=64 * 1024 * 1024,
+        ):
+            pass
 
 
 def evaluate_symmetry_gauge(

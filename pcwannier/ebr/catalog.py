@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -12,14 +13,6 @@ from .models import EBRCatalog, EBRDefinition, EBRKPoint
 
 
 _BUILTIN_ALIASES = {
-    "213": "sg213.yaml",
-    "221": "sg221.yaml",
-    "sg221": "sg221.yaml",
-    "sg213": "sg213.yaml",
-    "224": "sg224.yaml",
-    "sg224": "sg224.yaml",
-    "227": "sg227.yaml",
-    "sg227": "sg227.yaml",
     # Common short wallpaper-group symbols.
     "cm": "c1m1.yaml",
     "cmm": "c2mm.yaml",
@@ -30,6 +23,28 @@ _BUILTIN_ALIASES = {
     "p4g": "p4gm.yaml",
     "p6m": "p6mm.yaml",
 }
+
+_BUILTIN_SPACE_GROUP_HALLS = {
+    198: (492,),
+    199: (493,),
+    205: (501,),
+    206: (502,),
+    212: (508,),
+    213: (509,),
+    214: (510,),
+    216: (512,),
+    221: (517,),
+    224: (521, 522),
+    225: (523,),
+    227: (525, 526),
+    229: (529,),
+    230: (530,),
+}
+_HALL_REFERENCE = re.compile(r"^hall:?([0-9]+)$", re.IGNORECASE)
+_SPACE_GROUP_REFERENCE = re.compile(r"^(?:sg)?([0-9]+)$", re.IGNORECASE)
+_NESTED_HALL_REFERENCE = re.compile(
+    r"^sg([0-9]+)/hall([0-9]+)(?:\.yaml)?$", re.IGNORECASE
+)
 
 _WALLPAPER_GROUP_FILES = (
     "p1.yaml",
@@ -62,12 +77,15 @@ def load_ebr_catalog(
     path_or_alias: str | Path,
     *,
     base_dir: str | Path | None = None,
+    hall_number: int | None = None,
 ) -> EBRCatalog:
-    """Load a strict EBR-generation catalog from a path or built-in alias."""
+    """Load an EBR catalog, resolving 3D built-ins by space group and Hall setting."""
 
     raw_value = str(path_or_alias).strip()
     if not raw_value:
         raise ValueError("EBR catalog path or alias must not be empty.")
+    if hall_number is not None and not 1 <= int(hall_number) <= 530:
+        raise ValueError("hall_number must lie in [1, 530].")
     path = Path(raw_value).expanduser()
     if not path.is_absolute() and base_dir is not None:
         candidate = Path(base_dir) / path
@@ -77,32 +95,109 @@ def load_ebr_catalog(
         source = str(path.resolve())
         raw = _read_yaml(path)
     else:
-        key = Path(raw_value).stem.casefold()
-        filename = _BUILTIN_ALIASES.get(key, f"{key}.yaml")
-        resource = resources.files("pcwannier.ebr").joinpath("catalogs", filename)
+        relative = _resolve_builtin_resource(raw_value, hall_number=hall_number)
+        resource = resources.files("pcwannier.ebr").joinpath("catalogs", *relative.parts)
         if not resource.is_file():
             available = ", ".join(_available_builtin_aliases())
             raise FileNotFoundError(
                 f"EBR catalog {path_or_alias!r} was not found; built-in aliases: {available}."
             )
-        source = f"builtin:{filename}"
+        source = f"builtin:{relative.as_posix()}"
         try:
             raw = yaml.safe_load(resource.read_text(encoding="utf-8"))
         except yaml.YAMLError as exc:
-            raise ValueError(f"Invalid built-in EBR catalog {filename}: {exc}") from exc
+            raise ValueError(
+                f"Invalid built-in EBR catalog {relative.as_posix()}: {exc}"
+            ) from exc
     return _parse_catalog(raw, source)
 
 
-def infer_builtin_catalog_alias(space_group: int | str) -> str:
-    key = str(space_group).strip().casefold()
-    filename = _BUILTIN_ALIASES.get(key, f"{Path(key).stem}.yaml")
-    resource = resources.files("pcwannier.ebr").joinpath("catalogs", filename)
+def infer_builtin_catalog_alias(
+    space_group: int | str,
+    *,
+    hall_number: int | None = None,
+) -> str:
+    relative = _resolve_builtin_resource(str(space_group), hall_number=hall_number)
+    resource = resources.files("pcwannier.ebr").joinpath("catalogs", *relative.parts)
     if not resource.is_file():
         raise ValueError(
             f"No built-in EBR catalog is available for space group {space_group!r}; "
             "use run_ebr_analysis(..., catalog=...) with a custom YAML catalog."
         )
-    return Path(filename).stem
+    return relative.with_suffix("").as_posix()
+
+
+def _resolve_builtin_resource(
+    reference: str,
+    *,
+    hall_number: int | None,
+) -> Path:
+    normalized = str(reference).strip().replace("\\", "/").casefold()
+    nested = _NESTED_HALL_REFERENCE.fullmatch(normalized)
+    if nested is not None:
+        space_group = int(nested.group(1))
+        selected_hall = int(nested.group(2))
+        _validate_space_group_hall(space_group, selected_hall)
+        if hall_number is not None and int(hall_number) != selected_hall:
+            raise ValueError(
+                f"EBR catalog reference {reference!r} selects Hall {selected_hall}, "
+                f"not requested Hall {int(hall_number)}."
+            )
+        return Path(f"sg{space_group}") / f"hall{selected_hall}.yaml"
+
+    hall_match = _HALL_REFERENCE.fullmatch(Path(normalized).stem)
+    if hall_match is not None:
+        selected_hall = int(hall_match.group(1))
+        candidates = [
+            space_group
+            for space_group, halls in _BUILTIN_SPACE_GROUP_HALLS.items()
+            if selected_hall in halls
+        ]
+        if not candidates:
+            raise FileNotFoundError(
+                f"No built-in EBR catalog is available for Hall {selected_hall}."
+            )
+        if hall_number is not None and int(hall_number) != selected_hall:
+            raise ValueError(
+                f"EBR catalog reference {reference!r} selects Hall {selected_hall}, "
+                f"not requested Hall {int(hall_number)}."
+            )
+        return Path(f"sg{candidates[0]}") / f"hall{selected_hall}.yaml"
+
+    key = Path(normalized).stem
+    space_group_match = _SPACE_GROUP_REFERENCE.fullmatch(key)
+    if space_group_match is not None:
+        space_group = int(space_group_match.group(1))
+        halls = _BUILTIN_SPACE_GROUP_HALLS.get(space_group)
+        if halls is None:
+            raise FileNotFoundError(
+                f"No built-in EBR catalog is available for space group {space_group}."
+            )
+        if hall_number is None:
+            if len(halls) != 1:
+                choices = ", ".join(f"hall:{value}" for value in halls)
+                raise ValueError(
+                    f"Space group {space_group} has multiple built-in Hall catalogs: "
+                    f"{choices}. Supply hall_number or select one explicitly."
+                )
+            selected_hall = halls[0]
+        else:
+            selected_hall = int(hall_number)
+            _validate_space_group_hall(space_group, selected_hall)
+        return Path(f"sg{space_group}") / f"hall{selected_hall}.yaml"
+
+    filename = _BUILTIN_ALIASES.get(key, f"{key}.yaml")
+    return Path(filename)
+
+
+def _validate_space_group_hall(space_group: int, hall_number: int) -> None:
+    halls = _BUILTIN_SPACE_GROUP_HALLS.get(int(space_group), ())
+    if int(hall_number) not in halls:
+        choices = ", ".join(str(value) for value in halls) or "none"
+        raise ValueError(
+            f"Hall {hall_number} is not available for built-in SG {space_group}; "
+            f"available Hall catalogs: {choices}."
+        )
 
 
 def _available_builtin_aliases() -> tuple[str, ...]:
@@ -112,6 +207,10 @@ def _available_builtin_aliases() -> tuple[str, ...]:
         for child in root.iterdir()
         if child.is_file() and child.name.casefold().endswith(".yaml")
     }
+    for space_group, halls in _BUILTIN_SPACE_GROUP_HALLS.items():
+        stems.add(f"sg{space_group}")
+        stems.update(f"hall:{hall}" for hall in halls)
+        stems.update(f"sg{space_group}/hall{hall}" for hall in halls)
     return tuple(sorted(stems | set(_BUILTIN_ALIASES)))
 
 

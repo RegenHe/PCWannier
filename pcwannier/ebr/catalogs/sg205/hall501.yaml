@@ -1,0 +1,21 @@
+name: SG205 Pa-3 (Hall 501, primitive setting)
+space_group_number: 205
+hall_number: 501
+k_points:
+  - {name: Gamma, k: [0.0, 0.0, 0.0]}
+  - {name: R, k: [0.5, 0.5, 0.5]}
+  - {name: M, k: [0.5, 0.5, 0.0]}
+  - {name: X, k: [0.0, 0.5, 0.0]}
+ebrs:
+  - {name: Ag@4a,        wyckoff: 4a, center: [0.0, 0.0, 0.0], site_irrep: Ag}
+  - {name: Au@4a,        wyckoff: 4a, center: [0.0, 0.0, 0.0], site_irrep: Au}
+  - {name: E_plus_g@4a,  wyckoff: 4a, center: [0.0, 0.0, 0.0], site_irrep: E_plus_g}
+  - {name: E_minus_g@4a, wyckoff: 4a, center: [0.0, 0.0, 0.0], site_irrep: E_minus_g}
+  - {name: E_plus_u@4a,  wyckoff: 4a, center: [0.0, 0.0, 0.0], site_irrep: E_plus_u}
+  - {name: E_minus_u@4a, wyckoff: 4a, center: [0.0, 0.0, 0.0], site_irrep: E_minus_u}
+  - {name: Ag@4b,        wyckoff: 4b, center: [0.0, 0.0, 0.5], site_irrep: Ag}
+  - {name: Au@4b,        wyckoff: 4b, center: [0.0, 0.0, 0.5], site_irrep: Au}
+  - {name: E_plus_g@4b,  wyckoff: 4b, center: [0.0, 0.0, 0.5], site_irrep: E_plus_g}
+  - {name: E_minus_g@4b, wyckoff: 4b, center: [0.0, 0.0, 0.5], site_irrep: E_minus_g}
+  - {name: E_plus_u@4b,  wyckoff: 4b, center: [0.0, 0.0, 0.5], site_irrep: E_plus_u}
+  - {name: E_minus_u@4b, wyckoff: 4b, center: [0.0, 0.0, 0.5], site_irrep: E_minus_u}

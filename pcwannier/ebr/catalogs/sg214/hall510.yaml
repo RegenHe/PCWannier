@@ -1,0 +1,23 @@
+name: SG214 I4_132 (Hall 510, primitive setting)
+space_group_number: 214
+hall_number: 510
+k_points:
+  - {name: Gamma, k: [0.0, 0.0, 0.0]}
+  - {name: H, k: [0.5, 0.5, -0.5]}
+  - {name: P, k: [0.25, 0.25, 0.25]}
+  - {name: N, k: [0.25, -0.25, 0.25]}
+ebrs:
+  - {name: A1@8a, wyckoff: 8a, center: [0.0, 0.25, 0.5], site_irrep: A1}
+  - {name: A2@8a, wyckoff: 8a, center: [0.0, 0.25, 0.5], site_irrep: A2}
+  - {name: E@8a,  wyckoff: 8a, center: [0.0, 0.25, 0.5], site_irrep: E}
+  - {name: A1@8b, wyckoff: 8b, center: [0.0, 0.75, 0.5], site_irrep: A1}
+  - {name: A2@8b, wyckoff: 8b, center: [0.0, 0.75, 0.5], site_irrep: A2}
+  - {name: E@8b,  wyckoff: 8b, center: [0.0, 0.75, 0.5], site_irrep: E}
+  - {name: A@12c,  wyckoff: 12c, center: [0.125, 0.25, 0.375], site_irrep: A}
+  - {name: B1@12c, wyckoff: 12c, center: [0.125, 0.25, 0.375], site_irrep: B1}
+  - {name: B2@12c, wyckoff: 12c, center: [0.125, 0.25, 0.375], site_irrep: B2}
+  - {name: B3@12c, wyckoff: 12c, center: [0.125, 0.25, 0.375], site_irrep: B3}
+  - {name: A@12d,  wyckoff: 12d, center: [0.25, 0.875, 0.625], site_irrep: A}
+  - {name: B1@12d, wyckoff: 12d, center: [0.25, 0.875, 0.625], site_irrep: B1}
+  - {name: B2@12d, wyckoff: 12d, center: [0.25, 0.875, 0.625], site_irrep: B2}
+  - {name: B3@12d, wyckoff: 12d, center: [0.25, 0.875, 0.625], site_irrep: B3}

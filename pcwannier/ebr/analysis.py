@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import lru_cache, reduce
 from itertools import product
 from math import gcd
@@ -363,14 +363,22 @@ def run_ebr_analysis(
     if not isinstance(physical_analysis, BlochSymmetryAnalysisResult):
         raise TypeError("run_ebr_analysis expects a Bloch symmetry analysis result.")
     if catalog is None:
+        definition = context.model.group_definition
+        hall_number = None if definition is None else definition.hall_number
         catalog_reference = infer_builtin_catalog_alias(
-            _context_catalog_identifier(context)
+            _context_catalog_identifier(context),
+            hall_number=hall_number,
         )
         resolved_catalog = load_ebr_catalog(catalog_reference)
     elif isinstance(catalog, EBRCatalog):
         resolved_catalog = catalog
     else:
-        resolved_catalog = load_ebr_catalog(catalog, base_dir=config.base_dir)
+        definition = context.model.group_definition
+        resolved_catalog = load_ebr_catalog(
+            catalog,
+            base_dir=config.base_dir,
+            hall_number=None if definition is None else definition.hall_number,
+        )
     catalog = _catalog_in_context_setting(
         context,
         resolved_catalog,
@@ -1365,91 +1373,10 @@ def _validate_catalog_context(context: SymmetryContext, catalog: EBRCatalog) -> 
 def _catalog_in_context_setting(
     context: SymmetryContext, catalog: EBRCatalog
 ) -> EBRCatalog:
-    """Translate catalog centers between origin choices with identical axes."""
+    """Require an EBR catalog defined in the calculation's exact Hall setting."""
 
-    definition = context.model.group_definition
-    if definition is None or definition.hall_number is None:
-        return catalog
-    target_hall = int(definition.hall_number)
-    if target_hall == catalog.hall_number:
-        return catalog
-    actual_number = _context_space_group_number(context)
-    if actual_number != catalog.space_group_number:
-        return catalog
-
-    from ..symmetry.io import load_symmetry_from_spglib
-
-    source = load_symmetry_from_spglib(f"hall:{catalog.hall_number}").group
-    shift = _origin_shift_between_groups(
-        source,
-        context.model.group,
-        catalog.dimension,
-        context.model.tolerance,
-    )
-    if shift is None:
-        raise ValueError(
-            f"EBR catalog Hall {catalog.hall_number} and calculation Hall {target_hall} "
-            "are not related by a supported pure origin shift. Use a catalog in the "
-            "calculation Hall setting."
-        )
-    transformed = tuple(
-        EBRDefinition(
-            ebr.name,
-            ebr.wyckoff,
-            np.mod(ebr.center + shift, 1.0),
-            ebr.site_irrep,
-        )
-        for ebr in catalog.ebrs
-    )
-    source_name = catalog.source or catalog.name
-    return replace(
-        catalog,
-        name=f"{catalog.name} [Hall {target_hall}]",
-        hall_number=target_hall,
-        ebrs=transformed,
-        source=f"{source_name}; origin-shifted from Hall {catalog.hall_number}",
-    )
-
-
-def _origin_shift_between_groups(source, target, dimension: int, tolerance: float):
-    if len(source.operations) != len(target.operations):
-        return None
-    source_rotations = [np.asarray(operation.rotation, dtype=np.int64) for operation in source.operations]
-    target_by_rotation: dict[bytes, list[np.ndarray]] = {}
-    for operation in target.operations:
-        rotation = np.ascontiguousarray(operation.rotation, dtype=np.int64)
-        target_by_rotation.setdefault(rotation.tobytes(), []).append(
-            np.asarray(operation.translation, dtype=float)
-        )
-    if any(
-        np.ascontiguousarray(rotation).tobytes() not in target_by_rotation
-        for rotation in source_rotations
-    ):
-        return None
-
-    threshold = max(float(tolerance), 1.0e-8)
-    for denominator in (24, 48):
-        axes = [np.arange(denominator, dtype=float) / denominator] * dimension
-        candidates = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, dimension)
-        active = np.arange(candidates.shape[0], dtype=np.int64)
-        for operation, rotation in zip(source.operations, source_rotations):
-            if active.size == 0:
-                break
-            transformed = (
-                np.asarray(operation.translation, dtype=float)[None, :]
-                + candidates[active]
-                - candidates[active] @ rotation.T
-            )
-            targets = target_by_rotation[np.ascontiguousarray(rotation).tobytes()]
-            distances = np.full(active.size, np.inf, dtype=float)
-            for translation in targets:
-                delta = transformed - translation[None, :]
-                delta -= np.rint(delta)
-                distances = np.minimum(distances, np.max(np.abs(delta), axis=1))
-            active = active[distances <= threshold]
-        if active.size:
-            return candidates[int(active[0])]
-    return None
+    _validate_catalog_context(context, catalog)
+    return catalog
 
 
 def _context_space_group_number(context: SymmetryContext) -> int:

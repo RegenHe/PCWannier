@@ -1,0 +1,15 @@
+name: SG212 P4_332 (Hall 508, primitive setting)
+space_group_number: 212
+hall_number: 508
+k_points:
+  - {name: Gamma, k: [0.0, 0.0, 0.0]}
+  - {name: R, k: [0.5, 0.5, 0.5]}
+  - {name: M, k: [0.5, 0.5, 0.0]}
+  - {name: X, k: [0.0, 0.5, 0.0]}
+ebrs:
+  - {name: A1@4a, wyckoff: 4a, center: [0.125, 0.125, 0.125], site_irrep: A1}
+  - {name: A2@4a, wyckoff: 4a, center: [0.125, 0.125, 0.125], site_irrep: A2}
+  - {name: E@4a,  wyckoff: 4a, center: [0.125, 0.125, 0.125], site_irrep: E}
+  - {name: A1@4b, wyckoff: 4b, center: [0.125, 0.875, 0.375], site_irrep: A1}
+  - {name: A2@4b, wyckoff: 4b, center: [0.125, 0.875, 0.375], site_irrep: A2}
+  - {name: E@4b,  wyckoff: 4b, center: [0.125, 0.875, 0.375], site_irrep: E}

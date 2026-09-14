@@ -1,0 +1,21 @@
+name: SG206 Ia-3 (Hall 502, primitive setting)
+space_group_number: 206
+hall_number: 502
+k_points:
+  - {name: Gamma, k: [0.0, 0.0, 0.0]}
+  - {name: H, k: [0.5, 0.5, -0.5]}
+  - {name: P, k: [0.25, 0.25, 0.25]}
+  - {name: N, k: [0.25, -0.25, 0.25]}
+ebrs:
+  - {name: Ag@8a,        wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: Ag}
+  - {name: Au@8a,        wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: Au}
+  - {name: E_plus_g@8a,  wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: E_plus_g}
+  - {name: E_minus_g@8a, wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: E_minus_g}
+  - {name: E_plus_u@8a,  wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: E_plus_u}
+  - {name: E_minus_u@8a, wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: E_minus_u}
+  - {name: Ag@8b,        wyckoff: 8b, center: [0.0, 0.0, 0.5], site_irrep: Ag}
+  - {name: Au@8b,        wyckoff: 8b, center: [0.0, 0.0, 0.5], site_irrep: Au}
+  - {name: E_plus_g@8b,  wyckoff: 8b, center: [0.0, 0.0, 0.5], site_irrep: E_plus_g}
+  - {name: E_minus_g@8b, wyckoff: 8b, center: [0.0, 0.0, 0.5], site_irrep: E_minus_g}
+  - {name: E_plus_u@8b,  wyckoff: 8b, center: [0.0, 0.0, 0.5], site_irrep: E_plus_u}
+  - {name: E_minus_u@8b, wyckoff: 8b, center: [0.0, 0.0, 0.5], site_irrep: E_minus_u}

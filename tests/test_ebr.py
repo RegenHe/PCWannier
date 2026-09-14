@@ -132,7 +132,7 @@ def sg224_matrix() -> EBRMatrix:
     context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
     return build_ebr_matrix(
         context,
-        load_ebr_catalog("224"),
+        load_ebr_catalog("224", hall_number=522),
         lattice_vectors=np.eye(3),
     )
 
@@ -150,7 +150,7 @@ def sg227_matrix() -> EBRMatrix:
     context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
     return build_ebr_matrix(
         context,
-        load_ebr_catalog("sg227"),
+        load_ebr_catalog("sg227", hall_number=526),
         lattice_vectors=lattice,
     )
 
@@ -202,8 +202,153 @@ def test_catalog_alias_and_strict_custom_schema(tmp_path):
         load_ebr_catalog(custom)
 
 
+def test_multi_setting_space_group_requires_explicit_hall():
+    with pytest.raises(ValueError, match="multiple built-in Hall catalogs"):
+        load_ebr_catalog("sg224")
+    with pytest.raises(ValueError, match="multiple built-in Hall catalogs"):
+        infer_builtin_catalog_alias(227)
+
+    choice_one = load_ebr_catalog("sg224", hall_number=521)
+    choice_two = load_ebr_catalog("hall:522")
+    assert choice_one.hall_number == 521
+    assert choice_two.hall_number == 522
+    assert choice_one.source == "builtin:sg224/hall521.yaml"
+    assert choice_two.source == "builtin:sg224/hall522.yaml"
+    assert infer_builtin_catalog_alias(224, hall_number=521) == "sg224/hall521"
+    assert infer_builtin_catalog_alias(224, hall_number=522) == "sg224/hall522"
+
+
+def test_hall_catalog_reference_rejects_conflicting_context():
+    with pytest.raises(ValueError, match="selects Hall 522, not requested Hall 521"):
+        load_ebr_catalog("sg224/hall522", hall_number=521)
+
+
+@pytest.mark.parametrize(
+    ("space_group", "hall_number", "expected_columns"),
+    (
+        (198, 492, 3),
+        (199, 493, 3),
+        (205, 501, 12),
+        (206, 502, 12),
+        (212, 508, 6),
+        (213, 509, 6),
+        (214, 510, 14),
+        (216, 512, 20),
+        (221, 517, 40),
+        (224, 521, 25),
+        (224, 522, 25),
+        (225, 523, 33),
+        (227, 525, 22),
+        (227, 526, 22),
+        (229, 529, 31),
+        (230, 530, 17),
+    ),
+)
+def test_all_builtin_3d_hall_catalog_resources_load(
+    space_group, hall_number, expected_columns
+):
+    catalog = load_ebr_catalog(f"sg{space_group}", hall_number=hall_number)
+    assert catalog.space_group_number == space_group
+    assert catalog.hall_number == hall_number
+    assert len(catalog.ebrs) == expected_columns
+
+
+@pytest.mark.parametrize(
+    ("space_group", "hall_number", "lattice", "expected_shape"),
+    (
+        (224, 521, np.eye(3), (28, 25)),
+        (
+            227,
+            525,
+            np.asarray(((0.0, 0.5, 0.5), (0.5, 0.0, 0.5), (0.5, 0.5, 0.0))),
+            (22, 22),
+        ),
+    ),
+)
+def test_origin_choice_one_hall_catalogs_build_dynamic_matrices(
+    space_group, hall_number, lattice, expected_shape
+):
+    model = load_symmetry_from_spglib(
+        f"hall:{hall_number}", lattice_vectors=lattice
+    )
+    context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
+    matrix = build_ebr_matrix(
+        context,
+        load_ebr_catalog(f"sg{space_group}", hall_number=hall_number),
+        lattice_vectors=lattice,
+    )
+    assert matrix.values.shape == expected_shape
+    assert np.all(matrix.values >= 0)
+
+
+@pytest.mark.parametrize(
+    ("space_group", "hall_number", "lattice", "expected_shape"),
+    (
+        (198, 492, np.eye(3), (12, 3)),
+        (
+            199,
+            493,
+            np.asarray(((-0.5, 0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, -0.5))),
+            (13, 3),
+        ),
+        (205, 501, np.eye(3), (18, 12)),
+        (
+            206,
+            502,
+            np.asarray(((-0.5, 0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, -0.5))),
+            (23, 12),
+        ),
+        (212, 508, np.eye(3), (15, 6)),
+        (
+            214,
+            510,
+            np.asarray(((-0.5, 0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, -0.5))),
+            (17, 14),
+        ),
+        (
+            216,
+            512,
+            np.asarray(((0.0, 0.5, 0.5), (0.5, 0.0, 0.5), (0.5, 0.5, 0.0))),
+            (17, 20),
+        ),
+        (
+            225,
+            523,
+            np.asarray(((0.0, 0.5, 0.5), (0.5, 0.0, 0.5), (0.5, 0.5, 0.0))),
+            (31, 33),
+        ),
+        (
+            229,
+            529,
+            np.asarray(((-0.5, 0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, -0.5))),
+            (30, 31),
+        ),
+        (
+            230,
+            530,
+            np.asarray(((-0.5, 0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, -0.5))),
+            (22, 17),
+        ),
+    ),
+)
+def test_common_photonic_hall_catalogs_build_dynamic_matrices(
+    space_group, hall_number, lattice, expected_shape
+):
+    model = load_symmetry_from_spglib(
+        f"hall:{hall_number}", lattice_vectors=lattice
+    )
+    context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
+    matrix = build_ebr_matrix(
+        context,
+        load_ebr_catalog(f"sg{space_group}", hall_number=hall_number),
+        lattice_vectors=lattice,
+    )
+    assert matrix.values.shape == expected_shape
+    assert np.all(matrix.values >= 0)
+
+
 def test_sg227_catalog_builds_in_fcc_primitive_setting(sg227_matrix):
-    catalog = load_ebr_catalog("227")
+    catalog = load_ebr_catalog("227", hall_number=526)
 
     assert catalog.space_group_number == 227
     assert catalog.hall_number == 526
@@ -497,23 +642,26 @@ def test_sg224_dynamic_matrix_reproduces_published_solution(sg224_matrix):
     )
 
 
-def test_dynamic_matrix_aligns_sg224_origin_choices():
+def test_dynamic_matrix_rejects_wrong_sg224_origin_choice():
     model = load_symmetry_from_spglib("hall:521")
     context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
-    matrix = build_ebr_matrix(
-        context, load_ebr_catalog("sg224"), lattice_vectors=np.eye(3)
-    )
-    names = [column.name for column in matrix.columns]
-    assert np.allclose(matrix.columns[names.index("A1@2a")].center, [0.5, 0.5, 0.5])
-    assert np.allclose(matrix.columns[names.index("A1g@4b")].center, [0.25] * 3)
-    assert np.allclose(matrix.columns[names.index("A1g@4c")].center, [0.75] * 3)
+    with pytest.raises(ValueError, match="catalog Hall 522.*calculation Hall 521"):
+        build_ebr_matrix(
+            context,
+            load_ebr_catalog("sg224", hall_number=522),
+            lattice_vectors=np.eye(3),
+        )
 
 
 def test_dynamic_matrix_rejects_different_space_group(sg221_matrix):
     model = load_symmetry_from_spglib("hall:517")
     context = build_symmetry_context(model, [np.asarray([-0.5, 0.0])] * 3)
     with pytest.raises(ValueError, match="space group 224.*space group 221"):
-        build_ebr_matrix(context, load_ebr_catalog("sg224"), lattice_vectors=np.eye(3))
+        build_ebr_matrix(
+            context,
+            load_ebr_catalog("sg224", hall_number=522),
+            lattice_vectors=np.eye(3),
+        )
 
 
 def test_subspace_solver_keeps_positive_gamma_constraints_and_zero_mode_surrogate():

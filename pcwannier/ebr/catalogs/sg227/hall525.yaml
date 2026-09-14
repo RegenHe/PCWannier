@@ -1,0 +1,38 @@
+name: SG227 Fd-3m (origin choice 1, Hall 525, primitive setting)
+space_group_number: 227
+hall_number: 525
+
+k_points:
+  - {name: Gamma, k: [0.0, 0.0, 0.0]}
+  - {name: X,     k: [0.5, 0.0, 0.5]}
+  - {name: L,     k: [0.5, 0.5, 0.5]}
+  - {name: W,     k: [0.5, 0.25, -0.25]}
+
+# Maximal Wyckoff positions. Multiplicities use the conventional international
+# labels; centers and induced-representation dimensions use the primitive cell.
+ebrs:
+  - {name: A1@8b, wyckoff: 8b, center: [0.25, 0.25, 0.25], site_irrep: A1}
+  - {name: A2@8b, wyckoff: 8b, center: [0.25, 0.25, 0.25], site_irrep: A2}
+  - {name: E@8b,  wyckoff: 8b, center: [0.25, 0.25, 0.25], site_irrep: E}
+  - {name: T1@8b, wyckoff: 8b, center: [0.25, 0.25, 0.25], site_irrep: T1}
+  - {name: T2@8b, wyckoff: 8b, center: [0.25, 0.25, 0.25], site_irrep: T2}
+
+  - {name: A1@8a, wyckoff: 8a, center: [0.5, 0.5, 0.5], site_irrep: A1}
+  - {name: A2@8a, wyckoff: 8a, center: [0.5, 0.5, 0.5], site_irrep: A2}
+  - {name: E@8a,  wyckoff: 8a, center: [0.5, 0.5, 0.5], site_irrep: E}
+  - {name: T1@8a, wyckoff: 8a, center: [0.5, 0.5, 0.5], site_irrep: T1}
+  - {name: T2@8a, wyckoff: 8a, center: [0.5, 0.5, 0.5], site_irrep: T2}
+
+  - {name: A1g@16d, wyckoff: 16d, center: [0.125, 0.125, 0.125], site_irrep: A1g}
+  - {name: A2g@16d, wyckoff: 16d, center: [0.125, 0.125, 0.125], site_irrep: A2g}
+  - {name: Eg@16d,  wyckoff: 16d, center: [0.125, 0.125, 0.125], site_irrep: Eg}
+  - {name: A1u@16d, wyckoff: 16d, center: [0.125, 0.125, 0.125], site_irrep: A1u}
+  - {name: A2u@16d, wyckoff: 16d, center: [0.125, 0.125, 0.125], site_irrep: A2u}
+  - {name: Eu@16d,  wyckoff: 16d, center: [0.125, 0.125, 0.125], site_irrep: Eu}
+
+  - {name: A1g@16c, wyckoff: 16c, center: [0.625, 0.625, 0.625], site_irrep: A1g}
+  - {name: A2g@16c, wyckoff: 16c, center: [0.625, 0.625, 0.625], site_irrep: A2g}
+  - {name: Eg@16c,  wyckoff: 16c, center: [0.625, 0.625, 0.625], site_irrep: Eg}
+  - {name: A1u@16c, wyckoff: 16c, center: [0.625, 0.625, 0.625], site_irrep: A1u}
+  - {name: A2u@16c, wyckoff: 16c, center: [0.625, 0.625, 0.625], site_irrep: A2u}
+  - {name: Eu@16c, wyckoff: 16c, center: [0.625, 0.625, 0.625], site_irrep: Eu}

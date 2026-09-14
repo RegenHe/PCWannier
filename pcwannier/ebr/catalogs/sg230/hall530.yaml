@@ -1,0 +1,26 @@
+name: SG230 Ia-3d (Hall 530, primitive setting)
+space_group_number: 230
+hall_number: 530
+k_points:
+  - {name: Gamma, k: [0.0, 0.0, 0.0]}
+  - {name: H, k: [0.5, 0.5, -0.5]}
+  - {name: P, k: [0.25, 0.25, 0.25]}
+  - {name: N, k: [0.25, -0.25, 0.25]}
+ebrs:
+  - {name: Ag@16a,        wyckoff: 16a, center: [0.0, 0.0, 0.0], site_irrep: Ag}
+  - {name: Au@16a,        wyckoff: 16a, center: [0.0, 0.0, 0.0], site_irrep: Au}
+  - {name: E_plus_g@16a,  wyckoff: 16a, center: [0.0, 0.0, 0.0], site_irrep: E_plus_g}
+  - {name: E_minus_g@16a, wyckoff: 16a, center: [0.0, 0.0, 0.0], site_irrep: E_minus_g}
+  - {name: E_plus_u@16a,  wyckoff: 16a, center: [0.0, 0.0, 0.0], site_irrep: E_plus_u}
+  - {name: E_minus_u@16a, wyckoff: 16a, center: [0.0, 0.0, 0.0], site_irrep: E_minus_u}
+  - {name: A1@16b, wyckoff: 16b, center: [0.0, 0.25, 0.5], site_irrep: A1}
+  - {name: A2@16b, wyckoff: 16b, center: [0.0, 0.25, 0.5], site_irrep: A2}
+  - {name: E@16b,  wyckoff: 16b, center: [0.0, 0.25, 0.5], site_irrep: E}
+  - {name: A@24c,  wyckoff: 24c, center: [0.125, 0.25, 0.375], site_irrep: A}
+  - {name: B1@24c, wyckoff: 24c, center: [0.125, 0.25, 0.375], site_irrep: B1}
+  - {name: B2@24c, wyckoff: 24c, center: [0.125, 0.25, 0.375], site_irrep: B2}
+  - {name: B3@24c, wyckoff: 24c, center: [0.125, 0.25, 0.375], site_irrep: B3}
+  - {name: A@24d,       wyckoff: 24d, center: [0.125, 0.75, 0.875], site_irrep: A}
+  - {name: B@24d,       wyckoff: 24d, center: [0.125, 0.75, 0.875], site_irrep: B}
+  - {name: E_plus@24d,  wyckoff: 24d, center: [0.125, 0.75, 0.875], site_irrep: E_plus}
+  - {name: E_minus@24d, wyckoff: 24d, center: [0.125, 0.75, 0.875], site_irrep: E_minus}

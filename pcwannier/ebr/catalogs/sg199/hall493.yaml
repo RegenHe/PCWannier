@@ -1,0 +1,12 @@
+name: SG199 I2_13 (Hall 493, primitive setting)
+space_group_number: 199
+hall_number: 493
+k_points:
+  - {name: Gamma, k: [0.0, 0.0, 0.0]}
+  - {name: H, k: [0.5, 0.5, -0.5]}
+  - {name: P, k: [0.25, 0.25, 0.25]}
+  - {name: N, k: [0.25, -0.25, 0.25]}
+ebrs:
+  - {name: A@8a,       wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: A}
+  - {name: E_plus@8a,  wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: E_plus}
+  - {name: E_minus@8a, wyckoff: 8a, center: [0.0, 0.0, 0.0], site_irrep: E_minus}

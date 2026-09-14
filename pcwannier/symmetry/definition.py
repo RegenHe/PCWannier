@@ -1037,8 +1037,11 @@ def _generated_identification(
         "4/mmm": "D4h",
         "-43m": "T_d",
         "-3m": "D3d",
+        "-3": "C3i",
         "32": "D3",
         "-42m": "D2d",
+        "-4": "S4",
+        "mmm": "D2h",
         "222": "D2",
     }.get(point_group.symbol, point_group.symbol)
     definition = FiniteGroupDefinition(
@@ -1067,7 +1070,19 @@ def _generated_irrep_labels(
     concrete: ConcreteFiniteGroup,
     representations: tuple[tuple[np.ndarray, ...], ...],
 ) -> tuple[str, ...]:
-    supported = {"m-3m", "432", "4/mmm", "-43m", "-3m", "32", "-42m", "222"}
+    supported = {
+        "m-3m",
+        "432",
+        "4/mmm",
+        "-43m",
+        "-3m",
+        "-3",
+        "32",
+        "-42m",
+        "-4",
+        "mmm",
+        "222",
+    }
     if symbol not in supported:
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
 
@@ -1113,6 +1128,20 @@ def _generated_irrep_labels(
             key=lambda index: tuple(int(v) for v in rotations[index].reshape(-1)),
         )
     )
+    c3_candidates = [
+        index
+        for index, rotation in enumerate(rotations)
+        if concrete.table.element_orders[index] == 3
+        and int(round(np.linalg.det(rotation))) == 1
+    ]
+    c3 = (
+        None
+        if not c3_candidates
+        else min(
+            c3_candidates,
+            key=lambda index: tuple(int(v) for v in rotations[index].reshape(-1)),
+        )
+    )
     proper_twofolds = tuple(
         index
         for index, rotation in enumerate(rotations)
@@ -1128,6 +1157,10 @@ def _generated_irrep_labels(
     if symbol == "32" and not proper_twofolds:
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
     if symbol in {"-43m", "-42m"} and s4 is None:
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+    if symbol == "-3" and (inversion is None or c3 is None):
+        return tuple(f"U{index}" for index in range(1, len(representations) + 1))
+    if symbol == "-4" and s4 is None:
         return tuple(f"U{index}" for index in range(1, len(representations) + 1))
     d2_axes = tuple(
         sorted(
@@ -1182,7 +1215,7 @@ def _generated_irrep_labels(
             family = "A" if complex(np.trace(matrices[s4])).real > 0.0 else "B"
             branch = "1" if complex(np.trace(matrices[d2d_c2])).real > 0.0 else "2"
             base = family + branch
-        elif symbol == "222" and dimension == 1 and len(d2_axes) == 3:
+        elif symbol in {"222", "mmm"} and dimension == 1 and len(d2_axes) == 3:
             signs = tuple(
                 1 if complex(np.trace(matrices[index])).real > 0.0 else -1
                 for index in d2_axes
@@ -1193,9 +1226,30 @@ def _generated_irrep_labels(
                 (-1, 1, -1): "B2",
                 (-1, -1, 1): "B3",
             }.get(signs, f"U{generated_index}")
+        elif symbol == "-3" and dimension == 1 and c3 is not None:
+            c3_value = complex(np.trace(matrices[c3]))
+            if abs(c3_value - 1.0) <= 1.0e-7:
+                base = "A"
+            elif c3_value.imag > 0.0:
+                base = "E_plus"
+            else:
+                base = "E_minus"
+        elif symbol == "-4" and dimension == 1 and s4 is not None:
+            s4_value = complex(np.trace(matrices[s4]))
+            if abs(s4_value - 1.0) <= 1.0e-7:
+                base = "A"
+            elif abs(s4_value + 1.0) <= 1.0e-7:
+                base = "B"
+            elif s4_value.imag > 0.0:
+                base = "E_plus"
+            else:
+                base = "E_minus"
         else:
             base = f"U{generated_index}"
-        label = base + parity if parity and not base.startswith("U") else base
+        if symbol == "-3" and parity and base.startswith("E_"):
+            label = f"{base}_{parity}"
+        else:
+            label = base + parity if parity and not base.startswith("U") else base
         if label in used:
             label = f"U{generated_index}"
         labels.append(label)

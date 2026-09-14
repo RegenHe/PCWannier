@@ -1,0 +1,44 @@
+name: SG224 Pn-3m (origin choice 1, Hall 521)
+space_group_number: 224
+hall_number: 521
+
+k_points:
+  - name: Gamma
+    k: [0.0, 0.0, 0.0]
+  - name: R
+    k: [0.5, 0.5, 0.5]
+  - name: M
+    k: [0.5, 0.5, 0.0]
+  - name: X
+    k: [0.0, 0.5, 0.0]
+
+ebrs:
+  - {name: A1@2a, wyckoff: 2a, center: [0.5, 0.5, 0.5], site_irrep: A1}
+  - {name: A2@2a, wyckoff: 2a, center: [0.5, 0.5, 0.5], site_irrep: A2}
+  - {name: E@2a, wyckoff: 2a, center: [0.5, 0.5, 0.5], site_irrep: E}
+  - {name: T1@2a, wyckoff: 2a, center: [0.5, 0.5, 0.5], site_irrep: T1}
+  - {name: T2@2a, wyckoff: 2a, center: [0.5, 0.5, 0.5], site_irrep: T2}
+
+  - {name: A1g@4b, wyckoff: 4b, center: [0.25, 0.25, 0.25], site_irrep: A1g}
+  - {name: A1u@4b, wyckoff: 4b, center: [0.25, 0.25, 0.25], site_irrep: A1u}
+  - {name: A2g@4b, wyckoff: 4b, center: [0.25, 0.25, 0.25], site_irrep: A2g}
+  - {name: A2u@4b, wyckoff: 4b, center: [0.25, 0.25, 0.25], site_irrep: A2u}
+  - {name: Eg@4b, wyckoff: 4b, center: [0.25, 0.25, 0.25], site_irrep: Eg}
+  - {name: Eu@4b, wyckoff: 4b, center: [0.25, 0.25, 0.25], site_irrep: Eu}
+
+  - {name: A1g@4c, wyckoff: 4c, center: [0.75, 0.75, 0.75], site_irrep: A1g}
+  - {name: A1u@4c, wyckoff: 4c, center: [0.75, 0.75, 0.75], site_irrep: A1u}
+  - {name: A2g@4c, wyckoff: 4c, center: [0.75, 0.75, 0.75], site_irrep: A2g}
+  - {name: A2u@4c, wyckoff: 4c, center: [0.75, 0.75, 0.75], site_irrep: A2u}
+  - {name: Eg@4c, wyckoff: 4c, center: [0.75, 0.75, 0.75], site_irrep: Eg}
+  - {name: Eu@4c, wyckoff: 4c, center: [0.75, 0.75, 0.75], site_irrep: Eu}
+
+  - {name: A1@6d, wyckoff: 6d, center: [0.5, 0.0, 0.0], site_irrep: A1}
+  - {name: A2@6d, wyckoff: 6d, center: [0.5, 0.0, 0.0], site_irrep: A2}
+  - {name: B1@6d, wyckoff: 6d, center: [0.5, 0.0, 0.0], site_irrep: B1}
+  - {name: B2@6d, wyckoff: 6d, center: [0.5, 0.0, 0.0], site_irrep: B2}
+
+  - {name: A1@12f, wyckoff: 12f, center: [0.75, 0.5, 0.0], site_irrep: A}
+  - {name: B1@12f, wyckoff: 12f, center: [0.75, 0.5, 0.0], site_irrep: B1}
+  - {name: B2@12f, wyckoff: 12f, center: [0.75, 0.5, 0.0], site_irrep: B2}
+  - {name: B3@12f, wyckoff: 12f, center: [0.75, 0.5, 0.0], site_irrep: B3}

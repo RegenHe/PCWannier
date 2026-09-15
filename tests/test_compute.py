@@ -362,6 +362,8 @@ def test_collect_hoppings_is_complete_and_independent_of_band_neighbors():
         neighbor=[[1, 0]],
         kdim=2,
         band_calc_num=1,
+        real_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
     )
     tba.state = SimpleNamespace(k_shape=(4, 4, 1))
     tba.threads = 1
@@ -376,16 +378,29 @@ def test_collect_hoppings_is_complete_and_independent_of_band_neighbors():
 
     hoppings = tba.collect_hoppings()
     complete = TBAModel.R_half_rect(tba.state.k_shape)
-    expected_keys = {(0, 0, 0)} | {tuple(row) for row in complete}
+    expected_residues = {
+        tuple(int(row[axis]) % tba.state.k_shape[axis] for axis in range(2))
+        for row in complete
+    }
+    actual_residues = {
+        tuple(int(row[axis]) % tba.state.k_shape[axis] for axis in range(2))
+        for row in hoppings
+        if row != (0, 0, 0)
+    }
 
-    assert set(hoppings) == expected_keys
-    assert len(hoppings) == 1 + len(complete)
+    assert actual_residues == expected_residues
     assert tba.config.neighbor == [[1, 0]]
 
 
 def test_collect_hoppings_does_not_fill_an_empty_band_neighbor_selection():
     tba = object.__new__(TBAModel)
-    tba.config = SimpleNamespace(neighbor=[], kdim=2, band_calc_num=1)
+    tba.config = SimpleNamespace(
+        neighbor=[],
+        kdim=2,
+        band_calc_num=1,
+        real_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
+    )
     tba.state = SimpleNamespace(k_shape=(4, 4, 1))
     tba.threads = 1
     tba._projected_k_hamiltonians = lambda: (
@@ -397,7 +412,13 @@ def test_collect_hoppings_does_not_fill_an_empty_band_neighbor_selection():
     hoppings = tba.collect_hoppings()
 
     assert tba.config.neighbor == []
-    assert len(hoppings) == 1 + len(TBAModel.R_half_rect(tba.state.k_shape))
+    residues = {
+        (key[0] % 4, key[1] % 4) for key in hoppings if key != (0, 0, 0)
+    }
+    assert residues == {
+        (int(row[0]) % 4, int(row[1]) % 4)
+        for row in TBAModel.R_half_rect(tba.state.k_shape)
+    }
 
 
 def test_empty_band_neighbor_selection_uses_complete_hopping_set():
@@ -420,6 +441,8 @@ def test_band_neighbor_selection_does_not_change_complete_hopping_output():
         neighbor=[[-1, 0]],
         kdim=2,
         band_calc_num=1,
+        real_lattice_vectors=np.eye(2),
+        lattice_const=1.0,
     )
     tba.state = SimpleNamespace(k_shape=(4, 4, 1))
     tba.threads = 1
@@ -441,7 +464,7 @@ def test_band_neighbor_selection_does_not_change_complete_hopping_output():
     assert (-1, 0, 0) not in hoppings
     assert selected.shape == (1, 1, 1)
     assert selected[0, 0, 0] == pytest.approx(-10.0)
-    assert len(hoppings) == 1 + len(TBAModel.R_half_rect(tba.state.k_shape))
+    assert len(hoppings) >= 1 + len(TBAModel.R_half_rect(tba.state.k_shape))
 
 
 def test_hopping_fourier_roundtrip_is_hermitian_on_rectangular_lattice():
@@ -480,6 +503,25 @@ def test_hopping_fourier_roundtrip_is_hermitian_on_rectangular_lattice():
 
     assert np.allclose(reconstructed, sampled, rtol=0.0, atol=1e-12)
     assert np.allclose(off_grid, np.conjugate(np.swapaxes(off_grid, -2, -1)), rtol=0.0, atol=1e-12)
+
+
+def test_wigner_seitz_hopping_representatives_use_cartesian_lattice_metric():
+    tba = object.__new__(TBAModel)
+    tba.config = SimpleNamespace(
+        kdim=3,
+        real_lattice_vectors=np.asarray(
+            [[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]]
+        ),
+        lattice_const=1.0,
+    )
+    tba.state = SimpleNamespace(k_shape=(4, 4, 4))
+
+    representatives = tba._wigner_seitz_representatives((2, 2, 0))
+
+    assert representatives == ((-2, 2, 0), (2, -2, 0))
+    lattice = np.asarray(tba.config.real_lattice_vectors)
+    assert all(np.linalg.norm(np.asarray(row) @ lattice) == pytest.approx(np.sqrt(2.0)) for row in representatives)
+    assert np.linalg.norm(np.asarray([2, 2, 0]) @ lattice) == pytest.approx(np.sqrt(6.0))
 
 
 def test_band_path_does_not_reclose_periodically_equivalent_endpoints():

@@ -354,18 +354,72 @@ class TBAModel:
         complete_neighbors = self.R_half_rect(self.state.k_shape)
         self._projected_k_hamiltonians()
 
-        r_list = [(0, 0, 0)] + [
-            tuple(int(value) for value in row)
-            for row in complete_neighbors
-        ]
+        def calc_residue(row):
+            representatives = self._wigner_seitz_representatives(row)
+            if self.is_nyquist(row, self.state.k_shape):
+                representatives = tuple(
+                    representative
+                    for representative in representatives
+                    if representative < tuple(-value for value in representative)
+                )
+            if not representatives:
+                raise RuntimeError(
+                    f"No independent Wigner-Seitz representative found for {row}."
+                )
+            coefficient = self.gen_hopping(row) / float(len(representatives))
+            return tuple((representative, coefficient) for representative in representatives)
 
-        def calc_r(r3):
-            return tuple(int(x) for x in r3), self.gen_hopping(r3)
-
-        out = {}
-        for key, hopping in parallel_map(r_list, calc_r, self.threads):
-            out[key] = hopping
+        out = {(0, 0, 0): self.gen_hopping((0, 0, 0))}
+        rows = [tuple(int(value) for value in row) for row in complete_neighbors]
+        for entries in parallel_map(rows, calc_residue, self.threads):
+            for key, hopping in entries:
+                if key in out:
+                    raise RuntimeError(
+                        f"Duplicate Wigner-Seitz hopping representative {key}."
+                    )
+                out[key] = hopping
         return out
+
+    def _wigner_seitz_representatives(
+        self, residue: tuple[int, ...]
+    ) -> tuple[tuple[int, int, int], ...]:
+        """Return every shortest real-space representative of a mesh residue."""
+
+        shape = np.asarray(self.state.k_shape, dtype=int)
+        kdim = int(self.config.kdim)
+        base = np.asarray(residue, dtype=int)[:kdim] % shape[:kdim]
+        lattice = (
+            np.asarray(self.config.real_lattice_vectors, dtype=float)[:kdim]
+            * float(self.config.lattice_const)
+        )
+        winners: list[np.ndarray] = []
+        for radius in range(1, 5):
+            translations = np.asarray(
+                list(product(range(-radius, radius + 1), repeat=kdim)),
+                dtype=int,
+            )
+            candidates = base[None, :] + translations * shape[None, :kdim]
+            cartesian = candidates @ lattice
+            distance_squared = np.einsum(
+                "ij,ij->i", cartesian, cartesian, optimize=True
+            )
+            minimum = float(np.min(distance_squared))
+            tolerance = 1.0e-12 * max(minimum, 1.0)
+            winner_mask = np.abs(distance_squared - minimum) <= tolerance
+            winners = [row.copy() for row in candidates[winner_mask]]
+            winner_translations = translations[winner_mask]
+            if not np.any(np.abs(winner_translations) == radius):
+                break
+        else:
+            raise RuntimeError(
+                "Could not bound the Wigner-Seitz representative search for "
+                f"residue={tuple(int(value) for value in base)}."
+            )
+
+        padded = {
+            tuple((row.tolist() + [0, 0, 0])[:3]) for row in winners
+        }
+        return tuple(sorted(padded))
 
     def gen_hs_bands(self, hoppings: dict[tuple[int, int, int], np.ndarray]) -> BandResult:
         config = self.config

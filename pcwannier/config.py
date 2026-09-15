@@ -1571,6 +1571,19 @@ def preprocess_config(cfg: IncarConfig) -> IncarConfig:
                 "composition_of_b cannot reproduce the isotropic finite-difference tensor: "
                 f"relative residual={residual:.6g}, rank={rank}. Add independent neighbor directions."
             )
+        weight_scale = float(np.max(np.abs(cfg.wb))) if cfg.wb.size else 0.0
+        if weight_scale > 0.0:
+            inactive = [
+                tuple(int(value) for value in cfg.composition_of_b[index])
+                for index, weight in enumerate(cfg.wb)
+                if abs(float(weight)) <= 1.0e-10 * weight_scale
+            ]
+            if inactive:
+                LOGGER.warning(
+                    "composition_of_b contains directions with negligible finite-difference "
+                    "weight and they will not contribute to M0 or MV localization: %s",
+                    inactive,
+                )
 
     if cfg.projections is not None:
         from .projections import ProjectionRecord3D

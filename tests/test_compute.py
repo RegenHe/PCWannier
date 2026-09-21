@@ -37,8 +37,32 @@ def test_gradient_rejects_uphill_step_and_restores_gauge():
     Gradient.iter(gradient, err_diff=1.0e-8, max_iter=2, epsilon=0.01)
 
     assert calls["calc"] == 2
-    assert gradient.epsilon == pytest.approx(0.005)
-    assert np.allclose(gradient.U[0, 0, 0], [[1.0]])
+    assert gradient.epsilon == pytest.approx(0.01)
+    assert np.allclose(gradient.U[0, 0, 0], [[np.exp(0.01j)]])
+    assert not gradient.last_line_search.accepted
+    assert gradient.last_line_search.backtracking_steps == 24
+
+
+def test_gradient_stops_before_dividing_by_a_diagonal_below_the_mv_floor():
+    gradient, calls = _synthetic_gradient_optimizer([1.0])
+    gradient.config.mv_diagonal_floor = 1.0e-8
+    gradient.mset.get = lambda *_args: np.array([[1.0e-10]], dtype=np.complex128)
+
+    Gradient.iter(gradient, err_diff=1.0e-8, max_iter=10, epsilon=0.01)
+
+    assert calls["calc"] == 0
+    assert not gradient.converged
+    assert np.array_equal(gradient.U[0, 0, 0], np.eye(1))
+
+
+def test_zero_iteration_mv_evaluation_does_not_form_the_singular_gradient():
+    gradient, calls = _synthetic_gradient_optimizer([1.0])
+    gradient.mset.get = lambda *_args: np.array([[0.0]], dtype=np.complex128)
+
+    Gradient.iter(gradient, err_diff=1.0e-8, max_iter=0, epsilon=0.01)
+
+    assert calls["calc"] == 0
+    assert np.isinf(gradient.omega[2])
 
 
 def test_calculation_context_separates_internal_and_output_coefficients():
@@ -928,18 +952,31 @@ def _object_grid(value):
 
 def _synthetic_gradient_optimizer(omega_values):
     gradient = object.__new__(Gradient)
-    gradient.config = SimpleNamespace(use_cached_data=[])
+    gradient.config = SimpleNamespace(
+        use_cached_data=[],
+        composition_of_b=[[1.0], [-1.0]],
+        mv_diagonal_floor=1.0e-8,
+        mv_line_search_max_steps=24,
+    )
     gradient.state = SimpleNamespace(k_indices=lambda: iter(((0, 0, 0),)))
-    gradient.mset = SimpleNamespace(update=lambda _u: None)
-    gradient.U = _object_grid(np.zeros((1, 1), dtype=np.complex128))
-    gradient.G = _object_grid(np.ones((1, 1), dtype=np.complex128))
+    gradient.mset = SimpleNamespace(
+        config=gradient.config,
+        state=gradient.state,
+        update=lambda _u: None,
+        get=lambda *_args: np.eye(1, dtype=np.complex128),
+    )
+    gradient.U = _object_grid(np.eye(1, dtype=np.complex128))
+    gradient.G = _object_grid(np.array([[1j]], dtype=np.complex128))
     gradient.omega = np.full(3, np.nan, dtype=float)
+    gradient.epsilon = 0.01
+    gradient.converged = False
+    gradient.last_line_search = None
+    gradient._cached_u_loaded = False
     calls = {"calc": 0, "update": 0}
 
-    def calc():
+    def calc(is_update=False):
         calls["calc"] += 1
-        gradient.G[0, 0, 0] = np.ones((1, 1), dtype=np.complex128)
-        gradient.U[0, 0, 0] = gradient.U[0, 0, 0] + 1.0
+        gradient.G[0, 0, 0] = np.array([[1j]], dtype=np.complex128)
 
     def update():
         index = min(calls["update"], len(omega_values) - 1)

@@ -114,6 +114,14 @@ class MSet:
         ik, _ = neighbor_reciprocal_lattice_vectors(self.config, [i, j, k], b)
         return np.conj(self.mM[ik][b - b_half]).T
 
+    def get_initial(self, i: int, j: int, k: int, b: int) -> np.ndarray:
+        """Return a selected-basis overlap before the target-space MV gauge."""
+        b_half = len(self.config.composition_of_b) // 2
+        if b < b_half:
+            return self.mMInitial[i, j, k][b]
+        ik, _ = neighbor_reciprocal_lattice_vectors(self.config, [i, j, k], b)
+        return np.conj(self.mMInitial[ik][b - b_half]).T
+
     def initial(self, vmat: np.ndarray) -> None:
         b_half = len(self.config.composition_of_b) // 2
         for i, j, k in self.state.k_indices():

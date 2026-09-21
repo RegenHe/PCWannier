@@ -462,7 +462,7 @@ def validate_wannier_symmetry(
     retained = min((entry.retained_norm for entry in entries), default=1.0)
     result = WannierSymmetryValidation(tuple(entries), max_residual, mean_residual, retained)
     if retained < minimum_retained_norm:
-        LOGGER.warning(
+        LOGGER.debug(
             "Wannier symmetry validation retained only %.6g of the norm; requested %.6g. "
             "The reported real-space residual uses the common interior domain; increase "
             "extension for a less boundary-sensitive diagnostic.",
@@ -470,7 +470,7 @@ def validate_wannier_symmetry(
             minimum_retained_norm,
         )
     if max_residual > tolerance:
-        LOGGER.warning(
+        LOGGER.debug(
             "Real-space Wannier symmetry residual %.6g exceeds %.6g%s. The validation is "
             "diagnostic, so the computed Wannier functions are retained.",
             max_residual,

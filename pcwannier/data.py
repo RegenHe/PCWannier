@@ -18,6 +18,7 @@ from .maxwell import FieldKind, MaxwellProblem
 
 if TYPE_CHECKING:
     from .etbc import ETBCCompletionResult
+    from .compute.mv_optimizer import MVGaugePreconditionResult
     from .symmetry.analysis import (
         BlochSymmetryAnalysisResult,
         GammaZeroRegularizationAnalysis,
@@ -536,6 +537,7 @@ class RunResult:
     trial_covariance_diagnostics: tuple[Any, ...] = ()
     etbc: ETBCCompletionResult | None = None
     transverse_projectors: np.ndarray | None = None
+    mv_precondition: MVGaugePreconditionResult | None = None
 
 
 @dataclass

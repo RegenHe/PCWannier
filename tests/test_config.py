@@ -23,6 +23,9 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
 
     assert cfg.dataset_type == "comsol"
     assert cfg.hermitian is True
+    assert cfg.mv_precondition is False
+    assert cfg.mv_diagonal_floor == pytest.approx(1.0e-8)
+    assert cfg.mv_line_search_max_steps == 24
     assert cfg.kdim == 2
     assert [len(axis) for axis in cfg.k_points] == [2, 2]
     assert np.array_equal(cfg.band_window, np.arange(0, 3))
@@ -401,6 +404,8 @@ def test_central_config_validation_rejects_invalid_core_geometry(tmp_path, old, 
         ("epsilon = 0", "epsilon must be finite and positive"),
         ("projection_rank_tolerance = 1", "projection_rank_tolerance"),
         ("representation_character_tolerance = 0", "representation_character_tolerance"),
+        ("mv_diagonal_floor = 0", "mv_diagonal_floor"),
+        ("mv_line_search_max_steps = 0", "mv_line_search_max_steps"),
         ("neighbor = 0 0", r"neighbor\[0\] must be non-zero"),
         ("inner_window = 2:4", "frozen inner_window bands"),
         ("k_path\nX; 0.5; 0\nend", "k_path point 0"),

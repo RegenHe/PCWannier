@@ -8,6 +8,14 @@ import scipy.linalg
 from ..logging_utils import should_log_progress
 from ..matrix_io import load_cell_matrix
 from .matrix import MSet
+from .mv_optimizer import (
+    MVCandidate,
+    MVLineSearchResult,
+    MVTimeReversalConstraint,
+    copy_gauge,
+    diagnose_diagonal_overlaps,
+    protected_mv_line_search,
+)
 from .parallel import parallel_map
 from .state import StateCollection
 
@@ -27,82 +35,116 @@ class Gradient:
         self.omega = np.array([np.nan, np.nan, np.nan], dtype=float)
         self.epsilon = 0.01
         self.rn = np.zeros((self.config.kdim, band_count), dtype=np.complex128)
+        self.converged = False
+        self.last_line_search: MVLineSearchResult | None = None
+        self.time_reversal_constraint: MVTimeReversalConstraint | None = None
+        self._cached_u_loaded = False
 
     def iter(self, err_diff: float, max_iter: int, epsilon: float = 0.01) -> None:
-        if "U" in self.config.use_cached_data:
-            path = self.config.input_path(self.config.U_file)
-            if path is None:
-                raise ValueError("U cache requested, but U_file is disabled.")
-            self.U = load_cell_matrix(path, self.state.k_shape)
-            self._validate_cached_u()
-        self.epsilon = epsilon
+        self.load_cached_u()
+        maximum_step = float(epsilon)
+        self.epsilon = maximum_step
         err = np.inf
         if max_iter == 0:
             self.evaluate_current()
             return
         self.mset.update(self.U)
+        initial_diagnostics = diagnose_diagonal_overlaps(self.mset)
+        diagonal_floor = float(getattr(self.config, "mv_diagonal_floor", 1.0e-8))
+        if initial_diagnostics.min_abs_diagonal < diagonal_floor:
+            self._evaluate_spread_if_defined(initial_diagnostics)
+            LOGGER.warning(
+                "MV localization stopped before evaluating 1/M_nn: min|M_nn|=%.6g at "
+                "k=%s direction=%s band=%s is below mv_diagonal_floor=%.6g. "
+                "The last gauge is preserved; enable mv_precondition to attempt a U(N) repair.",
+                initial_diagnostics.min_abs_diagonal,
+                initial_diagnostics.worst_k_index,
+                initial_diagnostics.worst_direction,
+                initial_diagnostics.worst_band,
+                diagonal_floor,
+            )
+            self.converged = False
+            return
         self.update()
         last_omega = float(np.sum(self.omega))
         if not np.isfinite(last_omega):
             raise FloatingPointError(f"Gradient optimization starts from a non-finite omega={last_omega}.")
         gradient_tolerance = max(float(np.sqrt(max(err_diff, np.finfo(float).eps))), 1.0e-12)
         gradient_norm = np.inf
-        converged = False
-        for iteration in range(max_iter):
-            previous_u = self.U.copy()
-            previous_omega = self.omega.copy()
-            self.calc()
+        self.converged = False
+        max_line_search_steps = int(getattr(self.config, "mv_line_search_max_steps", 24))
+        for iteration in range(1, max_iter + 1):
+            self.calc(is_update=False)
             gradient_norm = max(float(np.linalg.norm(self.G[idx], ord="fro")) for idx in self.state.k_indices())
-            self.mset.update(self.U)
-            self.update()
-            total = float(np.sum(self.omega))
-            if not np.isfinite(total) or not np.isfinite(gradient_norm):
+            if not np.isfinite(gradient_norm):
                 raise FloatingPointError(
-                    f"Gradient optimization produced a non-finite value at iteration {iteration + 1}: "
-                    f"omega={total}, gradient_norm={gradient_norm}."
+                    f"Gradient optimization produced a non-finite gradient at iteration {iteration}."
                 )
-            increase_tolerance = max(abs(last_omega) * 1.0e-12, 1.0e-14)
-            if total > last_omega + increase_tolerance:
-                self.U = previous_u
-                self.omega = previous_omega
-                self.mset.update(self.U)
-                self.epsilon *= 0.5
-                if self.epsilon <= np.finfo(float).eps:
-                    raise FloatingPointError(
-                        "Gradient optimization could not find a decreasing step before epsilon "
-                        "reached machine precision."
-                    )
-                LOGGER.warning(
-                    "gradient iter %s rejected: omega increased from %s to %s; step reduced to %s",
-                    iteration + 1,
-                    last_omega,
-                    total,
-                    self.epsilon,
-                )
-                continue
+            baseline = copy_gauge(self.U)
 
+            def build_candidate(step: float) -> MVCandidate:
+                gauge = np.empty(np.shape(baseline), dtype=object)
+                for index in self.state.k_indices():
+                    update = step * np.asarray(self.G[index], dtype=np.complex128)
+                    step_norm = float(np.linalg.norm(update, ord="fro"))
+                    if not np.isfinite(step_norm) or step_norm > 100.0:
+                        raise FloatingPointError(
+                            f"Gradient step is invalid at k={index}: norm={step_norm:.6g}."
+                        )
+                    gauge[index] = np.asarray(baseline[index]) @ scipy.linalg.expm(update)
+                time_reversal_constraint = getattr(
+                    self, "time_reversal_constraint", None
+                )
+                if time_reversal_constraint is not None:
+                    gauge = time_reversal_constraint.project(gauge).gauge
+                return MVCandidate(gauge)
+
+            line_search = protected_mv_line_search(
+                self,
+                build_candidate,
+                initial_step=self.epsilon,
+                diagonal_floor=diagonal_floor,
+                max_steps=max_line_search_steps,
+            )
+            self.last_line_search = line_search
+            if not line_search.accepted:
+                LOGGER.warning(
+                    "Gradient localization stopped after %s backtracking attempts at formal "
+                    "iteration %s: %s. The last valid gauge is preserved.",
+                    line_search.backtracking_steps,
+                    iteration,
+                    line_search.reason,
+                )
+                break
+
+            total = float(np.sum(self.omega))
             err = abs(last_omega - total)
             finished = err <= err_diff and gradient_norm <= gradient_tolerance
             log = LOGGER.info if should_log_progress(
-                iteration + 1, total=max_iter, finished=finished
+                iteration, total=max_iter, finished=finished
             ) else LOGGER.debug
             log(
                 "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
-                "max_gradient_norm=%s epsilon=%s",
-                iteration + 1,
+                "max_gradient_norm=%s accepted_step=%s backtracks=%s min_abs_diagonal=%s "
+                "worst_diagonal=%s",
+                iteration,
                 total,
                 float(self.omega[0]),
                 float(self.omega[1]),
                 float(self.omega[2]),
                 err,
                 gradient_norm,
-                self.epsilon,
+                line_search.trial_step,
+                line_search.backtracking_steps,
+                line_search.diagnostics.min_abs_diagonal,
+                line_search.diagnostics.worst_location,
             )
             last_omega = total
+            self.epsilon = min(maximum_step, line_search.trial_step * 1.5)
             if finished:
-                converged = True
+                self.converged = True
                 break
-        if not converged:
+        if not self.converged:
             LOGGER.warning(
                 "Gradient iteration reached the limit with err=%s and max_gradient_norm=%s "
                 "(required <= %s).",
@@ -112,11 +154,37 @@ class Gradient:
             )
         self.update()
 
+    def load_cached_u(self) -> None:
+        if getattr(self, "_cached_u_loaded", False) or "U" not in self.config.use_cached_data:
+            return
+        path = self.config.input_path(self.config.U_file)
+        if path is None:
+            raise ValueError("U cache requested, but U_file is disabled.")
+        self.U = load_cell_matrix(path, self.state.k_shape)
+        self._validate_cached_u()
+        self._cached_u_loaded = True
+
     def evaluate_current(self) -> None:
         """Evaluate spread diagnostics without changing the current gauge."""
+        self.load_cached_u()
         self.mset.update(self.U)
-        self.update()
-        self.calc(is_update=False)
+        diagnostics = diagnose_diagonal_overlaps(self.mset)
+        self._evaluate_spread_if_defined(diagnostics)
+
+    def _evaluate_spread_if_defined(self, diagnostics) -> None:
+        scale = max(
+            (
+                float(np.linalg.norm(self.mset.get(*index, direction), ord="fro"))
+                for index in self.state.k_indices()
+                for direction in range(len(self.config.composition_of_b))
+            ),
+            default=1.0,
+        )
+        machine_floor = np.finfo(float).eps * max(scale, 1.0) * 128.0
+        if diagnostics.min_abs_diagonal > machine_floor:
+            self.update()
+        else:
+            self.omega = np.array([np.nan, np.nan, np.inf], dtype=float)
 
     def calc(self, is_update: bool = True) -> None:
         band_count = int(self.config.band_calc_num)

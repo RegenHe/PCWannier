@@ -127,6 +127,9 @@ class IncarConfig:
     epsilon: float = 0.01
     err_diff: float = 1e-6
     max_iter: int = 2000
+    mv_precondition: bool = False
+    mv_diagonal_floor: float = 1.0e-8
+    mv_line_search_max_steps: int = 24
     extension: list[int] | None = None
     band_calc_num: int | None = None
     neighbor: list[list[int]] = field(default_factory=list)
@@ -726,6 +729,7 @@ class IncarParser:
             "gamma_zero_mode_tolerance",
             "etbc_auxiliary_eigenvalue",
             "etbc_rank_tolerance",
+            "mv_diagonal_floor",
         }:
             return float(evaluate_math_expression(value))
         if key in {
@@ -739,6 +743,7 @@ class IncarParser:
             "ebr_max_auxiliary_bands",
             "ebr_max_states",
             "ebr_subspace_dimension",
+            "mv_line_search_max_steps",
         }:
             if key == "ebr_subspace_dimension" and value.strip().lower() == "false":
                 return None
@@ -829,6 +834,7 @@ class IncarParser:
             "symmetry_validate_wannier",
             "gamma_zero_regularization",
             "invert_longitudinal_energies",
+            "mv_precondition",
         }:
             normalized = value.strip().lower()
             if normalized not in {"true", "false"}:
@@ -1316,6 +1322,8 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
 
     if cfg.max_iter < 0:
         raise ValueError("max_iter must be non-negative.")
+    if cfg.mv_line_search_max_steps <= 0:
+        raise ValueError("mv_line_search_max_steps must be positive.")
     if cfg.disentangle_max_iter is not None and cfg.disentangle_max_iter < 0:
         raise ValueError("disentangle_max_iter must be non-negative.")
     for name, value, strictly_positive in (
@@ -1323,6 +1331,7 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
         ("err_diff", cfg.err_diff, False),
         ("disentangle_err_diff", cfg.disentangle_err_diff, False),
         ("disentangle_projector_tolerance", cfg.disentangle_projector_tolerance, True),
+        ("mv_diagonal_floor", cfg.mv_diagonal_floor, True),
     ):
         if value is None:
             continue

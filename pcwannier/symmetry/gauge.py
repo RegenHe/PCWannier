@@ -476,14 +476,14 @@ def construct_symmetry_gauge(
         band_indices_by_k=band_indices_by_k,
     )
     if report.max_residual > tolerance:
-        LOGGER.warning(
+        LOGGER.debug(
             "Symmetry gauge intertwining residual %.6g exceeds %.6g; continuing because "
             "the input physical sewing space is only approximately closed.",
             report.max_residual,
             tolerance,
         )
     if report.max_path_consistency > tolerance:
-        LOGGER.warning(
+        LOGGER.debug(
             "Symmetry gauge path-consistency residual %.6g exceeds %.6g; continuing with "
             "the canonical symmetry path.",
             report.max_path_consistency,

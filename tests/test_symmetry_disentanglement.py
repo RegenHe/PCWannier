@@ -147,7 +147,7 @@ def test_outer_window_closure_uses_configured_threads(tmp_path, monkeypatch):
     assert set(observed_threads) == {4}
 
 
-def test_approximate_outer_closure_warns_but_target_gauge_continues(tmp_path, caplog):
+def test_approximate_outer_closure_is_recorded_and_target_gauge_continues(tmp_path):
     context = _c2_context(tmp_path, target_character=1.0, axis=np.array([0.0]))
     state = _state(context, ((0, 1),))
     noisy_c2 = np.diag([0.99999, -0.99999]).astype(np.complex128)
@@ -170,8 +170,6 @@ def test_approximate_outer_closure_warns_but_target_gauge_continues(tmp_path, ca
     )
 
     assert closure.max_unitarity_error > 1.0e-6
-    assert "Outer window is not fully closed" in caplog.text
-    assert "Symmetry gauge intertwining residual" in caplog.text
     assert gauge.residuals.max_residual > 1.0e-6
     assert gauge.residuals.max_semiunitarity_error < 1.0e-12
 
@@ -262,7 +260,7 @@ def test_incompatible_outer_representation_has_no_target_intertwiner(tmp_path):
         )
 
 
-def test_frozen_window_symmetry_violation_is_reported_without_aborting(tmp_path, caplog):
+def test_frozen_window_symmetry_violation_is_returned_without_aborting(tmp_path):
     context = _c2_context(tmp_path, target_character=1.0)
     state = _state(context, ((0, 1), (0, 1)))
     swap = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
@@ -278,7 +276,6 @@ def test_frozen_window_symmetry_violation_is_reported_without_aborting(tmp_path,
     )
 
     assert residual > 1e-12
-    assert "Frozen window is only approximately symmetry covariant" in caplog.text
 
 
 def test_compatible_frozen_subspace_is_retained_at_little_group_point(tmp_path):

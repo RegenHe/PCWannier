@@ -7,6 +7,12 @@ from typing import Sequence
 import numpy as np
 import scipy.linalg
 
+from ..compute.mv_optimizer import (
+    MVCandidate,
+    copy_gauge,
+    diagnose_diagonal_overlaps,
+    protected_mv_line_search,
+)
 from ..logging_utils import should_log_progress
 from .bloch import StateBlochSymmetryProvider
 from .constraints import propagate_target_gauge as _propagate_target_matrix
@@ -50,6 +56,10 @@ class SymmetryLocalizationIteration:
     max_unitarity_error: float
     max_path_consistency: float
     epsilon: float
+    min_abs_diagonal: float
+    worst_diagonal_location: tuple[tuple[int, int, int], int, int]
+    trial_step: float
+    backtracking_steps: int
 
 
 @dataclass(frozen=True)
@@ -323,9 +333,58 @@ def localize_symmetry_constrained(
     )
     gradient.U = projected.gauge
     gradient.mset.update(gradient.U)
+    diagonal_floor = float(getattr(gradient.config, "mv_diagonal_floor", 1.0e-8))
+    diagnostics = diagnose_diagonal_overlaps(gradient.mset)
+    if diagnostics.min_abs_diagonal < diagonal_floor:
+        machine_floor = np.finfo(float).eps * 128.0
+        if diagnostics.min_abs_diagonal > machine_floor:
+            gradient.update()
+        else:
+            gradient.omega = np.array([np.nan, np.nan, np.inf], dtype=float)
+        full_gauge = _compose_gauge(initial_gauge.gauge, gradient.U)
+        report = evaluate_symmetry_gauge(
+            state,
+            context,
+            provider,
+            full_gauge,
+            initial_gauge.band_indices,
+            projected.max_path_consistency,
+            band_indices_by_k=initial_gauge.band_indices_by_k,
+        )
+        LOGGER.warning(
+            "Symmetry-constrained MV localization stopped before evaluating 1/M_nn: "
+            "min|M_nn|=%.6g at %s is below mv_diagonal_floor=%.6g. "
+            "The last symmetry-compatible gauge is preserved.",
+            diagnostics.min_abs_diagonal,
+            diagnostics.worst_location,
+            diagonal_floor,
+        )
+        zero_gradients = tuple(
+            np.zeros_like(np.asarray(gradient.U[_state_index(star.representative_index)]))
+            for star in initial_gauge.stars.stars
+        )
+        history = (
+            _iteration_record(
+                0,
+                gradient.omega,
+                zero_gradients,
+                report,
+                0.0,
+                diagnostics,
+                trial_step=0.0,
+                backtracking_steps=0,
+            ),
+        )
+        return SymmetryLocalizationResult(history, False, full_gauge, report)
     gradient.update()
-    gradient.calc(is_update=False)
-    representative_gradients = symmetrize_gradient(gradient.G, context, initial_gauge.stars)
+    if max_iter == 0:
+        representative_gradients = tuple(
+            np.zeros_like(np.asarray(gradient.U[_state_index(star.representative_index)]))
+            for star in initial_gauge.stars.stars
+        )
+    else:
+        gradient.calc(is_update=False)
+        representative_gradients = symmetrize_gradient(gradient.G, context, initial_gauge.stars)
 
     full_gauge = _compose_gauge(initial_gauge.gauge, gradient.U)
     report = evaluate_symmetry_gauge(
@@ -345,6 +404,9 @@ def localize_symmetry_constrained(
             representative_gradients,
             report,
             gradient.epsilon,
+            diagnostics,
+            trial_step=0.0,
+            backtracking_steps=0,
         )
     ]
     if max_iter == 0:
@@ -354,26 +416,96 @@ def localize_symmetry_constrained(
     err = np.inf
     gradient_tolerance = max(float(np.sqrt(max(err_diff, np.finfo(float).eps))), 1.0e-12)
     converged = False
+    maximum_step = float(epsilon)
+    max_line_search_steps = int(getattr(gradient.config, "mv_line_search_max_steps", 24))
     for iteration in range(1, max_iter + 1):
-        step_epsilon = float(gradient.epsilon)
-        previous_u = gradient.U.copy()
-        previous_omega = gradient.omega.copy()
-        representatives = []
-        for star, constrained in zip(initial_gauge.stars.stars, representative_gradients):
-            step = step_epsilon * constrained
-            step_norm = float(np.linalg.norm(step, ord="fro"))
-            if not np.isfinite(step_norm) or step_norm > 100.0:
-                raise FloatingPointError(
-                    f"Symmetry-constrained gradient step is invalid at k={star.representative_index}: "
-                    f"norm={step_norm:.6g}. Reduce epsilon."
-                )
-            current = np.asarray(gradient.U[_state_index(star.representative_index)])
-            representatives.append(current @ scipy.linalg.expm(step))
+        baseline = copy_gauge(gradient.U)
 
-        propagated = propagate_target_gauge(representatives, context, initial_gauge.stars)
-        gradient.U = propagated.gauge
-        gradient.mset.update(gradient.U)
-        gradient.update()
+        def build_candidate(step_epsilon: float) -> MVCandidate:
+            representatives = []
+            for star, constrained in zip(initial_gauge.stars.stars, representative_gradients):
+                step = step_epsilon * constrained
+                step_norm = float(np.linalg.norm(step, ord="fro"))
+                if not np.isfinite(step_norm) or step_norm > 100.0:
+                    raise FloatingPointError(
+                        f"Symmetry-constrained gradient step is invalid at "
+                        f"k={star.representative_index}: norm={step_norm:.6g}."
+                    )
+                current = np.asarray(baseline[_state_index(star.representative_index)])
+                representatives.append(current @ scipy.linalg.expm(step))
+            propagated = propagate_target_gauge(representatives, context, initial_gauge.stars)
+            time_reversal_constraint = getattr(
+                gradient, "time_reversal_constraint", None
+            )
+            if time_reversal_constraint is not None:
+                path_consistency = propagated.max_path_consistency
+                candidate_gauge = propagated.gauge
+                for _ in range(4):
+                    candidate_gauge = time_reversal_constraint.project(candidate_gauge).gauge
+                    spatial = project_target_gauge_to_stars(
+                        candidate_gauge,
+                        context,
+                        initial_gauge.stars,
+                        tolerance=tolerance,
+                        max_iterations=projection_max_iterations,
+                        svd_relative_tolerance=svd_relative_tolerance,
+                    )
+                    candidate_gauge = spatial.gauge
+                    path_consistency = max(
+                        path_consistency,
+                        spatial.max_path_consistency,
+                    )
+                propagated = TargetGaugePropagation(candidate_gauge, path_consistency)
+            return MVCandidate(
+                propagated.gauge,
+                propagated.max_path_consistency,
+                propagated,
+            )
+
+        allowed_path = max(tolerance, projected.max_path_consistency + tolerance)
+
+        def validate_candidate(candidate: MVCandidate) -> tuple[bool, str | None]:
+            if not np.isfinite(candidate.path_consistency):
+                return False, "symmetry path-consistency residual is non-finite"
+            if candidate.path_consistency > allowed_path:
+                return (
+                    False,
+                    f"path-consistency residual {candidate.path_consistency:.6g} exceeds "
+                    f"{allowed_path:.6g}",
+                )
+            time_reversal_constraint = getattr(
+                gradient, "time_reversal_constraint", None
+            )
+            if time_reversal_constraint is not None:
+                residual = time_reversal_constraint.residual(candidate.gauge)
+                if residual > max(tolerance, 1.0e-8):
+                    return (
+                        False,
+                        f"time-reversal gauge residual {residual:.6g} exceeds "
+                        f"{max(tolerance, 1.0e-8):.6g}",
+                    )
+            return True, None
+
+        line_search = protected_mv_line_search(
+            gradient,
+            build_candidate,
+            initial_step=gradient.epsilon,
+            diagonal_floor=diagonal_floor,
+            max_steps=max_line_search_steps,
+            candidate_validator=validate_candidate,
+        )
+        gradient.last_line_search = line_search
+        if not line_search.accepted:
+            LOGGER.warning(
+                "Symmetry-constrained localization stopped after %s backtracking attempts "
+                "at formal iteration %s: %s. The last valid gauge is preserved.",
+                line_search.backtracking_steps,
+                iteration,
+                line_search.reason,
+            )
+            break
+
+        propagated = line_search.metadata
         candidate_full_gauge = _compose_gauge(initial_gauge.gauge, gradient.U)
         candidate_report = evaluate_symmetry_gauge(
             state,
@@ -397,26 +529,6 @@ def localize_symmetry_constrained(
             (float(np.linalg.norm(matrix, ord="fro")) for matrix in representative_gradients),
             default=0.0,
         )
-        increase_tolerance = max(abs(last_omega) * 1.0e-12, 1.0e-14)
-        if total > last_omega + increase_tolerance:
-            gradient.U = previous_u
-            gradient.omega = previous_omega
-            gradient.mset.update(gradient.U)
-            gradient.epsilon *= 0.5
-            if gradient.epsilon <= np.finfo(float).eps:
-                raise FloatingPointError(
-                    "Symmetry-constrained localization could not find a decreasing step before "
-                    "epsilon reached machine precision."
-                )
-            LOGGER.warning(
-                "gradient iter %s rejected: omega increased from %s to %s; step reduced to %s",
-                iteration,
-                last_omega,
-                total,
-                gradient.epsilon,
-            )
-            continue
-
         full_gauge = candidate_full_gauge
         report = candidate_report
         err = abs(last_omega - total)
@@ -426,7 +538,10 @@ def localize_symmetry_constrained(
                 gradient.omega,
                 representative_gradients,
                 report,
-                step_epsilon,
+                line_search.trial_step,
+                line_search.diagnostics,
+                trial_step=line_search.trial_step,
+                backtracking_steps=line_search.backtracking_steps,
             )
         )
         finished = err <= err_diff and gradient_norm <= gradient_tolerance
@@ -435,7 +550,8 @@ def localize_symmetry_constrained(
         ) else LOGGER.debug
         log(
             "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
-            "max_gradient_norm=%s symmetry_max=%s symmetry_mean=%s unitarity=%s path=%s epsilon=%s",
+            "max_gradient_norm=%s symmetry_max=%s symmetry_mean=%s unitarity=%s path=%s "
+            "accepted_step=%s backtracks=%s min_abs_diagonal=%s worst_diagonal=%s",
             iteration,
             total,
             float(gradient.omega[0]),
@@ -447,9 +563,13 @@ def localize_symmetry_constrained(
             report.mean_residual,
             report.max_semiunitarity_error,
             report.max_path_consistency,
-            gradient.epsilon,
+            line_search.trial_step,
+            line_search.backtracking_steps,
+            line_search.diagnostics.min_abs_diagonal,
+            line_search.diagnostics.worst_location,
         )
         last_omega = total
+        gradient.epsilon = min(maximum_step, line_search.trial_step * 1.5)
         if finished:
             converged = True
             break
@@ -476,6 +596,10 @@ def _iteration_record(
     gradients: Sequence[np.ndarray],
     report: GaugeResidualReport,
     epsilon: float,
+    diagnostics,
+    *,
+    trial_step: float,
+    backtracking_steps: int,
 ) -> SymmetryLocalizationIteration:
     gradient_norm = max(
         (float(np.linalg.norm(matrix, ord="fro")) for matrix in gradients),
@@ -493,6 +617,10 @@ def _iteration_record(
         report.max_semiunitarity_error,
         report.max_path_consistency,
         float(epsilon),
+        float(diagnostics.min_abs_diagonal),
+        diagnostics.worst_location,
+        float(trial_step),
+        int(backtracking_steps),
     )
 
 
@@ -506,8 +634,7 @@ def _validate_iteration(
     if not np.all(np.isfinite(omega)) or any(not np.all(np.isfinite(matrix)) for matrix in gradients):
         raise FloatingPointError(f"Non-finite symmetry localization value at iteration {iteration}.")
     if report.max_residual > tolerance:
-        log = LOGGER.warning if iteration == 0 else LOGGER.debug
-        log(
+        LOGGER.debug(
             "Symmetry intertwining residual %.6g exceeds %.6g at iteration %s; "
             "continuing because the physical sewing input may be only approximately closed.",
             report.max_residual,
@@ -515,8 +642,7 @@ def _validate_iteration(
             iteration,
         )
     if report.max_path_consistency > tolerance:
-        log = LOGGER.warning if iteration == 0 else LOGGER.debug
-        log(
+        LOGGER.debug(
             "Symmetry path-consistency residual %.6g exceeds %.6g at iteration %s; "
             "continuing with the canonical symmetry paths.",
             report.max_path_consistency,

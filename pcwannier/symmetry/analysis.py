@@ -902,7 +902,7 @@ def _analyze_bloch_point(
         energy_line, available, bands, point.degeneracy_tolerance
     )
     if diagnostics.leakage > leakage_tolerance:
-        LOGGER.warning(
+        LOGGER.debug(
             "Selected Bloch symmetry subspace at %s is not closed: "
             "bands(0-based)=%s leakage=%.6g coupled_outer_bands(0-based)=%s",
             point.name,
@@ -911,7 +911,7 @@ def _analyze_bloch_point(
             tuple(band for block in block_results for band in block.coupled_outer_bands),
         )
     if outer_unitarity > leakage_tolerance:
-        LOGGER.warning(
+        LOGGER.debug(
             "Outer Bloch window at %s is not closed: outer_bands(0-based)=%s "
             "unitarity=%.6g candidate_excluded_bands(0-based)=%s",
             point.name,
@@ -967,7 +967,7 @@ def _analyze_target_compatibility(
     ]
     if invalid:
         block = invalid[0]
-        LOGGER.warning(
+        LOGGER.debug(
             "Degenerate block %s at representation point %s is not closed: "
             "leakage=%.6g unitarity=%.6g twisted_composition=%.6g. "
             "Its irrep label is unavailable, but compatibility of the complete selected "

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable
 
@@ -10,6 +11,7 @@ from .parallel import parallel_map
 
 
 Index3D = tuple[int, int, int]
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -152,26 +154,42 @@ def selected_sector_smoothness(
             ctx.output_state_coefficients_at(i, j, k), dtype=np.complex128
         )
     )
-    bases: dict[str, dict[Index3D, np.ndarray]] = {
-        "selected T": {},
-        "selected L": {},
-        "selected T+L": {},
-    }
+    bases: dict[str, dict[Index3D, np.ndarray]] = {"selected T+L": {}}
+    eigensystems: dict[Index3D, tuple[np.ndarray, np.ndarray]] = {}
+    transverse_dimensions: set[int] = set()
     for raw_index in state.k_indices():
         index = tuple(int(value) for value in raw_index)
         projector = np.asarray(projector_grid[index], dtype=np.complex128)
         projector = 0.5 * (projector + projector.conj().T)
         eigenvalues, eigenvectors = np.linalg.eigh(projector)
         transverse_dimension = int(np.count_nonzero(eigenvalues > 0.5))
-        if not 0 < transverse_dimension < projector.shape[0]:
-            raise ValueError(
-                f"Transverse projector at k={index} has invalid eigenvalues "
-                f"{eigenvalues.tolist()}."
-            )
-        bases["selected T"][index] = eigenvectors[:, -transverse_dimension:]
-        bases["selected L"][index] = eigenvectors[:, :-transverse_dimension]
+        transverse_dimensions.add(transverse_dimension)
+        eigensystems[index] = (eigenvalues, eigenvectors)
         bases["selected T+L"][index] = np.eye(
             projector.shape[0], dtype=np.complex128
+        )
+
+    wannier_dimension = next(iter(eigensystems.values()))[0].size
+    split_available = (
+        len(transverse_dimensions) == 1
+        and 0 < next(iter(transverse_dimensions)) < wannier_dimension
+    )
+    labels = ["selected T+L"]
+    if split_available:
+        transverse_dimension = next(iter(transverse_dimensions))
+        bases["selected T"] = {}
+        bases["selected L"] = {}
+        for index, (_, eigenvectors) in eigensystems.items():
+            bases["selected T"][index] = eigenvectors[:, -transverse_dimension:]
+            bases["selected L"][index] = eigenvectors[:, :-transverse_dimension]
+        labels = ["selected T", "selected L", "selected T+L"]
+    else:
+        LOGGER.debug(
+            "Selected T/L sector smoothness is unavailable because P_T does not "
+            "define a fixed nontrivial split: transverse_dimensions=%s, "
+            "wannier_dimension=%s. The complete selected-space diagnostic is retained.",
+            sorted(transverse_dimensions),
+            wannier_dimension,
         )
 
     def overlap_at(index: Index3D, direction: int) -> np.ndarray:
@@ -208,5 +226,5 @@ def selected_sector_smoothness(
             lambda index, label=label: bases[label][index],
             zero_mode_at=zero_mode_at,
         )
-        for label in ("selected T", "selected L", "selected T+L")
+        for label in labels
     )

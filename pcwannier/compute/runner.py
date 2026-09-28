@@ -25,10 +25,7 @@ from ..symmetry.disentanglement import (
     validate_outer_window_closure,
 )
 from ..symmetry.gauge import construct_symmetry_gauge, evaluate_symmetry_gauge
-from ..symmetry.localization import (
-    localize_symmetry_constrained,
-    project_target_gauge_to_stars,
-)
+from ..symmetry.localization import localize_symmetry_constrained
 from ..symmetry.representation import build_symmetry_context
 from ..symmetry.wannier_validation import validate_wannier_symmetry
 from ..timing import timed_step
@@ -47,13 +44,6 @@ from .context import CalculationContext
 from .gradient import Gradient
 from .initializer import StateInitializer
 from .matrix import MSet
-from .mv_optimizer import (
-    MVGaugePreconditionResult,
-    build_time_reversal_constraint,
-    diagnose_diagonal_overlaps,
-    expected_target_centers,
-    precondition_mv_gauge,
-)
 from .parallel import ExecutionContext
 from .prepared import PreparedRun
 from .state import StateCollection
@@ -500,7 +490,6 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     symmetry_gauge = None
     symmetry_localization = None
     symmetry_disentanglement = None
-    mv_precondition_result = None
     gauge_spec = bundle.symmetry.model.symmetry_gauge if bundle.symmetry is not None else None
     if config.symmetry_constrained:
         if gauge_spec is None or not gauge_spec.enabled or bundle.symmetry is None:
@@ -643,13 +632,6 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         else:
             initializer.matV = symmetry_gauge.gauge
         mset.initial(initializer.matV)
-        mv_precondition_result = _maybe_precondition_mv_gauge(
-            gradient,
-            config,
-            initial_frame=initializer.matV,
-            context=bundle.symmetry,
-            symmetry_gauge=symmetry_gauge,
-        )
         with timed_step(
             "symmetry-constrained gradient optimization",
             LOGGER,
@@ -678,11 +660,6 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         _log_symmetry_localization(symmetry_localization)
         LOGGER.info("Symmetry-constrained output basis: %s", config.output_basis)
     else:
-        mv_precondition_result = _maybe_precondition_mv_gauge(
-            gradient,
-            config,
-            initial_frame=initializer.matV,
-        )
         with timed_step("gradient optimization", LOGGER, max_iter=config.max_iter, epsilon=config.epsilon):
             gradient.iter(config.err_diff, config.max_iter, config.epsilon)
     LOGGER.info(
@@ -693,13 +670,6 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         float(gradient.omega[2]),
         gradient.rn.shape,
     )
-    time_reversal_constraint = getattr(gradient, "time_reversal_constraint", None)
-    if time_reversal_constraint is not None:
-        LOGGER.info(
-            "Final MV time-reversal gauge residual: %.6g",
-            time_reversal_constraint.residual(gradient.U),
-        )
-
     ctx = CalculationContext(config, state, mset, initializer, gradient, symmetry_gauge)
     with timed_step("generate Wannier functions", LOGGER):
         r_key, wannier, norms = generate_wannier(ctx)
@@ -839,103 +809,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         trial_covariance_diagnostics=trial_covariance_diagnostics,
         etbc=etbc_result,
         transverse_projectors=transverse_projectors,
-        mv_precondition=mv_precondition_result,
     )
-
-
-def _maybe_precondition_mv_gauge(
-    gradient: Gradient,
-    config,
-    *,
-    initial_frame: np.ndarray,
-    context=None,
-    symmetry_gauge=None,
-) -> MVGaugePreconditionResult | None:
-    if not config.mv_precondition or config.max_iter == 0:
-        return None
-    gradient.load_cached_u()
-    gradient.mset.update(gradient.U)
-    diagnostics = diagnose_diagonal_overlaps(gradient.mset)
-    try:
-        gradient.generateRn()
-        current_centers = np.asarray(np.real_if_close(gradient.rn), dtype=float)
-    except FloatingPointError:
-        current_centers = np.zeros(
-            (int(config.kdim), int(config.band_calc_num)), dtype=float
-        )
-        LOGGER.info(
-            "The initial MV gauge has an exactly singular diagonal overlap at %s; "
-            "its centers are undefined, so synchronization starts from zero-cell center images.",
-            diagnostics.worst_location,
-        )
-    centers = (
-        expected_target_centers(context, current_centers, config)
-        if context is not None
-        else current_centers
-    )
-
-    symmetry_projector = None
-    if context is not None:
-        if symmetry_gauge is None:
-            raise ValueError("Symmetry MV preconditioning requires an initial symmetry gauge.")
-        gauge_spec = context.model.symmetry_gauge
-
-        def symmetry_projector(candidate):
-            projected = project_target_gauge_to_stars(
-                candidate,
-                context,
-                symmetry_gauge.stars,
-                tolerance=gauge_spec.tolerance,
-                max_iterations=gauge_spec.max_iterations,
-                svd_relative_tolerance=gauge_spec.svd_relative_tolerance,
-            )
-            return (
-                projected.gauge,
-                projected.max_path_consistency,
-                projected.max_unitarity_error,
-            )
-
-    time_reversal_constraint = None
-    if config.magnetic_bias_direction is None:
-        time_reversal_constraint = build_time_reversal_constraint(
-            gradient.state,
-            initial_frame,
-            tolerance=min(max(float(config.symmetry_algebra_tolerance), 1.0e-12), 1.0e-8),
-        )
-        gradient.time_reversal_constraint = time_reversal_constraint
-        LOGGER.info(
-            "MV time-reversal structure: frame_unitarity=%.6g square_residual=%.6g "
-            "initial_gauge_residual=%.6g",
-            time_reversal_constraint.diagnostics.max_frame_unitarity_error,
-            time_reversal_constraint.diagnostics.max_square_residual,
-            time_reversal_constraint.residual(gradient.U),
-        )
-
-    with timed_step("U(N) MV gauge synchronization", LOGGER, max_sweeps=50):
-        result = precondition_mv_gauge(
-            gradient,
-            centers,
-            diagonal_floor=float(config.mv_diagonal_floor),
-            symmetry_projector=symmetry_projector,
-            time_reversal_constraint=time_reversal_constraint,
-        )
-    LOGGER.info(
-        "MV gauge preconditioner: accepted=%s sweeps=%s converged=%s "
-        "omega_tilde=%s -> %s min|M_nn|=%s -> %s gauge_change=%s path=%s "
-        "time_reversal=%s%s",
-        result.accepted,
-        result.sweeps,
-        result.converged,
-        result.initial_omega_tilde,
-        result.final_omega_tilde,
-        result.initial_diagnostics.min_abs_diagonal,
-        result.final_diagnostics.min_abs_diagonal,
-        result.max_gauge_change,
-        result.max_path_consistency,
-        result.max_time_reversal_residual,
-        " reason=" + result.reason if result.reason else "",
-    )
-    return result
 
 
 def _log_output_spectrum_diagnostics(result, config) -> None:

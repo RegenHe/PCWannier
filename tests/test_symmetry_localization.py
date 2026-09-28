@@ -3,9 +3,6 @@ from __future__ import annotations
 import numpy as np
 import scipy.linalg
 
-from pcwannier.compute.gradient import Gradient
-from pcwannier.compute.matrix import MSet
-from pcwannier.compute.mv_optimizer import precondition_mv_gauge
 from pcwannier.symmetry import (
     SpaceGroup,
     SpaceGroupOperation,
@@ -104,85 +101,6 @@ def test_square_2c_gradient_pullback_and_star_propagation_follow_right_action_co
     propagated = propagate_target_gauge(representatives, context, stars)
     assert propagated.max_path_consistency < 1e-12
     assert _max_target_residual(propagated.gauge, context) < 1e-12
-
-
-def test_u_n_synchronization_preserves_c4v_target_stars():
-    model = p4mm_model(
-        targets=(
-            WannierTargetSpec("center_s_A1", [0.0, 0.0], "A1"),
-            WannierTargetSpec("center_p_E", [0.0, 0.0], "E"),
-        )
-    )
-    axis = np.arange(-0.4, 0.5, 0.2)
-    context = build_symmetry_context(model, [axis, axis])
-    stars = build_symmetry_stars(context)
-    shape = (5, 5, 1)
-    config = type(
-        "Config",
-        (),
-        {
-            "band_calc_num": 3,
-            "kdim": 2,
-            "k_points": [axis, axis],
-            "composition_of_b": [[1, 0], [0, 1], [-1, 0], [0, -1]],
-            "b_vectors": np.array(
-                [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
-            ),
-            "wb": np.ones(4),
-        },
-    )()
-    state = type(
-        "State",
-        (),
-        {
-            "config": config,
-            "k_shape": shape,
-            "k_indices": lambda self: iter(np.ndindex(shape)),
-            "get_k_num": lambda self: 25,
-            "gen_matrix_on_kmesh": lambda self, factory: _matrix_mesh_from_factory(
-                shape, factory
-            ),
-        },
-    )()
-    mset = MSet(state, threads=1)
-    mset.mMInitial = _matrix_mesh_from_factory(
-        shape, lambda *_index: [np.eye(3), np.eye(3)]
-    )
-    mset.mM = _matrix_mesh_from_factory(
-        shape, lambda *_index: [np.eye(3), np.eye(3)]
-    )
-    gradient = Gradient(state, mset, threads=1)
-    rng = np.random.default_rng(713)
-    representatives = []
-    for _star in stars.stars:
-        raw = rng.normal(size=(3, 3)) + 1j * rng.normal(size=(3, 3))
-        left, _, vh = np.linalg.svd(raw)
-        representatives.append(left @ vh)
-    gradient.U = propagate_target_gauge(representatives, context, stars).gauge
-    mset.update(gradient.U)
-    gradient.update()
-    before = float(gradient.omega[1] + gradient.omega[2])
-
-    def symmetry_projector(candidate):
-        projected = project_target_gauge_to_stars(candidate, context, stars)
-        return (
-            projected.gauge,
-            projected.max_path_consistency,
-            projected.max_unitarity_error,
-        )
-
-    result = precondition_mv_gauge(
-        gradient,
-        np.zeros((2, 3)),
-        diagonal_floor=1.0e-8,
-        symmetry_projector=symmetry_projector,
-    )
-
-    mset.update(gradient.U)
-    gradient.update()
-    assert result.accepted
-    assert float(gradient.omega[1] + gradient.omega[2]) < before
-    assert _max_target_residual(gradient.U, context) < 1.0e-10
 
 
 def test_unconstrained_two_band_minimum_can_break_target_symmetry():

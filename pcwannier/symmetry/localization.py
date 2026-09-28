@@ -434,28 +434,6 @@ def localize_symmetry_constrained(
                 current = np.asarray(baseline[_state_index(star.representative_index)])
                 representatives.append(current @ scipy.linalg.expm(step))
             propagated = propagate_target_gauge(representatives, context, initial_gauge.stars)
-            time_reversal_constraint = getattr(
-                gradient, "time_reversal_constraint", None
-            )
-            if time_reversal_constraint is not None:
-                path_consistency = propagated.max_path_consistency
-                candidate_gauge = propagated.gauge
-                for _ in range(4):
-                    candidate_gauge = time_reversal_constraint.project(candidate_gauge).gauge
-                    spatial = project_target_gauge_to_stars(
-                        candidate_gauge,
-                        context,
-                        initial_gauge.stars,
-                        tolerance=tolerance,
-                        max_iterations=projection_max_iterations,
-                        svd_relative_tolerance=svd_relative_tolerance,
-                    )
-                    candidate_gauge = spatial.gauge
-                    path_consistency = max(
-                        path_consistency,
-                        spatial.max_path_consistency,
-                    )
-                propagated = TargetGaugePropagation(candidate_gauge, path_consistency)
             return MVCandidate(
                 propagated.gauge,
                 propagated.max_path_consistency,
@@ -473,17 +451,6 @@ def localize_symmetry_constrained(
                     f"path-consistency residual {candidate.path_consistency:.6g} exceeds "
                     f"{allowed_path:.6g}",
                 )
-            time_reversal_constraint = getattr(
-                gradient, "time_reversal_constraint", None
-            )
-            if time_reversal_constraint is not None:
-                residual = time_reversal_constraint.residual(candidate.gauge)
-                if residual > max(tolerance, 1.0e-8):
-                    return (
-                        False,
-                        f"time-reversal gauge residual {residual:.6g} exceeds "
-                        f"{max(tolerance, 1.0e-8):.6g}",
-                    )
             return True, None
 
         line_search = protected_mv_line_search(

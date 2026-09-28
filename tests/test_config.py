@@ -23,7 +23,6 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
 
     assert cfg.dataset_type == "comsol"
     assert cfg.hermitian is True
-    assert cfg.mv_precondition is False
     assert cfg.mv_diagonal_floor == pytest.approx(1.0e-8)
     assert cfg.mv_line_search_max_steps == 24
     assert cfg.kdim == 2

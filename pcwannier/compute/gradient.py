@@ -11,7 +11,6 @@ from .matrix import MSet
 from .mv_optimizer import (
     MVCandidate,
     MVLineSearchResult,
-    MVTimeReversalConstraint,
     copy_gauge,
     diagnose_diagonal_overlaps,
     protected_mv_line_search,
@@ -37,7 +36,6 @@ class Gradient:
         self.rn = np.zeros((self.config.kdim, band_count), dtype=np.complex128)
         self.converged = False
         self.last_line_search: MVLineSearchResult | None = None
-        self.time_reversal_constraint: MVTimeReversalConstraint | None = None
         self._cached_u_loaded = False
 
     def iter(self, err_diff: float, max_iter: int, epsilon: float = 0.01) -> None:
@@ -56,7 +54,8 @@ class Gradient:
             LOGGER.warning(
                 "MV localization stopped before evaluating 1/M_nn: min|M_nn|=%.6g at "
                 "k=%s direction=%s band=%s is below mv_diagonal_floor=%.6g. "
-                "The last gauge is preserved; enable mv_precondition to attempt a U(N) repair.",
+                "The last gauge is preserved because an in-subspace U(N) update cannot "
+                "cross this singularity safely.",
                 initial_diagnostics.min_abs_diagonal,
                 initial_diagnostics.worst_k_index,
                 initial_diagnostics.worst_direction,
@@ -92,11 +91,6 @@ class Gradient:
                             f"Gradient step is invalid at k={index}: norm={step_norm:.6g}."
                         )
                     gauge[index] = np.asarray(baseline[index]) @ scipy.linalg.expm(update)
-                time_reversal_constraint = getattr(
-                    self, "time_reversal_constraint", None
-                )
-                if time_reversal_constraint is not None:
-                    gauge = time_reversal_constraint.project(gauge).gauge
                 return MVCandidate(gauge)
 
             line_search = protected_mv_line_search(

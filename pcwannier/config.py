@@ -127,7 +127,6 @@ class IncarConfig:
     epsilon: float = 0.01
     err_diff: float = 1e-6
     max_iter: int = 2000
-    mv_precondition: bool = False
     mv_diagonal_floor: float = 1.0e-8
     mv_line_search_max_steps: int = 24
     extension: list[int] | None = None
@@ -834,7 +833,6 @@ class IncarParser:
             "symmetry_validate_wannier",
             "gamma_zero_regularization",
             "invert_longitudinal_energies",
-            "mv_precondition",
         }:
             normalized = value.strip().lower()
             if normalized not in {"true", "false"}:

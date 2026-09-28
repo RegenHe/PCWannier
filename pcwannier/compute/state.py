@@ -381,6 +381,24 @@ class StateCollection:
             return np.einsum("npc,ni->ipc", block, transform, optimize=True)
         return np.asarray(block.T @ transform, dtype=np.complex128).T
 
+    def overlap_to_internal_basis(
+        self,
+        index: tuple[int, int, int],
+        overlap: np.ndarray,
+    ) -> np.ndarray:
+        """Convert <normalized input state|trial> to the strict internal basis."""
+
+        matrix = np.asarray(overlap, dtype=np.complex128)
+        transform = np.asarray(
+            self.get_transform(False)[tuple(index)], dtype=np.complex128
+        )
+        if matrix.ndim != 2 or matrix.shape[0] != transform.shape[0]:
+            raise ValueError(
+                f"Projection overlap at k={tuple(index)} has shape {matrix.shape}; "
+                f"expected ({transform.shape[0]}, columns)."
+            )
+        return np.asarray(transform.conj().T @ matrix, dtype=np.complex128)
+
     def base_hamiltonian_at(self, index: tuple[int, int, int]) -> np.ndarray:
         if self.base_hamiltonians is not None:
             return np.asarray(self.base_hamiltonians[index], dtype=np.complex128)

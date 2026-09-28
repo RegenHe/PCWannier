@@ -6,6 +6,7 @@ from threading import Lock
 from pcwannier import BlochConvention
 from pcwannier.compute.gradient import Gradient
 from pcwannier.compute.context import CalculationContext
+from pcwannier.compute.band_path import periodically_equivalent_kpoint
 from pcwannier.compute.initializer import StateInitializer
 from pcwannier.compute.matrix import MSet
 from pcwannier.compute.parallel import (
@@ -579,8 +580,12 @@ def test_band_path_does_not_reclose_periodically_equivalent_endpoints():
 
 
 def test_band_path_still_closes_distinct_endpoints():
-    assert not TBAModel._periodically_equivalent(np.array([0.5, 0.5]), np.array([0.0, 0.0]))
-    assert TBAModel._periodically_equivalent(np.array([-0.5, 0.0]), np.array([0.5, 0.0]))
+    assert not periodically_equivalent_kpoint(
+        np.array([0.5, 0.5]), np.array([0.0, 0.0])
+    )
+    assert periodically_equivalent_kpoint(
+        np.array([-0.5, 0.0]), np.array([0.5, 0.0])
+    )
 
 
 def test_m0_orthogonal_transform_uses_conjugate_transpose():
@@ -805,6 +810,25 @@ def test_projection_rank_check_is_shared_by_direct_and_cached_a_paths():
         (0, 0, 0),
     )
     assert np.allclose(frame.conj().T @ frame, np.eye(2))
+
+
+def test_projection_overlap_is_expressed_in_strict_internal_state_basis():
+    state = object.__new__(StateCollection)
+    transforms = np.empty((1, 1, 1), dtype=object)
+    transforms[0, 0, 0] = np.array(
+        [[1.0, 0.25j], [0.0, 0.75]], dtype=np.complex128
+    )
+    state.get_transform = lambda _zero=False: transforms
+    overlap = np.array(
+        [[1.0 + 2.0j, 0.5], [-0.25j, 3.0]], dtype=np.complex128
+    )
+
+    converted = state.overlap_to_internal_basis((0, 0, 0), overlap)
+
+    assert np.allclose(
+        converted,
+        transforms[0, 0, 0].conj().T @ overlap,
+    )
 
 
 def test_frozen_projection_requires_outer_membership_and_complement_rank():

@@ -7,6 +7,8 @@ import pytest
 
 from pcwannier import load_input, run_calculation
 from pcwannier.compute.integration import create_metric_inner_product
+from pcwannier.compute.initializer import StateBases
+from pcwannier.compute.runner import _needs_streaming_projection_seed
 from pcwannier.config import IncarParser, load_config
 from pcwannier.data import PeriodicGrid
 from pcwannier.projections import (
@@ -98,6 +100,20 @@ def test_local_frame_and_fixed_vector_orbitals():
     )
     direction = frame.ez
     assert np.allclose(np.cross(values.real, direction), 0.0, atol=1.0e-14)
+
+
+def test_hydrogenic_1s_radial_uses_the_same_zeta_convention_as_higher_states():
+    radius = np.asarray([0.0, 0.1, 0.4])
+    zeta = 3.5
+
+    values = StateBases.Radial(1, 0)(radius, zeta)
+
+    assert np.allclose(
+        values,
+        2.0 * zeta ** 1.5 * np.exp(-zeta * radius),
+        atol=1.0e-14,
+        rtol=1.0e-14,
+    )
 
 
 def test_real_spherical_harmonic_px_py_convention():
@@ -248,7 +264,14 @@ def test_etbc_config_uses_targets_without_longitudinal_files(tmp_path):
             config.real_lattice_vectors,
             config.maxwell_problem.symmetry_field_kind,
         )
-        directions.append(matrix @ record.frame.ez)
+        direction = matrix @ record.frame.ez
+        directions.append(direction)
+        # A2g@3c is the face-normal axial trial.  The coset representative
+        # must rotate the complete representative function, so the generated
+        # direction follows the zero coordinate of each face center.
+        assert int(np.argmax(np.abs(direction))) == int(
+            np.argmin(np.abs(point.position))
+        )
     assert np.allclose(
         np.sort(np.abs(np.asarray(directions)), axis=0),
         np.sort(np.eye(3), axis=0),
@@ -299,6 +322,58 @@ def test_3d_projection_target_center_is_reduced_modulo_lattice(tmp_path):
         for point in target.orbit.points
     )
     assert target.multiplicity == 4
+
+
+def test_boundary_site_p_tensor_trial_covariance_uses_local_sample_cloud(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(
+        "\n".join(
+            [
+                "lattice_const = 1",
+                "real_lattice_vectors = 0 0.5 0.5, 0.5 0 0.5, 0.5 0.5 0",
+                "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+                "k_points = 0:1:1, 0:1:1, 0:1:1",
+                "composition_of_b = 1 0 0, 0 1 0, 0 0 1, 1 1 1",
+                "dataset_type = mpb",
+                "field_components = full_vector",
+                "primary_field = magnetic",
+                "dataset_file = H.h5",
+                "mesh_file = grid.h5",
+                "E_file = E.h5",
+                "metric_file = false",
+                "band_window = 0:3",
+                "extension = 1,1,1",
+                "wannier_figures = false",
+                "symmetry_file = hall:512",
+                "projections",
+                "4b; [0.5,0.5,0.5]; (z=[0,0,1], x=[1,0,0]); "
+                "{[2,1,-1,10]@[0,0,1],[2,1,0,10]@[0,1,0]}{1,1}; "
+                "{[2,1,0,10]@[1,0,0],[2,1,1,10]@[0,0,1]}{1,1}; "
+                "{[2,1,1,10]@[0,1,0],[2,1,-1,10]@[1,0,0]}{1,1}",
+                "end",
+                "wannier_targets",
+                "center_T1_4b; 4b; T1",
+                "end",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(incar)
+    lattice = np.asarray(config.real_lattice_vectors, dtype=float)
+    grid = PeriodicGrid((10, 10, 10), lattice)
+    state = SimpleNamespace(
+        config=config,
+        mesh=grid,
+        maxwell=config.maxwell_problem,
+    )
+
+    _, diagnostics = vector_trials_module.prepare_vector_trial_targets(
+        state, config.symmetry_context
+    )
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0].closure_residual < 1.0e-10
+    assert diagnostics[0].max_residual < 1.0e-10
 
 
 def test_sg213_vector_trials_obey_full_nonsymmorphic_bloch_covariance(tmp_path):
@@ -647,6 +722,19 @@ def test_synthetic_3d_etbc_completion_runs_full_wannier_pipeline(tmp_path):
     assert result.wanniers[(0, 0, 0)].shape == (np.prod(shape), 3, 3)
     assert np.allclose(result.wannier_norms, 1.0, atol=1.0e-10)
     assert np.allclose(result.hoppings[(0, 0, 0)], 0.0, atol=1.0e-12)
+
+
+def test_cached_v_skips_streaming_vector_projection_seed():
+    state = SimpleNamespace(inner_product=SimpleNamespace(domain_kind="points"))
+    config = SimpleNamespace(
+        projection_target_bindings=(object(),),
+        use_cached_data=[],
+    )
+
+    assert _needs_streaming_projection_seed(config, state, None)
+
+    config.use_cached_data = ["V"]
+    assert not _needs_streaming_projection_seed(config, state, None)
 
 
 def test_orbit_expanded_vector_trials_normalize_all_six_columns(monkeypatch):

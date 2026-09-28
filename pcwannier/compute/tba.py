@@ -13,6 +13,7 @@ from ..data import (
     OutputSpectrumDiagnostics,
 )
 from .context import CalculationContext
+from .band_path import sample_fractional_band_path
 from .kspace import get_kxyz
 from .parallel import parallel_map
 
@@ -424,27 +425,9 @@ class TBAModel:
     def gen_hs_bands(self, hoppings: dict[tuple[int, int, int], np.ndarray]) -> BandResult:
         config = self.config
         kdim = int(config.kdim)
-        high_sym_points = []
-        k_list_parts = [np.array(config.k_path[0]["point"], dtype=float)[:kdim]]
-        total = 0
-        first_point = np.asarray(config.k_path[0]["point"], dtype=float)[:kdim]
-        last_point = np.asarray(config.k_path[-1]["point"], dtype=float)[:kdim]
-        endpoints_equivalent = self._periodically_equivalent(first_point, last_point)
-        for idx, point in enumerate(config.k_path):
-            high_sym_points.append([point["name"], total])
-            if idx == len(config.k_path) - 1 and endpoints_equivalent:
-                break
-            num = int(point["num"])
-            start = np.asarray(point["point"], dtype=float)[:kdim]
-            stop = np.asarray(config.k_path[(idx + 1) % len(config.k_path)]["point"], dtype=float)[:kdim]
-            if num > 0:
-                seg = np.stack([np.linspace(start[axis], stop[axis], num + 1)[1:] for axis in range(kdim)], axis=1)
-                k_list_parts.append(seg)
-            total += num
-        if not endpoints_equivalent:
-            high_sym_points.append([config.k_path[0]["name"], total])
-        k_path = np.vstack(k_list_parts)
-        k_axis = np.arange(0, total + 1)
+        k_path, k_axis, high_sym_points = sample_fractional_band_path(
+            config.k_path, kdim
+        )
 
         h_of_k = self._band_hamiltonian_factory(hoppings)
         hks = h_of_k(self._kfrac_to_kcart(k_path))
@@ -456,11 +439,6 @@ class TBAModel:
             dos_energy, dos_components = self._calculate_dos(h_of_k, kdim)
 
         return BandResult(k_path, k_axis, high_sym_points, energies, dos_energy, dos_components)
-
-    @staticmethod
-    def _periodically_equivalent(first: np.ndarray, last: np.ndarray, atol: float = 1e-10) -> bool:
-        difference = np.asarray(last, dtype=float) - np.asarray(first, dtype=float)
-        return bool(np.allclose(difference, np.rint(difference), rtol=0.0, atol=atol))
 
     def _calculate_dos(self, h_of_k, kdim: int) -> tuple[np.ndarray, np.ndarray]:
         config = self.config

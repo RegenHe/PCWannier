@@ -75,6 +75,18 @@ from .vector_trials import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _needs_streaming_projection_seed(config, state, projection_seed) -> bool:
+    """Return whether this run still needs the expensive vector-trial projection."""
+
+    cached = {str(name).upper() for name in config.use_cached_data}
+    return bool(
+        projection_seed is None
+        and config.projection_target_bindings
+        and getattr(state.inner_product, "domain_kind", None) == "points"
+        and "V" not in cached
+    )
+
+
 def run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
     with ExecutionContext(threads):
         return _run_calculation(bundle, threads=threads, backend=backend)
@@ -434,11 +446,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
                 state, bundle.symmetry, provider=symmetry_provider
             )
         log_symmetry_analysis(symmetry_analysis)
-    if (
-        projection_seed is None
-        and config.projection_target_bindings
-        and getattr(state.inner_product, "domain_kind", None) == "points"
-    ):
+    if _needs_streaming_projection_seed(config, state, projection_seed):
         with timed_step("prepare streaming vector projection", LOGGER):
             trial_source = build_vector_bloch_trial_source(
                 state, context=bundle.symmetry

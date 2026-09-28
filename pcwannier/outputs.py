@@ -805,10 +805,19 @@ def write_wannier_figures(directory: str | Path, result: RunResult) -> None:
                 plt.close(fig)
 
 
-def plot_band(filename: str | Path, band: BandResult, config: IncarConfig) -> None:
+def plot_band(
+    filename: str | Path,
+    band: BandResult,
+    config: IncarConfig | None = None,
+) -> None:
     path = Path(filename)
     _ensure_parent(path)
-    if band.dos_components is None or band.dos_energy is None or config.DOS == 0:
+    if (
+        band.dos_components is None
+        or band.dos_energy is None
+        or config is None
+        or config.DOS == 0
+    ):
         fig, ax = plt.subplots()
         for idx in range(band.energies.shape[1]):
             ax.plot(band.k_axis, np.real(band.energies[:, idx]), color="blue")
@@ -838,16 +847,20 @@ def plot_band(filename: str | Path, band: BandResult, config: IncarConfig) -> No
     plt.close(fig)
 
 
-def _decorate_band_axis(ax, band: BandResult, config: IncarConfig) -> None:
+def _decorate_band_axis(
+    ax,
+    band: BandResult,
+    config: IncarConfig | None,
+) -> None:
     for pos in [p[1] for p in band.high_sym_points]:
         ax.axvline(x=pos, color="black", linestyle="--", linewidth=0.5)
     ax.set_xticks([p[1] for p in band.high_sym_points])
     ax.set_xticklabels([p[0] for p in band.high_sym_points])
     ax.set_xlim(0, band.k_axis[-1])
-    if isinstance(config.band_window, EnergyWindow):
+    if config is not None and isinstance(config.band_window, EnergyWindow):
         ax.axhline(y=config.band_window.emin, color="black", linestyle="--", linewidth=1)
         ax.axhline(y=config.band_window.emax, color="black", linestyle="--", linewidth=1)
-    if isinstance(config.inner_window, EnergyWindow):
+    if config is not None and isinstance(config.inner_window, EnergyWindow):
         ax.axhline(y=config.inner_window.emin, color="red", linestyle="--", linewidth=0.8)
         ax.axhline(y=config.inner_window.emax, color="red", linestyle="--", linewidth=0.8)
     ax.set_title("Band Structure", fontsize=14)

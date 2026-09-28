@@ -202,11 +202,22 @@ def _trial_representation(
     record: ProjectionRecord3D,
     target: WannierTargetRepresentation,
 ) -> tuple[tuple[np.ndarray, ...], TrialCovarianceDiagnostics]:
-    points = np.asarray(state.mesh.vertices, dtype=float)
-    if points.shape[0] > 16384:
-        indices = np.linspace(0, points.shape[0] - 1, 16384, dtype=np.intp)
-        points = points[indices]
+    lattice = (
+        np.asarray(state.config.real_lattice_vectors, dtype=float)
+        * float(state.config.lattice_const)
+    )
+    radius = 0.35 * float(np.min(np.linalg.norm(lattice, axis=1)))
+    axis = np.linspace(-radius, radius, 9, dtype=float)
+    offsets = np.stack(
+        np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1
+    ).reshape(-1, 3)
+    points = _center_cartesian(state.config, record.frac_position)[None, :] + offsets
     identity = target.group.operations[target.group.identity_index]
+    # Site-irrep covariance is a local statement.  Sampling a primitive cell
+    # clips angular orbitals whenever q lies on its boundary and can report a
+    # false closure failure.  A deterministic Cartesian cloud around q tests
+    # the local angular/component action without introducing periodic-image
+    # ties; full Bloch-sum covariance is validated separately.
     basis = np.stack(
         [
             _evaluate_transformed_trial(
@@ -654,7 +665,10 @@ class VectorTrialFrameSource:
                     f"3D projection Bloch sums at k={index} have invalid norms "
                     f"in columns {invalid.tolist()}."
                 )
-            matrices[index] = overlaps[index] / np.sqrt(norms[index])[None, :]
+            normalized_overlap = overlaps[index] / np.sqrt(norms[index])[None, :]
+            matrices[index] = self.state.overlap_to_internal_basis(
+                index, normalized_overlap
+            )
         return ProjectionSeed(matrices, source="streaming vector trial")
 
 

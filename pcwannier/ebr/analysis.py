@@ -287,6 +287,28 @@ class EBRMatrixBuilder:
         self._target_cache[target_key] = target
         return target
 
+    def target_representation(self, ebr: EBRDefinition):
+        """Return the induced target representation for one catalog EBR.
+
+        This is the shared construction used by the integer EBR matrix and by
+        formal tight-binding models.  Keeping it here ensures both consumers
+        use the same Wyckoff validation, site-irrep basis, and Bloch convention.
+        """
+
+        matching = next(
+            (candidate for candidate in self.catalog.ebrs if candidate.name == ebr.name),
+            None,
+        )
+        if matching is None or (
+            matching.wyckoff != ebr.wyckoff
+            or matching.site_irrep != ebr.site_irrep
+            or not np.array_equal(matching.center, ebr.center)
+        ):
+            raise ValueError(
+                f"EBR {ebr.name!r} does not belong to catalog {self.catalog.name!r}."
+            )
+        return self._target(ebr)
+
     def build(self) -> EBRMatrix:
         columns = []
         dimensions = []
@@ -294,7 +316,7 @@ class EBRMatrixBuilder:
             (len(self.row_keys), len(self.catalog.ebrs)), dtype=np.int64
         )
         for column_index, ebr in enumerate(self.catalog.ebrs):
-            target = self._target(ebr)
+            target = self.target_representation(ebr)
             dimensions.append(target.wannier_dimension)
             columns.append(ebr)
             for point, operation_indices, resolved, irreps in self.point_data:

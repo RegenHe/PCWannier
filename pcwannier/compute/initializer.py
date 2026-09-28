@@ -72,7 +72,7 @@ class StateBases:
 
     @staticmethod
     def r10(r, alpha=1.0):
-        return 2 * alpha ** (3 / 2) * np.exp(-alpha * r / 2)
+        return 2 * alpha ** (3 / 2) * np.exp(-alpha * r)
 
     @staticmethod
     def r20(r, alpha=1.0):
@@ -188,6 +188,8 @@ class StateInitializer:
             self.set_window_indices()
         if self._has_cached_v and self.config.inner_window is not False:
             self._validate_cached_frozen_containment()
+        if self._has_cached_a or not self._has_cached_v:
+            self._log_projection_conditioning()
         self._prepared = True
 
     def run_unconstrained_disentanglement(self, err_diff: float, max_iter: int) -> None:
@@ -292,6 +294,7 @@ class StateInitializer:
                 gmat.T,
                 chunk_size=64,
             )
+            amat = self.state.overlap_to_internal_basis(idx, amat)
             if self.config.proj_binarize:
                 amat = self.binarize(amat)
             cmat = self._projection_frame_from_a(amat, idx)
@@ -330,7 +333,7 @@ class StateInitializer:
                         f"3D trial basis at k={idx} has shape {gmat.shape}; expected "
                         f"{(self.state.mesh.vertices.shape[0], band_count, 3)}."
                     )
-                fields = self.state.get_full_bloch_block(*idx)
+                fields = self.state.get_internal_block(*idx, full_bloch=True)
                 amat = self.state.inner_product.overlap(
                     fields,
                     np.swapaxes(gmat, 0, 1),
@@ -544,6 +547,41 @@ class StateInitializer:
         if largest <= 0.0:
             return 0
         return int(np.count_nonzero(values > self.projection_rank_tolerance * largest))
+
+    def _log_projection_conditioning(self) -> None:
+        worst = None
+        for index in self.state.k_indices():
+            matrix = np.asarray(self.matA[index], dtype=np.complex128)
+            if matrix.ndim != 2 or not np.all(np.isfinite(matrix)):
+                continue
+            singular_values = np.linalg.svd(
+                matrix,
+                compute_uv=False,
+            )
+            if singular_values.size == 0:
+                relative_minimum = 0.0
+                minimum = 0.0
+                maximum = 0.0
+            else:
+                maximum = float(singular_values[0])
+                minimum = float(singular_values[-1])
+                relative_minimum = minimum / maximum if maximum > 0.0 else 0.0
+            candidate = (relative_minimum, tuple(index), minimum, maximum)
+            if worst is None or candidate[0] < worst[0]:
+                worst = candidate
+        if worst is None:
+            return
+        relative_minimum, index, minimum, maximum = worst
+        condition = np.inf if minimum <= 0.0 else maximum / minimum
+        LOGGER.info(
+            "Projection conditioning: worst_k=%s sigma_min=%.6g sigma_max=%.6g "
+            "relative_sigma_min=%.6g condition=%.6g",
+            index,
+            minimum,
+            maximum,
+            relative_minimum,
+            condition,
+        )
 
     def _projection_frame_from_a(self, amat: np.ndarray, k_index) -> np.ndarray:
         band_count = int(self.config.band_calc_num)

@@ -2,6 +2,7 @@ import pcwannier
 import pcwannier.compute as compute
 import pcwannier.ebr as ebr
 import pcwannier.etbc as etbc
+import pcwannier.formal_tb as formal_tb
 import pcwannier.sources as sources
 import pcwannier.symmetry as symmetry
 
@@ -39,6 +40,16 @@ def test_ebr_facade_only_exports_high_level_analysis_api():
         "load_ebr_catalog",
         "run_ebr_analysis",
         "write_ebr_outputs",
+    }
+
+
+def test_formal_tb_facade_is_independent_from_ebr_analysis():
+    assert set(formal_tb.__all__) == {
+        "FormalTBFitResult",
+        "FormalTightBindingModel",
+        "build_formal_tight_binding",
+        "build_formal_tight_binding_from_ebr",
+        "fit_formal_tight_binding",
     }
 
 

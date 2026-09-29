@@ -277,6 +277,11 @@ def _apply_run_options(config, options: RunOptions):
     resolved = copy(config)
     if options.backend is not None:
         resolved.compute_backend = options.backend
+    if not options.analysis_only and getattr(config, "wannier_subspace", None) == "T+L" and getattr(config, "longitudinal_source", None) == "nlc":
+        if options.use_cache:
+            LOGGER.warning("--cache is disabled for NLC because the completed subspace is regenerated.")
+        resolved.use_cached_data = []
+        return resolved
     if not options.use_cache:
         resolved.use_cached_data = list(getattr(config, "use_cached_data", ()))
         return resolved

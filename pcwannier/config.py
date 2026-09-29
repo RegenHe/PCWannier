@@ -47,6 +47,16 @@ class IncarConfig:
     invert_longitudinal_energies: bool = False
     etbc_auxiliary_eigenvalue: float = 0.0
     etbc_rank_tolerance: float = 1.0e-10
+    nlc_cutoff: float = 4.0
+    nlc_eta: float = 10.0
+    nlc_max_iter: int = 800
+    nlc_projector_tolerance: float = 1.0e-4
+    nlc_err_diff: float = 1.0e-7
+    nlc_mixing: float = 0.5
+    nlc_rank_tolerance: float = 1.0e-6
+    nlc_filter_candidates: bool = True
+    nlc_pin_gamma: bool = True
+    nlc_report_file: str | bool = "./nlc.json"
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None
     longitudinal_inner_window: np.ndarray | EnergyWindow | bool = False
     longitudinal_S_file: str = "./S_L.txt"
@@ -652,10 +662,10 @@ class IncarParser:
                 )
             if not cfg.symmetry_context.model.targets:
                 raise ValueError("symmetry_constrained=true requires at least one Wannier target.")
-        if cfg.wannier_subspace == "T+L" and cfg.longitudinal_source == "etbc":
+        if cfg.wannier_subspace == "T+L" and cfg.longitudinal_source in {"etbc", "nlc"}:
             if cfg.symmetry_context is None or not cfg.projection_target_bindings:
                 raise ValueError(
-                    "longitudinal_source=etbc requires symmetry_file plus matching 3D "
+                    f"longitudinal_source={cfg.longitudinal_source} requires symmetry_file plus matching 3D "
                     "projections and wannier_targets."
                 )
         return cfg
@@ -680,6 +690,7 @@ class IncarParser:
             "longitudinal_energy_file",
             "longitudinal_S_file",
             "longitudinal_D_file",
+            "nlc_report_file",
             "S_file",
             "P_file",
             "D_file",
@@ -732,9 +743,20 @@ class IncarParser:
             "gamma_zero_mode_tolerance",
             "etbc_auxiliary_eigenvalue",
             "etbc_rank_tolerance",
+            "nlc_cutoff",
+            "nlc_eta",
+            "nlc_projector_tolerance",
+            "nlc_err_diff",
+            "nlc_mixing",
+            "nlc_rank_tolerance",
             "mv_diagonal_floor",
         }:
             return float(evaluate_math_expression(value))
+        if key == "nlc_max_iter":
+            number = float(evaluate_math_expression(value))
+            if not np.isfinite(number) or number < 0 or not number.is_integer():
+                raise ValueError("nlc_max_iter must be a non-negative integer.")
+            return int(number)
         if key in {
             "max_iter",
             "disentangle_max_iter",
@@ -837,6 +859,8 @@ class IncarParser:
             "symmetry_validate_wannier",
             "gamma_zero_regularization",
             "invert_longitudinal_energies",
+            "nlc_filter_candidates",
+            "nlc_pin_gamma",
             "k_path_closed",
             "k_path_closed",
         }:
@@ -1218,8 +1242,8 @@ def _configure_wannier_subspace(cfg: IncarConfig) -> bool:
     if cfg.wannier_subspace not in {"T", "T+L"}:
         raise ValueError("wannier_subspace must be 'T' or 'T + L'.")
     cfg.longitudinal_source = str(cfg.longitudinal_source).strip().lower()
-    if cfg.longitudinal_source not in {"file", "etbc"}:
-        raise ValueError("longitudinal_source must be 'file' or 'etbc'.")
+    if cfg.longitudinal_source not in {"file", "etbc", "nlc"}:
+        raise ValueError("longitudinal_source must be 'file', 'etbc', or 'nlc'.")
     if cfg.wannier_subspace == "T+L":
         return True
 
@@ -1423,9 +1447,31 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
                 )
         else:
             if dimension != 3:
-                raise ValueError("longitudinal_source=etbc requires a three-dimensional lattice.")
-            if cfg.inner_window is not False:
+                raise ValueError(f"longitudinal_source={cfg.longitudinal_source} requires a three-dimensional lattice.")
+            if cfg.longitudinal_source == "etbc" and cfg.inner_window is not False:
                 raise ValueError("longitudinal_source=etbc currently requires inner_window=false.")
+            if cfg.longitudinal_source == "nlc":
+                from .nlc.models import NLCSettings
+
+                NLCSettings.from_config(cfg)
+                if str(cfg.primary_field).lower() != "magnetic":
+                    raise ValueError("longitudinal_source=nlc requires a magnetic primary field (mu=1).")
+                if not isinstance(cfg.band_window, np.ndarray):
+                    raise ValueError("longitudinal_source=nlc requires a fixed index band_window.")
+                if cfg.inner_window is not False and (
+                    not isinstance(cfg.inner_window, np.ndarray)
+                    or not np.array_equal(cfg.inner_window, cfg.band_window)
+                ):
+                    raise ValueError("NLC freezes all selected T bands; inner_window must be false or equal band_window.")
+                if cfg.gamma_zero_regularization:
+                    raise ValueError("gamma_zero_regularization must be false for NLC; NLC constructs the joint Gamma constant space.")
+                if not cfg.symmetry_constrained:
+                    raise ValueError("longitudinal_source=nlc requires symmetry_constrained=true for the full target sewing constraints.")
+                if cfg.M_in:
+                    raise ValueError("NLC constructs a new subspace and requires M_in=false.")
+                if any(str(item).upper() != "FALSE" for item in cfg.use_cached_data):
+                    LOGGER.warning("NLC regenerates the subspace; cached matrices are disabled for this run.")
+                cfg.use_cached_data = []
             ignored = []
             for name, inactive in (
                 ("longitudinal_field_file", False),
@@ -1443,7 +1489,8 @@ def _validate_config_inputs(cfg: IncarConfig) -> None:
                 setattr(cfg, name, inactive)
             if ignored:
                 LOGGER.warning(
-                    "longitudinal_source=etbc ignores file-based longitudinal settings: %s",
+                    "longitudinal_source=%s ignores file-based longitudinal settings: %s",
+                    cfg.longitudinal_source,
                     ", ".join(ignored),
                 )
     if not np.isfinite(cfg.etbc_auxiliary_eigenvalue):

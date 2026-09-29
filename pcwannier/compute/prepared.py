@@ -8,6 +8,7 @@ import numpy as np
 if TYPE_CHECKING:
     from ..data import InputBundle
     from ..etbc.models import ETBCCompletionResult
+    from ..nlc.models import NLCCompletionResult
     from .state import StateCollection
 
 
@@ -43,4 +44,5 @@ class PreparedRun:
     orthogonality_report: np.ndarray = field(repr=False)
     projection_seed: ProjectionSeed | None = field(default=None, repr=False)
     etbc: ETBCCompletionResult | None = None
+    nlc: NLCCompletionResult | None = None
     trial_covariance_diagnostics: tuple = ()

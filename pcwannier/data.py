@@ -18,6 +18,7 @@ from .maxwell import FieldKind, MaxwellProblem
 
 if TYPE_CHECKING:
     from .etbc import ETBCCompletionResult
+    from .nlc.models import NLCCompletionResult
     from .symmetry.analysis import (
         BlochSymmetryAnalysisResult,
         GammaZeroRegularizationAnalysis,
@@ -535,6 +536,7 @@ class RunResult:
     sewing_matrices: tuple[SewingMatrixCacheEntry, ...] | None = None
     trial_covariance_diagnostics: tuple[Any, ...] = ()
     etbc: ETBCCompletionResult | None = None
+    nlc: NLCCompletionResult | None = None
     transverse_projectors: np.ndarray | None = None
 
 

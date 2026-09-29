@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 import math
+import json
 
 import numpy as np
 
@@ -681,6 +682,11 @@ def write_bloch_symmetry_outputs(
 
 def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir: str | Path | None = None) -> None:
     config = config or result.config
+    nlc_result = getattr(result, "nlc", None)
+    nlc_path = _resolve_output(getattr(config, "nlc_report_file", "./nlc.json"), config, out_dir)
+    if nlc_result is not None and nlc_path is not None:
+        with timed_step("write NLC completion report", LOGGER, file=nlc_path):
+            _save_text(nlc_path, json.dumps(nlc_result.as_dict(), ensure_ascii=False, indent=2, allow_nan=False) + "\n")
     s_path = _resolve_output(config.S_file, config, out_dir)
     if s_path is not None and result.S is not None:
         with timed_step("write raw S matrix", LOGGER, file=s_path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import numpy as np
 from dataclasses import replace
+from copy import copy
 
 from ..conventions import SpatialDiscretization
 from ..data import (
@@ -12,6 +13,7 @@ from ..data import (
     RunResult,
 )
 from ..etbc.completion import prepare_transverse_bundle
+from ..nlc.completion import prepare_longitudinal_bundle
 from ..symmetry.analysis import (
     regularize_gamma_zero_modes,
     run_bloch_symmetry_analysis,
@@ -243,6 +245,7 @@ def _prepare_state(
     threads: int,
     resolved_backend: str,
     use_overlap_cache: bool = True,
+    strict_orthogonality_tolerance: float | None = None,
 ) -> tuple[StateCollection, np.ndarray]:
     config = bundle.config
     state = StateCollection(
@@ -253,6 +256,8 @@ def _prepare_state(
     )
     with timed_step("check orthogonality", LOGGER):
         report, need_orth = state.check_orthogonality()
+    if strict_orthogonality_tolerance is not None:
+        need_orth = need_orth or float(np.max(report[..., 3])) > strict_orthogonality_tolerance
     LOGGER.info(
         "Orthogonality report: need_orth=%s max_diag_err=%.6g max_offdiag=%.6g min_lambda=%.6g",
         need_orth,
@@ -309,11 +314,16 @@ def _prepare_wannier_run(
         config.wannier_subspace == "T+L"
         and config.longitudinal_source == "etbc"
     )
+    nlc_enabled = (
+        config.wannier_subspace == "T+L"
+        and config.longitudinal_source == "nlc"
+    )
     state, report = _prepare_state(
         bundle,
         threads=threads,
         resolved_backend=resolved_backend,
-        use_overlap_cache=not etbc_enabled,
+        use_overlap_cache=not (etbc_enabled or nlc_enabled),
+        strict_orthogonality_tolerance=1.0e-10 if nlc_enabled else None,
     )
     trial_covariance_diagnostics = ()
     if config.projection_target_bindings:
@@ -326,6 +336,7 @@ def _prepare_wannier_run(
         state.symmetry = prepared_symmetry
 
     etbc_result = None
+    nlc_result = None
     projection_seed = None
     if etbc_enabled:
         with timed_step(
@@ -364,18 +375,42 @@ def _prepare_wannier_run(
             etbc_result.maximum_augmented_orthonormality_error,
             etbc_result.gamma_regularized_indices,
         )
+    elif nlc_enabled:
+        with timed_step("construct Neighbor-based Longitudinal Completion (NLC)", LOGGER):
+            artifacts = prepare_longitudinal_bundle(state)
+        nlc_result = artifacts.result
+        bundle = artifacts.augmented_bundle
+        state, report = _prepare_state(
+            bundle, threads=threads, resolved_backend=resolved_backend,
+            use_overlap_cache=False,
+        )
+        del artifacts
+        LOGGER.info(
+            "NLC completion: N_T=%s N_L=%s N_W=%s cost=%.9g -> %.9g "
+            "Omega_I=%.9g iterations=%s converged=%s",
+            nlc_result.transverse_dimension, nlc_result.auxiliary_dimension,
+            nlc_result.wannier_dimension, nlc_result.initial_cost,
+            nlc_result.final_cost, nlc_result.omega_i,
+            nlc_result.iterations, nlc_result.converged,
+        )
     return PreparedRun(
         bundle=bundle,
         state=state,
         orthogonality_report=report,
         projection_seed=projection_seed,
         etbc=etbc_result,
+        nlc=nlc_result,
         trial_covariance_diagnostics=tuple(trial_covariance_diagnostics),
     )
 
 
 def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | None = None) -> RunResult:
     config = bundle.config
+    if config.wannier_subspace == "T+L" and config.longitudinal_source == "nlc" and config.use_cached_data:
+        LOGGER.warning("NLC regenerates the subspace; ignoring cached matrix overrides.")
+        config = copy(config)
+        config.use_cached_data = []
+        bundle = replace(bundle, config=config)
     if int(config.kdim) == 3:
         if config.DOS:
             raise NotImplementedError("Three-dimensional DOS output is not implemented.")
@@ -418,6 +453,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
     report = prepared.orthogonality_report
     projection_seed = prepared.projection_seed
     etbc_result = prepared.etbc
+    nlc_result = prepared.nlc
     trial_covariance_diagnostics = prepared.trial_covariance_diagnostics
     symmetry_analysis = None
     symmetry_provider = None
@@ -808,6 +844,7 @@ def _run_calculation(bundle: InputBundle, *, threads: int = 1, backend: str | No
         ),
         trial_covariance_diagnostics=trial_covariance_diagnostics,
         etbc=etbc_result,
+        nlc=nlc_result,
         transverse_projectors=transverse_projectors,
     )
 

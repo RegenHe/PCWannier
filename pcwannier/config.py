@@ -133,6 +133,8 @@ class IncarConfig:
     band_calc_num: int | None = None
     neighbor: list[list[int]] = field(default_factory=list)
     k_path: list[dict[str, Any]] | None = None
+    k_path_closed: bool = True
+    k_path_closed: bool = True
 
     DOS: int = 0
     DOS_eps: float = 0.01
@@ -463,7 +465,9 @@ class IncarParser:
             if requested_symmetry_path is None:
                 raise ValueError("symmetry_file is enabled but no path was supplied.")
             try:
-                symmetry_path = resolve_symmetry_file(str(cfg.symmetry_file), cfg.base_dir)
+                symmetry_path = resolve_symmetry_file(
+                    str(cfg.symmetry_file), cfg.base_dir, dimension=cfg.kdim
+                )
             except FileNotFoundError:
                 model = load_symmetry_from_spglib(
                     str(cfg.symmetry_file),
@@ -833,6 +837,8 @@ class IncarParser:
             "symmetry_validate_wannier",
             "gamma_zero_regularization",
             "invert_longitudinal_energies",
+            "k_path_closed",
+            "k_path_closed",
         }:
             normalized = value.strip().lower()
             if normalized not in {"true", "false"}:

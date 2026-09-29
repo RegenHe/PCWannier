@@ -57,7 +57,9 @@ _SPACE_GROUP_ALIASES = {
 }
 
 
-def resolve_symmetry_file(path: str | Path, base_dir: str | Path) -> Path:
+def resolve_symmetry_file(
+    path: str | Path, base_dir: str | Path, *, dimension: int | None = None
+) -> Path:
     requested = Path(path)
     requested_candidates = [requested]
     if requested.suffix == "":
@@ -69,7 +71,10 @@ def resolve_symmetry_file(path: str | Path, base_dir: str | Path) -> Path:
     resource_name = requested_candidates[-1].name.lower()
     resource_name = _SPACE_GROUP_ALIASES.get(resource_name, resource_name)
     library = resources.files("pcwannier.symmetry").joinpath("space_groups", resource_name)
-    if library.is_file():
+    # The bundled library contains 2D plane groups. Names such as P6mm also
+    # denote 3D space groups, which must be resolved through spglib instead.
+    # Explicit user files above retain precedence in either dimension.
+    if dimension != 3 and library.is_file():
         return Path(str(library))
     explicit = requested if requested.is_absolute() else Path(base_dir) / requested
     raise FileNotFoundError(

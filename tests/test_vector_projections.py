@@ -1,11 +1,12 @@
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 
 import h5py
 import numpy as np
 import pytest
 
-from pcwannier import load_input, run_calculation
+from pcwannier import BlochConvention, load_input, run_calculation
 from pcwannier.compute.integration import create_metric_inner_product
 from pcwannier.compute.initializer import StateBases
 from pcwannier.compute.runner import _needs_streaming_projection_seed
@@ -20,6 +21,7 @@ from pcwannier.projections import (
 )
 from pcwannier.symmetry import cartesian_field_matrix
 from pcwannier.symmetry.bloch import build_bloch_symmetry_action
+from pcwannier.symmetry.representation import build_symmetry_context
 import pcwannier.compute.vector_trials as vector_trials_module
 from pcwannier.compute.wannier import _uniform_grid_wannier_sum, generate_wannier
 
@@ -495,6 +497,106 @@ def test_sg213_vector_trials_obey_full_nonsymmorphic_bloch_covariance(tmp_path):
         assert np.allclose(extended_output_trial, source, atol=1.0e-14, rtol=1.0e-14)
 
 
+@pytest.mark.parametrize("bloch_sign", [-1, 1])
+@pytest.mark.parametrize("case", ["fcc_p", "hex_d", "shifted_s"])
+def test_angular_vector_bloch_trials_preserve_space_group_covariance(
+    tmp_path, case, bloch_sign
+):
+    k_mesh = "-0.5:0.25:0.5"
+    if case == "fcc_p":
+        lattice = "0 0.5 0.5, 0.5 0 0.5, 0.5 0.5 0"
+        group, wyckoff, position, irrep = "hall:512", "4b", "[0.5,0.5,0.5]", "T1"
+        states = (
+            "{[2,1,-1,5]@[0,0,1],[2,1,0,5]@[0,1,0]}{1,1}; "
+            "{[2,1,0,5]@[1,0,0],[2,1,1,5]@[0,0,1]}{1,1}; "
+            "{[2,1,1,5]@[0,1,0],[2,1,-1,5]@[1,0,0]}{1,1}"
+        )
+    elif case == "hex_d":
+        lattice = "1 0 0, -0.5 sqrt(3)/2 0, 0 0 1"
+        # This symbol also names a bundled 2D plane group. The 3D parser must
+        # select space group 183 (Hall 477) rather than that plane-group YAML.
+        group, wyckoff, position, irrep = "P6mm", "1a", "[0,0,0]", "E2"
+        # Unequal input amplitudes must be normalized locally, before applying
+        # the common Bloch normalization of this two-dimensional irrep.
+        states = "{[3,2,2,8]@[0,0,1]}{2}; [3,2,-2,8]@[0,0,1]"
+    else:
+        lattice = "1 0 0, 0 1 0, 0 0 1"
+        group, wyckoff, position, irrep = "Pm-3m", "1a", "[0,0,0]", "T1g"
+        states = "[1,0,0,5]@[1,0,0]; [1,0,0,5]@[0,1,0]; [1,0,0,5]@[0,0,1]"
+        k_mesh = "-0.375:0.25:0.625"
+    incar = tmp_path / "incar"
+    incar.write_text("\n".join([
+        "lattice_const = 1", "real_lattice_vectors = " + lattice,
+        "reciprocal_lattice_vectors = 0 0 0, 0 0 0, 0 0 0",
+        f"k_points = {k_mesh}, {k_mesh}, {k_mesh}",
+        "composition_of_b = 1 0 0, 0 1 0, 0 0 1, 1 1 0, 1 1 1",
+        "dataset_type = mpb", "field_components = full_vector", "primary_field = magnetic",
+        "dataset_file = H.h5", "mesh_file = grid.h5", "E_file = E.h5", "metric_file = false",
+        "band_window = 0:8", "extension = 1,1,1", "wannier_figures = false",
+        "symmetry_file = " + group, "symmetry_constrained = true",
+        "projections", f"{wyckoff}; {position}; (z=[0,0,1], x=[1,0,0]); {states}",
+        "end", "wannier_targets", f"trial; {wyckoff}; {irrep}", "end",
+    ]), encoding="utf-8")
+    config = load_config(incar)
+    convention = BlochConvention(bloch_sign)
+    model = replace(config.symmetry_context.model, bloch_convention=convention,
+        targets=tuple(replace(target, bloch_convention=convention)
+                      for target in config.symmetry_context.model.targets))
+    context = build_symmetry_context(model, config.k_points)
+    grid = PeriodicGrid((8, 8, 8), np.asarray(config.real_lattice_vectors))
+    inner = create_metric_inner_product(
+        grid, np.ones(grid.point_count), mode="nodal", backend="python"
+    )
+    state = SimpleNamespace(config=config, mesh=grid, maxwell=config.maxwell_problem,
+        bloch_sign=bloch_sign, inner_product=inner, configured_threads=1)
+    context, reports = vector_trials_module.prepare_vector_trial_targets(state, context)
+    state.symmetry = context
+    assert max(report.max_residual for report in reports) < 1.0e-12
+    trials = vector_trials_module.build_vector_bloch_trial_grid(state, workspace_bytes=8 << 20)
+    action = build_bloch_symmetry_action(grid, grid.fractional_vertices,
+        config.real_lattice_vectors, bloch_sign=bloch_sign, tolerance=config.symmetry_tolerance)
+    for index in ((0, 0, 0), (2, 2, 2), (1, 2, 3)):
+        direct = vector_trials_module.build_vector_bloch_trials(state, index)
+        assert np.allclose(direct, trials[index], atol=2.0e-13)
+        k = np.array([config.k_points[a][index[a]] for a in range(3)])
+        translated_state = SimpleNamespace(**vars(state))
+        translated_state.mesh = SimpleNamespace(
+            vertices=grid.vertices + np.asarray(config.real_lattice_vectors[0])
+        )
+        translated = vector_trials_module.build_vector_bloch_trials(translated_state, index)
+        assert np.allclose(translated, np.exp(bloch_sign * 2j * np.pi * k[0]) * direct,
+            atol=2.0e-13)
+        flat = np.ravel_multi_index(index, trials.shape)
+        for gi, operation in enumerate(context.model.group.operations):
+            mapping = context.k_mappings[gi][flat]
+            expected = np.einsum("pjc,ji->pic", trials[mapping.target_k_index],
+                context.target_matrix(gi, k))
+            transformed = action.apply_full_bloch(direct.swapaxes(0, 1), operation, k,
+                state.maxwell.symmetry_field_kind,
+                time_reversal=state.maxwell.apply_time_reversal).swapaxes(0, 1)
+            assert np.linalg.norm(transformed - expected) / np.linalg.norm(expected) < 1.0e-12
+
+    # Streaming A must use precisely the same block normalization as direct
+    # and FFT-materialized trials, including at generic k where norms differ.
+    state.k_shape = trials.shape
+    state.E_idx = np.empty(trials.shape, dtype=object)
+    for index in np.ndindex(trials.shape):
+        state.E_idx[index] = [0, 1]
+    state.k_indices = lambda: np.ndindex(trials.shape)
+    rows = np.zeros((2, grid.point_count, 3), dtype=np.complex128)
+    rows[0, :, 0] = 1.0
+    rows[1, :, 1] = 1.0
+    state.get_block = lambda *_: rows
+    state.get_phase = lambda *index: np.exp(bloch_sign * 2j * np.pi * (
+        grid.fractional_vertices @ np.array([config.k_points[a][index[a]] for a in range(3)])))
+    state.overlap_to_internal_basis = lambda _index, values: values
+    seed = vector_trials_module.build_vector_bloch_trial_source(state).projection_seed()
+    index = (1, 2, 3)
+    expected = inner.overlap(rows * state.get_phase(*index)[None, :, None],
+        trials[index].swapaxes(0, 1))
+    assert np.allclose(seed.matrices[index], expected, atol=2.0e-13)
+
+
 def _write_pm3m_vector_binding_incar(
     path: Path,
     projection_lines: list[str],
@@ -737,7 +839,7 @@ def test_cached_v_skips_streaming_vector_projection_seed():
     assert not _needs_streaming_projection_seed(config, state, None)
 
 
-def test_orbit_expanded_vector_trials_normalize_all_six_columns(monkeypatch):
+def test_orbit_expanded_vector_trials_normalize_both_irrep_blocks(monkeypatch):
     point_count = 5
     operation = SimpleNamespace(antiunitary=False)
     orbit = SimpleNamespace(
@@ -746,8 +848,8 @@ def test_orbit_expanded_vector_trials_normalize_all_six_columns(monkeypatch):
             SimpleNamespace(position=np.full(3, 0.5), representative_operation=operation),
         )
     )
-    target = SimpleNamespace(orbit=orbit)
-    context = SimpleNamespace(model=SimpleNamespace(target=lambda _name: target))
+    target = SimpleNamespace(orbit=orbit, site_irrep=SimpleNamespace(dimension=3))
+    context = SimpleNamespace(model=SimpleNamespace(target=lambda _name: target, targets=(target,)))
     record = SimpleNamespace(states=(1.0, 2.0, 3.0))
     binding = SimpleNamespace(target_name="T1_2a", projection=record)
 
@@ -784,7 +886,7 @@ def test_orbit_expanded_vector_trials_normalize_all_six_columns(monkeypatch):
     assert values.shape == (point_count, 6, 3)
     assert np.allclose(
         np.sum(np.abs(values) ** 2, axis=(0, 2), dtype=np.float64),
-        np.ones(6),
+        np.tile(np.array([1.0, 4.0, 9.0]) / (14.0 / 3.0), 2),
     )
 
 

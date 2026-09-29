@@ -174,6 +174,16 @@ def test_extensionless_space_group_names_resolve_builtin_and_custom_files(tmp_pa
     assert resolve_symmetry_file("custom_square", tmp_path) == custom.resolve()
 
 
+def test_3d_space_group_names_do_not_resolve_to_builtin_plane_groups(tmp_path):
+    assert resolve_symmetry_file("P6mm", tmp_path, dimension=2).name == "p6mm.yaml"
+    with pytest.raises(FileNotFoundError):
+        resolve_symmetry_file("P6mm", tmp_path, dimension=3)
+
+    custom = tmp_path / "P6mm.yaml"
+    custom.write_text("# explicit user symmetry file", encoding="utf-8")
+    assert resolve_symmetry_file("P6mm", tmp_path, dimension=3) == custom.resolve()
+
+
 @pytest.mark.parametrize(
     "forbidden",
     ("irreps", "subgroups", "wannier_targets", "representation_analysis"),

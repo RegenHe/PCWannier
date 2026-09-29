@@ -175,18 +175,18 @@ class StateInitializer:
                 self.matC[i, j, k] = self._projection_frame_from_a(
                     self.matA[i, j, k], (i, j, k)
                 )
-            if self.config.inner_window is False:
+            if not self.has_frozen_window:
                 self.matV = self.matC.copy()
             else:
                 self.inner_projection()
         elif not self._has_cached_v:
             self.projection()
-            if self.config.inner_window is False:
+            if not self.has_frozen_window:
                 self.matV = self.matC.copy()
 
         if self._has_cached_a or self._has_cached_v:
             self.set_window_indices()
-        if self._has_cached_v and self.config.inner_window is not False:
+        if self._has_cached_v and self.has_frozen_window:
             self._validate_cached_frozen_containment()
         if self._has_cached_a or not self._has_cached_v:
             self._log_projection_conditioning()
@@ -304,7 +304,7 @@ class StateInitializer:
             self.matA[idx] = amat
             self.matC[idx] = cmat
 
-        if self.config.inner_window is not False:
+        if self.has_frozen_window:
             self.inner_projection()
         else:
             self.set_window_indices()
@@ -351,11 +351,7 @@ class StateInitializer:
         ):
             self.matA[idx] = amat
             self.matC[idx] = cmat
-        has_longitudinal_inner = (
-            self.config.wannier_subspace == "T+L"
-            and self.config.longitudinal_inner_window is not False
-        )
-        if self.config.inner_window is not False or has_longitudinal_inner:
+        if self.has_frozen_window:
             self.inner_projection()
         else:
             self.set_window_indices()
@@ -583,11 +579,19 @@ class StateInitializer:
             condition,
         )
 
+    @property
+    def has_frozen_window(self) -> bool:
+        """Both physical and auxiliary frozen bands constrain the subspace."""
+        return self.config.inner_window is not False or (
+            getattr(self.config, "wannier_subspace", "T") == "T+L"
+            and getattr(self.config, "longitudinal_inner_window", False) is not False
+        )
+
     def _projection_frame_from_a(self, amat: np.ndarray, k_index) -> np.ndarray:
         band_count = int(self.config.band_calc_num)
         u, singular_values, vh = np.linalg.svd(np.asarray(amat, dtype=np.complex128))
         rank = self._numerical_rank(singular_values)
-        if self.config.inner_window is False and rank < band_count:
+        if not self.has_frozen_window and rank < band_count:
             largest = float(singular_values[0]) if singular_values.size else 0.0
             threshold = self.projection_rank_tolerance * largest
             raise ValueError(

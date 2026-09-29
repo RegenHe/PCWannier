@@ -244,7 +244,8 @@ def test_streaming_etbc_matches_materialized_gamma_completion():
     )
 
 
-def test_streaming_etbc_matches_materialized_regular_k_completion():
+@pytest.mark.parametrize("block_normalization", [False, True])
+def test_streaming_etbc_matches_materialized_regular_k_completion(block_normalization):
     state = _physical_state_for_gamma()
     state.config.k_points = [
         np.asarray([0.25]),
@@ -271,8 +272,17 @@ def test_streaming_etbc_matches_materialized_regular_k_completion():
         def iter_raw_chunks():
             yield 0, points, trials.reshape((1, 1, 1) + trials.shape)
 
+    if block_normalization:
+        trials *= np.array([2.0, 3.0, 5.0])[None, :, None]
+        Source.normalization_factors = staticmethod(
+            lambda norms: np.full(3, 1.0 / np.sqrt(np.mean(norms)))
+        )
+        norms = state.inner_product.norms(trials.swapaxes(1, 2))
+        direct_trials = trials * Source.normalization_factors(norms)[None, :, None]
+    else:
+        direct_trials = trials
     materialized = prepare_transverse_bundle(
-        state, lambda _: trials, rank_tolerance=1.0e-10
+        state, lambda _: direct_trials, rank_tolerance=1.0e-10
     )
     streaming = prepare_transverse_bundle(
         state, Source(), rank_tolerance=1.0e-10

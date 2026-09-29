@@ -352,6 +352,9 @@ class TBAModel:
         return 0.5 * (array + np.conjugate(np.swapaxes(array, -2, -1)))
 
     def collect_hoppings(self) -> dict[tuple[int, int, int], np.ndarray]:
+        centers = self._hopping_centers()
+        if not np.allclose(centers, centers[0], rtol=0.0, atol=1.0e-10):
+            return self._collect_centered_hoppings(centers)
         complete_neighbors = self.R_half_rect(self.state.k_shape)
         self._projected_k_hamiltonians()
 
@@ -367,8 +370,10 @@ class TBAModel:
                 raise RuntimeError(
                     f"No independent Wigner-Seitz representative found for {row}."
                 )
-            coefficient = self.gen_hopping(row) / float(len(representatives))
-            return tuple((representative, coefficient) for representative in representatives)
+            return tuple(
+                (representative, self.gen_hopping(representative) / len(representatives))
+                for representative in representatives
+            )
 
         out = {(0, 0, 0): self.gen_hopping((0, 0, 0))}
         rows = [tuple(int(value) for value in row) for row in complete_neighbors]
@@ -381,14 +386,88 @@ class TBAModel:
                 out[key] = hopping
         return out
 
+    def _hopping_centers(self) -> np.ndarray:
+        """Centers in orbital order and primitive fractional coordinates."""
+        count = int(self.config.band_calc_num)
+        dimension = int(self.config.kdim)
+        context = getattr(self.state, "symmetry", None)
+        if context is not None and getattr(self.config, "symmetry_constrained", False):
+            centers = np.asarray([
+                point.position
+                for target in context.model.targets
+                for point in target.orbit.points
+                for _ in range(target.site_irrep.dimension)
+            ], dtype=float)
+            if centers.shape != (count, dimension):
+                raise ValueError("Target centers do not match the hopping orbital dimension.")
+            return centers
+        gradient = getattr(getattr(self, "ctx", None), "gradient", None)
+        first_moments = getattr(gradient, "rn", None)
+        if first_moments is None:
+            return np.zeros((count, dimension), dtype=float)
+        cartesian = np.asarray(first_moments, dtype=np.complex128).T
+        if cartesian.shape != (count, dimension) or not np.all(np.isfinite(cartesian)):
+            raise ValueError("Wannier centers must be finite and match the hopping dimension.")
+        if np.max(np.abs(cartesian.imag), initial=0.0) > 1.0e-8:
+            raise ValueError("Wannier centers must be real for Wigner-Seitz interpolation.")
+        lattice = np.asarray(self.config.real_lattice_vectors, dtype=float) * float(self.config.lattice_const)
+        return cartesian.real @ np.linalg.inv(lattice)
+
+    def _collect_centered_hoppings(
+        self, centers: np.ndarray,
+    ) -> dict[tuple[int, int, int], np.ndarray]:
+        # The shortest bond is R + tau_n - tau_m. Choosing a single image for
+        # a whole matrix can violate nonsymmorphic covariance between k points.
+        count = int(self.config.band_calc_num)
+        shape = tuple(int(value) for value in self.state.k_shape)
+        kdim = int(self.config.kdim)
+        full: dict[tuple[int, int, int], np.ndarray] = {}
+        coefficients: dict[tuple[int, int, int], np.ndarray] = {}
+        self._projected_k_hamiltonians()
+        for residue in product(*(range(value) for value in shape[:kdim])):
+            image_cache = {}
+            for row in range(count):
+                for column in range(count):
+                    offset = tuple(centers[column] - centers[row])
+                    if offset not in image_cache:
+                        image_cache[offset] = self._wigner_seitz_representatives(residue, offset=offset)
+                    representatives = image_cache[offset]
+                    for representative in representatives:
+                        if representative not in coefficients:
+                            # Evaluate the actual image, including the boundary
+                            # character of a shifted uniform k mesh.
+                            coefficients[representative] = self.gen_hopping(representative)
+                        if representative not in full:
+                            full[representative] = np.zeros((count, count), dtype=np.complex128)
+                        full[representative][row, column] += (
+                            coefficients[representative][row, column] / len(representatives)
+                        )
+        zero = (0, 0, 0)
+        h0 = full.get(zero, np.zeros((count, count), dtype=np.complex128))
+        out = {zero: self._hermitian_batch(h0)}
+        for representative in sorted(full):
+            negative = tuple(-value for value in representative)
+            if representative >= negative:
+                continue
+            coefficient = 0.5 * (full[representative] + full[negative].conj().T)
+            # _h_of_k_factory counts a self-inverse residue with a half factor.
+            # Here both images were already weighted, so undo that factor.
+            if self.is_nyquist(representative, shape):
+                coefficient *= 2.0
+            out[representative] = coefficient
+        return out
+
     def _wigner_seitz_representatives(
-        self, residue: tuple[int, ...]
+        self, residue: tuple[int, ...], *, offset=None,
     ) -> tuple[tuple[int, int, int], ...]:
-        """Return every shortest real-space representative of a mesh residue."""
+        """Return shortest images, measured between the two orbital centers."""
 
         shape = np.asarray(self.state.k_shape, dtype=int)
         kdim = int(self.config.kdim)
         base = np.asarray(residue, dtype=int)[:kdim] % shape[:kdim]
+        displacement = np.zeros(kdim) if offset is None else np.asarray(offset, dtype=float)
+        if displacement.shape != (kdim,) or not np.all(np.isfinite(displacement)):
+            raise ValueError("Wigner-Seitz center offset must be finite and match kdim.")
         lattice = (
             np.asarray(self.config.real_lattice_vectors, dtype=float)[:kdim]
             * float(self.config.lattice_const)
@@ -400,7 +479,7 @@ class TBAModel:
                 dtype=int,
             )
             candidates = base[None, :] + translations * shape[None, :kdim]
-            cartesian = candidates @ lattice
+            cartesian = (candidates + displacement) @ lattice
             distance_squared = np.einsum(
                 "ij,ij->i", cartesian, cartesian, optimize=True
             )
@@ -426,7 +505,7 @@ class TBAModel:
         config = self.config
         kdim = int(config.kdim)
         k_path, k_axis, high_sym_points = sample_fractional_band_path(
-            config.k_path, kdim
+            config.k_path, kdim, closed=getattr(config, "k_path_closed", True)
         )
 
         h_of_k = self._band_hamiltonian_factory(hoppings)
@@ -519,6 +598,10 @@ class TBAModel:
         for row in rows:
             key = tuple((row.tolist() + [0, 0, 0])[:3])
             value = hoppings.get(key)
+            if value is None:
+                opposite = hoppings.get(tuple(-component for component in key))
+                if opposite is not None:
+                    value = np.asarray(opposite).conj().T
             if value is None:
                 value = self.gen_hopping(key)
             selected.append(np.asarray(value, dtype=np.complex128))

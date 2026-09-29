@@ -37,6 +37,7 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.compute_backend == "python"
     assert cfg.integration_mode == "nodal"
     assert cfg.P_file == "./P.txt"
+    assert cfg.k_path_closed is True
     assert cfg.wannier_subspace == "T"
     assert cfg.invert_longitudinal_energies is False
     assert cfg.symmetry_report_file == "./sym.txt"
@@ -59,6 +60,12 @@ def test_load_incar_defaults_and_preprocess_without_external_data(tmp_path):
     assert cfg.symmetry_context.model.bloch_convention.sign == -1
     assert cfg.symmetry_context.model.bloch_convention == BlochConvention(-1)
     assert cfg.symmetry_context.model.boundary_tolerance == pytest.approx(1.0e-6)
+
+
+def test_load_config_open_k_path(tmp_path):
+    incar = tmp_path / "incar"
+    incar.write_text(_minimal_symmetry_incar() + "\nk_path_closed = false\n", encoding="utf-8")
+    assert load_config(incar).k_path_closed is False
 
 
 def test_ebr_subspace_dimension_two_and_fixed_band_slice(tmp_path):

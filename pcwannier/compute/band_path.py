@@ -8,8 +8,10 @@ import numpy as np
 def sample_fractional_band_path(
     k_path: Sequence[dict[str, Any]],
     dimension: int,
+    *,
+    closed: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, list[list[Any]]]:
-    """Sample an incar-style fractional k path with PCWannier's closure rule."""
+    """Sample a fractional k path, optionally adding a last-to-first segment."""
 
     points = tuple(k_path)
     if not points:
@@ -28,7 +30,7 @@ def sample_fractional_band_path(
         if not name:
             raise ValueError(f"k_path point {index} has no name.")
         high_symmetry_points.append([name, total])
-        if index == len(points) - 1 and closes_explicitly:
+        if index == len(points) - 1 and (not closed or closes_explicitly):
             break
         count = int(entry.get("num", 0))
         if count <= 0 or count != entry.get("num"):
@@ -45,7 +47,7 @@ def sample_fractional_band_path(
             )
         )
         total += count
-    if not closes_explicitly:
+    if closed and not closes_explicitly:
         high_symmetry_points.append([str(points[0]["name"]), total])
     return (
         np.vstack(path_parts),

@@ -6,7 +6,7 @@ from threading import Lock
 from pcwannier import BlochConvention
 from pcwannier.compute.gradient import Gradient
 from pcwannier.compute.context import CalculationContext
-from pcwannier.compute.band_path import periodically_equivalent_kpoint
+from pcwannier.compute.band_path import periodically_equivalent_kpoint, sample_fractional_band_path
 from pcwannier.compute.initializer import StateInitializer
 from pcwannier.compute.matrix import MSet
 from pcwannier.compute.parallel import (
@@ -16,6 +16,7 @@ from pcwannier.compute.parallel import (
     parallel_map,
     set_numba_parallel_allowed,
 )
+from pcwannier.compute.prepared import ProjectionSeed
 from pcwannier.compute.state import StateCollection
 from pcwannier.data import BandChannelReference, InputBundle, Mesh
 from pcwannier.matrix_io import save_cell_matrix
@@ -488,7 +489,7 @@ def test_band_neighbor_selection_does_not_change_complete_hopping_output():
 
     assert (-1, 0, 0) not in hoppings
     assert selected.shape == (1, 1, 1)
-    assert selected[0, 0, 0] == pytest.approx(-10.0)
+    assert selected[0, 0, 0] == pytest.approx(10.0)
     assert len(hoppings) >= 1 + len(TBAModel.R_half_rect(tba.state.k_shape))
 
 
@@ -586,6 +587,102 @@ def test_band_path_still_closes_distinct_endpoints():
     assert periodically_equivalent_kpoint(
         np.array([-0.5, 0.0]), np.array([0.5, 0.0])
     )
+
+
+def test_open_band_path_stops_at_last_point():
+    path = [
+        {"name": "G", "point": [0.0, 0.0, 0.0], "num": 20},
+        {"name": "X", "point": [0.5, 0.5, 0.0], "num": 20},
+        {"name": "K", "point": [0.375, 0.375, 0.75], "num": 20},
+    ]
+    points, axis, labels = sample_fractional_band_path(path, 3, closed=False)
+    assert points.shape == (41, 3)
+    assert np.allclose(points[-1], path[-1]["point"])
+    assert axis[-1] == 40
+    assert labels == [["G", 0], ["X", 20], ["K", 40]]
+
+
+@pytest.mark.parametrize("mesh_size", [2, 3, 4])
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_wigner_seitz_hoppings_reconstruct_shifted_k_mesh(mesh_size, sign):
+    rng = np.random.default_rng(717)
+    config = SimpleNamespace(
+        kdim=1, band_calc_num=2, neighbor=[], lattice_const=1.0,
+        real_lattice_vectors=np.eye(1), reciprocal_lattice_vectors=np.eye(1),
+    )
+    model = TBAModel.__new__(TBAModel)
+    model.config = config
+    model.state = SimpleNamespace(k_shape=(mesh_size,1,1),bloch_sign=sign,get_k_num=lambda:mesh_size)
+    model.threads = 1
+    kmesh = (np.arange(mesh_size)/mesh_size - 0.5 + 0.125)[:,None]
+    raw = rng.normal(size=(mesh_size,2,2)) + 1j*rng.normal(size=(mesh_size,2,2))
+    sampled = 0.5*(raw+raw.conj().transpose(0,2,1))
+    model._projected_k_hamiltonians = lambda:(model._kfrac_to_kcart(kmesh),sampled)
+    hops = model.collect_hoppings()
+    reconstructed = model._band_hamiltonian_factory(hops)(model._kfrac_to_kcart(kmesh))
+    assert np.allclose(reconstructed,sampled,rtol=0.0,atol=1e-12)
+
+
+@pytest.mark.parametrize("mesh_size", [2, 3])
+@pytest.mark.parametrize("shift", [0.0, 0.125])
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("second_center", [-0.5, 0.5])
+@pytest.mark.parametrize("neighbor", [[], [[-1]], [[1]]])
+def test_centered_hoppings_preserve_short_bonds_between_different_orbitals(
+    mesh_size, shift, sign, second_center, neighbor,
+):
+    # Two sites per cell with equal intracell/intercell bonds. On a two-point
+    # mesh R=+/-1 alias, but the orbital displacement chooses the correct bond.
+    config = SimpleNamespace(
+        kdim=1, band_calc_num=2, neighbor=[], lattice_const=1.0,
+        real_lattice_vectors=np.eye(1), reciprocal_lattice_vectors=np.eye(1),
+    )
+    model = TBAModel.__new__(TBAModel)
+    model.config = config
+    model.state = SimpleNamespace(k_shape=(mesh_size, 1, 1), bloch_sign=sign, get_k_num=lambda:mesh_size)
+    model.ctx = SimpleNamespace(gradient=SimpleNamespace(rn=np.array([[0.0,second_center]])))
+    model.threads = 1
+    kmesh = (np.arange(mesh_size)/mesh_size - 0.5 + shift)[:,None]
+
+    def exact(kfrac):
+        h = np.zeros((len(kfrac),2,2), dtype=complex)
+        h[:,0,1] = 1 + np.exp(-sign*2j*np.pi*np.sign(second_center)*kfrac[:,0])
+        h[:,1,0] = h[:,0,1].conj()
+        return h
+
+    model._projected_k_hamiltonians = lambda:(model._kfrac_to_kcart(kmesh), exact(kmesh))
+    hopping = model.collect_hoppings()
+    config.neighbor = neighbor
+    interpolate = model._band_hamiltonian_factory(hopping)
+    dense_k = np.linspace(-0.5,0.5,101)[:,None]
+    assert np.allclose(interpolate(model._kfrac_to_kcart(kmesh)),exact(kmesh),atol=1e-12)
+    assert np.allclose(interpolate(model._kfrac_to_kcart(dense_k)),exact(dense_k),atol=1e-12)
+
+
+@pytest.mark.parametrize("cell_shift", [(0, 0, 0), (1, -1, 0)])
+def test_centered_hoppings_recover_fcc_nearest_bonds_after_cell_relabeling(cell_shift):
+    lattice = np.array([[0.0,0.5,0.5],[0.5,0.0,0.5],[0.5,0.5,0.0]])
+    centers = np.array([[0.5,0.5,0.5],[0.0,0.5,0.5],[0.5,0.5,0.0],[0.5,0.0,0.5]])
+    centers[1] += cell_shift
+    images = np.stack(np.meshgrid(*[np.arange(-2,3)]*3,indexing="ij"),axis=-1).reshape(-1,3)
+    bonds = (images[:,None,None,:]+centers[None,None,:,:]-centers[None,:,None,:]) @ lattice
+    coefficients = np.isclose(np.sum(bonds**2,axis=-1),1.0/8.0,atol=1e-12).astype(complex)
+    coefficients[np.all(images==0,axis=1)] += 4*np.eye(4)
+
+    def exact(kfrac):
+        return np.einsum("kr,rab->kab",np.exp(2j*np.pi*(kfrac@images.T)),coefficients)
+
+    model = TBAModel.__new__(TBAModel)
+    model.config = SimpleNamespace(kdim=3,band_calc_num=4,neighbor=[],lattice_const=1.0,
+        real_lattice_vectors=lattice,reciprocal_lattice_vectors=np.linalg.inv(lattice).T)
+    model.state = SimpleNamespace(k_shape=(2,2,2),bloch_sign=1,get_k_num=lambda:8)
+    model.ctx = SimpleNamespace(gradient=SimpleNamespace(rn=(centers@lattice).T))
+    model.threads = 1
+    kmesh = np.stack(np.meshgrid(*[[-.5,0.0]]*3,indexing="ij"),axis=-1).reshape(-1,3)
+    model._projected_k_hamiltonians = lambda:(model._kfrac_to_kcart(kmesh),exact(kmesh))
+    interpolator = model._band_hamiltonian_factory(model.collect_hoppings())
+    dense_k = np.random.default_rng(1019).uniform(-.5,.5,size=(32,3))
+    assert np.allclose(interpolator(model._kfrac_to_kcart(dense_k)),exact(dense_k),rtol=0,atol=1e-12)
 
 
 def test_m0_orthogonal_transform_uses_conjugate_transpose():
@@ -867,6 +964,70 @@ def test_cached_v_must_contain_frozen_projector():
 
     with pytest.raises(ValueError, match="does not contain the frozen projector"):
         initializer._validate_cached_frozen_containment()
+
+
+def _longitudinal_frozen_initializer(tmp_path, cached, amat):
+    config = SimpleNamespace(
+        band_calc_num=2,
+        use_cached_data=cached,
+        inner_window=False,
+        wannier_subspace="T+L",
+        longitudinal_inner_window=np.array([0]),
+        projection_target_bindings=(object(),),
+        proj_binarize=False,
+        projection_rank_tolerance=1.0e-10,
+        A_file="A.txt",
+        V_file="V.txt",
+        input_path=lambda name: tmp_path / name,
+    )
+    state = SimpleNamespace(
+        config=config,
+        k_shape=(1, 1, 1),
+        E_idx=_object_grid([0, 1, 8]),
+        inner_E_idx=_object_grid([8]),
+        k_indices=lambda: iter(((0, 0, 0),)),
+        gen_matrix_on_kmesh=lambda factory: _object_grid(factory(0, 0, 0)),
+    )
+    matrices = _object_grid(np.asarray(amat, dtype=np.complex128))
+    if "A" in cached:
+        save_cell_matrix(tmp_path / "A.txt", matrices, state.k_shape)
+    return StateInitializer(state, None, projection_seed=ProjectionSeed(matrices))
+
+
+@pytest.mark.parametrize("cached", [[], ["A"]])
+@pytest.mark.parametrize("amat", [
+    [[1, 0], [0, 1], [0.2, 0]],
+    # The frozen auxiliary direction supplies the second direction even when
+    # the trial projection alone has rank one.
+    [[1, 0], [0, 0], [0, 0]],
+])
+def test_longitudinal_only_frozen_initialization_preserves_auxiliary_band(
+    tmp_path, cached, amat
+):
+    initializer = _longitudinal_frozen_initializer(tmp_path, cached, amat)
+
+    initializer.prepare()
+
+    frame = initializer.matV[0, 0, 0]
+    frozen = np.array([0, 0, 1], dtype=np.complex128)
+    assert np.allclose(frame.conj().T @ frame, np.eye(2), atol=1.0e-13)
+    assert np.allclose(frame @ frame.conj().T @ frozen, frozen, atol=1.0e-13)
+
+
+@pytest.mark.parametrize("contains_frozen", [False, True])
+def test_longitudinal_only_frozen_cache_is_validated(tmp_path, contains_frozen):
+    initializer = _longitudinal_frozen_initializer(
+        tmp_path, ["V"], [[1, 0], [0, 1], [0.2, 0]]
+    )
+    frame = np.eye(3, dtype=np.complex128)[:, [0, 2] if contains_frozen else [0, 1]]
+    save_cell_matrix(tmp_path / "V.txt", _object_grid(frame), (1, 1, 1))
+
+    if contains_frozen:
+        initializer.prepare()
+        assert np.allclose(initializer.matV[0, 0, 0], frame)
+    else:
+        with pytest.raises(ValueError, match="does not contain the frozen projector"):
+            initializer.prepare()
 
 
 @pytest.mark.parametrize(

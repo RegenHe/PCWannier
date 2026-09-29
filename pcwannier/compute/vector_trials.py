@@ -57,6 +57,74 @@ def _minimum_image_fractional(
     return best
 
 
+def _evaluate_periodic_trial(
+    trial,
+    record: ProjectionRecord3D,
+    fractional: np.ndarray,
+    lattice: np.ndarray,
+    periods: np.ndarray,
+    rotation: np.ndarray,
+    scale: float,
+    twist: np.ndarray,
+) -> np.ndarray:
+    """Evaluate tied boundary images with the BvK boundary character."""
+    reduced = _minimum_image_fractional(fractional, lattice, periods)
+
+    def evaluate(displacements):
+        return np.asarray(trial.evaluate(
+            ((displacements @ lattice) * scale) @ rotation,
+            record.frame,
+            scale,
+            StateBases.Radial,
+        ), dtype=np.complex128)
+
+    def image_phase(displacements, mask=None):
+        original = fractional if mask is None else fractional[mask]
+        images = np.rint((original - displacements) / periods[None, :])
+        return np.exp(2j * np.pi * (images @ twist))[:, None]
+
+    values = evaluate(reduced)
+    twisted = bool(np.any(twist))
+    if twisted:
+        values *= image_phase(reduced)
+    # On a Wigner-Seitz boundary a rotation can exchange equally near images.
+    # Their angular values need not agree (p orbitals can change sign). Average
+    # the function values over all tied images, never the displacements.
+    cartesian = reduced @ lattice
+    best_norm = np.einsum("pi,pi->p", cartesian, cartesian)
+    counts = np.ones(reduced.shape[0], dtype=np.int64)
+    nearest = np.floor(fractional / periods[None, :] + 0.5).astype(np.int64)
+    eps = 64.0 * np.finfo(float).eps
+    for offset in product((-1, 0, 1), repeat=periods.size):
+        candidate = fractional - (
+            nearest + np.asarray(offset, dtype=np.int64)[None, :]
+        ) * periods[None, :]
+        cartesian = candidate @ lattice
+        norm = np.einsum("pi,pi->p", cartesian, cartesian)
+        tied = np.abs(norm - best_norm) <= eps * np.maximum(1.0, best_norm)
+        same_image = np.all(np.abs(candidate - reduced) <= eps, axis=1)
+        tied &= ~same_image
+        if np.any(tied):
+            other_values = evaluate(candidate[tied])
+            if twisted:
+                other_values *= image_phase(candidate[tied], tied)
+            values[tied] += other_values
+            counts[tied] += 1
+    return values / counts[:, None]
+
+
+def _born_von_karman_twist(state, k_fractional=None) -> np.ndarray:
+    """Boundary character exp(2 pi i sign k_0 N) of a shifted k mesh."""
+    if k_fractional is None:
+        k_fractional = [float(axis[0]) for axis in state.config.k_points]
+    character = np.asarray(k_fractional) * np.asarray([
+        len(axis) for axis in state.config.k_points
+    ])
+    character = (character + 0.5) % 1.0 - 0.5
+    character[np.abs(character) < 1.0e-12] = 0.0
+    return state.bloch_sign * character
+
+
 @dataclass(frozen=True)
 class _PreparedTrialColumn:
     record: ProjectionRecord3D
@@ -68,6 +136,7 @@ class _PreparedTrialColumn:
     lattice: np.ndarray
     inverse_lattice: np.ndarray
     lattice_scale: float
+    bvk_twist: np.ndarray
 
 
 def _prepare_trial_column(state, record, orbit_point, trial) -> _PreparedTrialColumn:
@@ -93,6 +162,7 @@ def _prepare_trial_column(state, record, orbit_point, trial) -> _PreparedTrialCo
             np.asarray(state.config.real_lattice_vectors, dtype=float)
         ),
         lattice_scale=float(state.config.lattice_const),
+        bvk_twist=_born_von_karman_twist(state),
     )
 
 
@@ -109,17 +179,17 @@ def _evaluate_prepared_trial(
     displacement = points_cartesian - center[None, :]
     fractional = (displacement / scale) @ prepared.inverse_lattice
     period_values = np.asarray(periods, dtype=float)
-    fractional = _minimum_image_fractional(
+    values = _evaluate_periodic_trial(
+        prepared.trial,
+        prepared.record,
         fractional,
         lattice,
         period_values,
-    )
-    displacement = (fractional @ lattice) * scale
-    values = prepared.trial.evaluate(
-        displacement @ prepared.cartesian_rotation,
-        prepared.record.frame,
+        prepared.cartesian_rotation,
         scale,
-        StateBases.Radial,
+        # The character belongs to the resulting Bloch column. Compensate
+        # its conjugation by an antiunitary orbit representative below.
+        -prepared.bvk_twist if prepared.operation.antiunitary else prepared.bvk_twist,
     )
     if prepared.operation.antiunitary:
         values = state.maxwell.apply_time_reversal(values)
@@ -149,6 +219,7 @@ def _evaluate_transformed_trial(
     operation,
     *,
     supercell_periods=None,
+    supercell_twist=None,
 ) -> np.ndarray:
     center = _center_cartesian(state.config, center_fractional)
     displacement = points_cartesian - center[None, :]
@@ -162,22 +233,23 @@ def _evaluate_transformed_trial(
         # The trial lives on the finite Born-von Karman torus selected by the
         # k mesh. Use the Cartesian metric: component-wise wrapping is not a
         # symmetry-covariant nearest-image rule for skew primitive lattices.
-        fractional = _minimum_image_fractional(
-            fractional,
-            lattice,
-            periods,
-        )
-        displacement = (fractional @ lattice) * scale
     rotation = _cartesian_rotation(
         operation, state.config.real_lattice_vectors
     )
-    preimage_displacement = displacement @ rotation
-    values = trial.evaluate(
-        preimage_displacement,
-        record.frame,
-        float(state.config.lattice_const),
-        StateBases.Radial,
-    )
+    if supercell_periods is not None:
+        twist = (_born_von_karman_twist(state) if supercell_twist is None
+                 else np.asarray(supercell_twist))
+        values = _evaluate_periodic_trial(
+            trial, record, fractional, lattice, periods, rotation, scale,
+            -twist if operation.antiunitary else twist,
+        )
+    else:
+        values = trial.evaluate(
+            displacement @ rotation,
+            record.frame,
+            float(state.config.lattice_const),
+            StateBases.Radial,
+        )
     if operation.antiunitary:
         values = state.maxwell.apply_time_reversal(values)
     component_matrix = cartesian_field_matrix(
@@ -201,23 +273,39 @@ def _trial_representation(
     state,
     record: ProjectionRecord3D,
     target: WannierTargetRepresentation,
-) -> tuple[tuple[np.ndarray, ...], TrialCovarianceDiagnostics]:
+) -> tuple[tuple[np.ndarray, ...], TrialCovarianceDiagnostics, ProjectionRecord3D]:
     lattice = (
         np.asarray(state.config.real_lattice_vectors, dtype=float)
         * float(state.config.lattice_const)
     )
     radius = 0.35 * float(np.min(np.linalg.norm(lattice, axis=1)))
-    axis = np.linspace(-radius, radius, 9, dtype=float)
+    # A Cartesian cube has anisotropic fourth and higher moments, so it can
+    # falsely reject d/f bases under hexagonal or other non-cubic rotations.
+    # Gauss-Legendre in cos(theta) and a uniform azimuth integrate products of
+    # the finite spherical harmonics exactly on each radial shell.
+    max_l = max(orbital.l for trial in record.states for orbital in trial.orbitals)
+    angular_order = max(8, max_l + 1)
+    cos_theta, theta_weights = np.polynomial.legendre.leggauss(angular_order)
+    azimuth_count = 2 * angular_order + 1
+    azimuth = 2.0 * np.pi * np.arange(azimuth_count) / azimuth_count
+    radial_nodes, radial_weights = np.polynomial.legendre.leggauss(4)
+    radii = radius * (radial_nodes + 1.0) / 2.0
+    rr, zz, phi = np.meshgrid(radii, cos_theta, azimuth, indexing="ij")
+    sin_theta = np.sqrt(1.0 - zz**2)
     offsets = np.stack(
-        np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1
+        (rr * sin_theta * np.cos(phi), rr * sin_theta * np.sin(phi), rr * zz),
+        axis=-1,
     ).reshape(-1, 3)
+    weights = (
+        (radial_weights * radii**2)[:, None, None]
+        * theta_weights[None, :, None]
+        * np.ones((1, 1, azimuth.size))
+    ).reshape(-1)
+    weights /= np.sum(weights)
     points = _center_cartesian(state.config, record.frac_position)[None, :] + offsets
     identity = target.group.operations[target.group.identity_index]
-    # Site-irrep covariance is a local statement.  Sampling a primitive cell
-    # clips angular orbitals whenever q lies on its boundary and can report a
-    # false closure failure.  A deterministic Cartesian cloud around q tests
-    # the local angular/component action without introducing periodic-image
-    # ties; full Bloch-sum covariance is validated separately.
+    # Site-irrep covariance is local: keep the cloud centered at q rather than
+    # clipping it at primitive-cell boundaries or choosing periodic images.
     basis = np.stack(
         [
             _evaluate_transformed_trial(
@@ -232,6 +320,8 @@ def _trial_representation(
         ],
         axis=1,
     )
+    basis *= np.sqrt(weights)[:, None, None]
+    norms = np.sqrt(np.sum(np.abs(basis)**2, axis=(0, 2)))
     basis = _normalize_sample_columns(basis)
     flat_basis = basis.transpose(0, 2, 1).reshape(-1, len(record.states))
     gram = flat_basis.conj().T @ flat_basis
@@ -254,7 +344,9 @@ def _trial_representation(
             ],
             axis=1,
         )
-        transformed = _normalize_sample_columns(transformed)
+        # Use the same column scales for every operation. Renormalizing the
+        # transformed columns separately can hide a nonunitary representation.
+        transformed *= np.sqrt(weights)[:, None, None] / norms[None, :, None]
         flat_transformed = transformed.transpose(0, 2, 1).reshape(
             -1, len(record.states)
         )
@@ -288,7 +380,16 @@ def _trial_representation(
         max(max_closure, gram_error),
         transform,
     )
-    return changed_matrices, diagnostics
+    normalized_record = replace(
+        record,
+        states=tuple(
+            replace(trial, coefficients=tuple(
+                coefficient / norm for coefficient in trial.coefficients
+            ))
+            for trial, norm in zip(record.states, norms)
+        ),
+    )
+    return changed_matrices, diagnostics, normalized_record
 
 
 def _find_semilinear_basis_transform(
@@ -367,9 +468,11 @@ def prepare_vector_trial_targets(state, context):
         return context, ()
     replacements = {}
     diagnostics = []
+    prepared_bindings = []
     for binding in bindings:
         target = context.model.target(binding.target_name)
-        matrices, report = _trial_representation(state, binding.projection, target)
+        matrices, report, record = _trial_representation(state, binding.projection, target)
+        prepared_bindings.append(replace(binding, projection=record))
         diagnostics.append(report)
         if report.max_residual > state.config.symmetry_tolerance:
             message = (
@@ -398,6 +501,7 @@ def prepare_vector_trial_targets(state, context):
         )
     targets = tuple(replacements.get(target.name, target) for target in context.model.targets)
     model = replace(context.model, targets=targets)
+    state.config.projection_target_bindings = tuple(prepared_bindings)
     return build_symmetry_context(model, context.k_points), tuple(diagnostics)
 
 
@@ -484,6 +588,30 @@ def _vector_trial_columns(state, context):
             for trial in record.states:
                 columns.append((record, orbit_point, trial))
     return tuple(columns)
+
+
+def _trial_normalization_factors(norms, context) -> np.ndarray:
+    """Normalize each site-irrep block without changing its unitary action."""
+    norms = np.asarray(norms, dtype=float)
+    invalid = np.flatnonzero(~np.isfinite(norms) | (norms <= 0.0))
+    if invalid.size:
+        raise ValueError(
+            "3D projection Bloch sums have zero or non-finite norms at columns "
+            f"{invalid.tolist()}."
+        )
+    factors = np.empty(norms.size, dtype=float)
+    start = 0
+    for target in context.model.targets:
+        dimension = target.site_irrep.dimension
+        for _ in target.orbit.points:
+            stop = start + dimension
+            # D(g,k) can mix all columns in this block. Its scalar norm (the
+            # trace of the block Gram) is invariant, unlike its diagonal.
+            factors[start:stop] = 1.0 / np.sqrt(np.mean(norms[start:stop]))
+            start = stop
+    if start != norms.size:
+        raise ValueError(f"Trial normalization has {norms.size} columns, but target blocks contain {start}.")
+    return factors
 
 
 class VectorTrialFrameSource:
@@ -665,11 +793,14 @@ class VectorTrialFrameSource:
                     f"3D projection Bloch sums at k={index} have invalid norms "
                     f"in columns {invalid.tolist()}."
                 )
-            normalized_overlap = overlaps[index] / np.sqrt(norms[index])[None, :]
+            normalized_overlap = overlaps[index] * self.normalization_factors(norms[index])[None, :]
             matrices[index] = self.state.overlap_to_internal_basis(
                 index, normalized_overlap
             )
         return ProjectionSeed(matrices, source="streaming vector trial")
+
+    def normalization_factors(self, norms) -> np.ndarray:
+        return _trial_normalization_factors(norms, self.context)
 
 
 def build_vector_bloch_trial_source(
@@ -735,7 +866,7 @@ def build_vector_bloch_trial_grid(
                 "3D projection Bloch sums have zero or non-finite norms at "
                 f"k={index}, columns={invalid.tolist()}."
             )
-        values /= np.sqrt(norms)[None, :, None]
+        values *= source.normalization_factors(norms)[None, :, None]
     return output
 
 
@@ -777,6 +908,7 @@ def build_vector_bloch_trials(state, k_index, *, context=None) -> np.ndarray:
                 shifted_center,
                 operation,
                 supercell_periods=periods,
+                supercell_twist=_born_von_karman_twist(state, k_fractional),
             )
         columns.append(total)
     values = np.stack(columns, axis=1)
@@ -792,4 +924,4 @@ def build_vector_bloch_trials(state, k_index, *, context=None) -> np.ndarray:
             "3D projection Bloch sums have zero or non-finite norms at columns "
             f"{invalid.tolist()}."
         )
-    return values / np.sqrt(norms)[None, :, None]
+    return values * _trial_normalization_factors(norms, context)[None, :, None]

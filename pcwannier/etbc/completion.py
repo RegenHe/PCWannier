@@ -438,7 +438,11 @@ def _complete_transverse_bundle_streaming(
             raise ValueError(
                 f"ETBC trial frame at k={index} has invalid norms {raw_norms.tolist()}."
             )
-        normalization = np.diag(1.0 / np.sqrt(raw_norms))
+        normalize_trials = getattr(trial_source, "normalization_factors", None)
+        normalization = np.diag(
+            normalize_trials(raw_norms) if normalize_trials is not None
+            else 1.0 / np.sqrt(raw_norms)
+        )
         gram = _hermitian(normalization @ gram_raw @ normalization)
         trial_eigenvalues, trial_vectors = np.linalg.eigh(gram)
         scale = max(float(np.max(trial_eigenvalues)), np.finfo(float).tiny)

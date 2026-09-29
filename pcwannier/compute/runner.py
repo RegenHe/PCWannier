@@ -221,7 +221,7 @@ def _analyze_bundle_channel(
         )
     log_bloch_symmetry_analysis(analysis)
     stencil_count, stencil_bytes = provider.spatial_cache_info
-    LOGGER.debug(
+    LOGGER.info(
         "Spatial symmetry stencil cache: entries=%s size=%.1f MB",
         stencil_count,
         stencil_bytes / (1024.0 * 1024.0),
@@ -1030,21 +1030,10 @@ def _log_symmetry_gauge(result) -> None:
         result.residuals.max_path_consistency,
         result.residuals.max_semiunitarity_error,
     )
-    free = tuple(
-        diagnostic
-        for diagnostic in result.representative_diagnostics
-        if diagnostic.hom_dimension > 1 or diagnostic.target_commutant_dimension > 1
-    )
-    if free:
-        LOGGER.info(
-            "Symmetry gauge freedom: representatives=%s max_dim_Hom=%s max_commutant_dim=%s",
-            len(free),
-            max(diagnostic.hom_dimension for diagnostic in free),
-            max(diagnostic.target_commutant_dimension for diagnostic in free),
-        )
-        for diagnostic in free:
-            LOGGER.debug(
-                "Symmetry gauge representative %s: dim_Hom=%s commutant_dim=%s "
+    for diagnostic in result.representative_diagnostics:
+        if diagnostic.hom_dimension > 1 or diagnostic.target_commutant_dimension > 1:
+            LOGGER.info(
+                "Symmetry gauge representative %s: dim_Hom=%s residual_gauge_dimension=%s "
                 "iterations=%s residual=%.6g",
                 diagnostic.representative_index,
                 diagnostic.hom_dimension,

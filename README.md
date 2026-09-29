@@ -2,7 +2,7 @@
 
 [中文说明](README.zh.md)
 
-PCWannier is a Python program for constructing photonic-crystal Wannier tight-binding models from numerical eigenmode data. It currently targets two-dimensional Bloch datasets and can generate localized Wannier functions, hopping matrices, interpolated bands, and optional topology results.
+PCWannier constructs photonic-crystal Wannier tight-binding models from numerical eigenmode data. It supports two-dimensional Bloch datasets and vector fields on three-dimensional periodic grids, producing Wannier functions, hopping matrices and interpolated bands. Topology calculations currently apply to two dimensions.
 
 ## Installation
 

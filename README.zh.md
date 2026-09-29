@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-PCWannier 是一个根据数值本征模数据构造光子晶体 Wannier 紧束缚模型的 Python 程序。目前主要用于二维 Bloch 数据，可生成局域 Wannier 函数、hopping 矩阵、插值能带以及可选的拓扑计算结果。
+PCWannier 是一个根据数值本征模数据构造光子晶体 Wannier 紧束缚模型的 Python 程序。它支持二维 Bloch 数据和三维周期网格上的矢量场，可生成局域 Wannier 函数、hopping 矩阵和插值能带；拓扑计算目前用于二维情况。
 
 ## 安装
 

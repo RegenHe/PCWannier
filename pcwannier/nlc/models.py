@@ -25,7 +25,9 @@ class NLCSettings:
     mixing: float = 0.5
     rank_tolerance: float = 1.0e-6
     filter_candidates: bool = True
-    pin_gamma: bool = True
+    # Retain the false value for existing unpinned inputs and report readers.
+    # Gamma-shell pinning is no longer part of the completion algorithm.
+    pin_gamma: bool = False
 
     def __post_init__(self) -> None:
         for name in ("cutoff", "eta", "projector_tolerance", "rank_tolerance"):
@@ -46,6 +48,11 @@ class NLCSettings:
             self.pin_gamma, (bool, np.bool_)
         ):
             raise ValueError("NLC filter_candidates and pin_gamma must be booleans.")
+        if self.pin_gamma:
+            raise ValueError(
+                "NLC Gamma-shell pinning has been removed; "
+                "omit nlc_pin_gamma or set it to false."
+            )
 
     @classmethod
     def from_config(cls, config) -> NLCSettings:

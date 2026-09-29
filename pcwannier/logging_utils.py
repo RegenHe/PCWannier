@@ -5,7 +5,7 @@ import logging
 import sys
 
 
-DEFAULT_PROGRESS_INTERVAL = 25
+DEFAULT_PROGRESS_INTERVAL = 1
 
 
 def configure_logging(log_file: str | Path | None = "log.txt", level: int = logging.INFO) -> None:
@@ -37,7 +37,7 @@ def should_log_progress(
     finished: bool = False,
     interval: int = DEFAULT_PROGRESS_INTERVAL,
 ) -> bool:
-    """Return whether an iterative diagnostic belongs in the concise INFO log."""
+    """Log every iteration by default; callers may request a sparser interval."""
 
     if iteration <= 1 or finished:
         return True

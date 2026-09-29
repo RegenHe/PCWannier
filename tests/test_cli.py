@@ -90,6 +90,7 @@ def test_cli_orchestrates_calculation_and_interpolation_without_dataset(tmp_path
 
 
 def test_cli_cache_paths_and_base_mode_are_dataset_independent(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     cache_config = _config(tmp_path)
     loaded_configs = []
     monkeypatch.setattr(cli_module, "load_config", lambda path: cache_config)

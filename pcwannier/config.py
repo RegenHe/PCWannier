@@ -55,7 +55,7 @@ class IncarConfig:
     nlc_mixing: float = 0.5
     nlc_rank_tolerance: float = 1.0e-6
     nlc_filter_candidates: bool = True
-    nlc_pin_gamma: bool = True
+    nlc_pin_gamma: bool = False
     nlc_report_file: str | bool = "./nlc.json"
     longitudinal_band_window: np.ndarray | EnergyWindow | None = None
     longitudinal_inner_window: np.ndarray | EnergyWindow | bool = False

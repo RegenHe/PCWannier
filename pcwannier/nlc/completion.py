@@ -14,6 +14,7 @@ import scipy.linalg
 
 from ..conventions import BlochFieldRepresentation, SpatialDiscretization
 from ..data import BandChannelReference, InputBundle
+from ..logging_utils import should_log_progress
 from ..maxwell import FieldComponents, PrimaryField
 from ..symmetry.analysis import decompose_little_group_characters
 from ..symmetry.field_action import cartesian_field_matrix
@@ -26,14 +27,6 @@ LOGGER = logging.getLogger(__name__)
 def hermitian(a):
     """Remove roundoff before Hermitian eigendecompositions."""
     return (a + a.conj().T) / 2
-
-
-def basis(a, tolerance=1e-10):
-    """Orthonormal basis after removing any pinned representation."""
-    if not a.size:
-        return a
-    u, s, _ = scipy.linalg.svd(a, full_matrices=False)
-    return u[:, s > tolerance * max(s[0], 1.)]
 
 
 class NeighborLongitudinalCompletion:
@@ -62,7 +55,6 @@ class NeighborLongitudinalCompletion:
         self.nt = len(state.E_idx[(0, 0, 0)])
         self.nl = self.cfg.band_calc_num - self.nt
         self.cutoff = settings.cutoff
-        self.pin_gamma = settings.pin_gamma
         self.stars = build_symmetry_stars(self.context)
         self.shape = tuple(state.mesh.shape)
         self.points = int(np.prod(self.shape))
@@ -153,7 +145,6 @@ class NeighborLongitudinalCompletion:
                 source_full = np.ravel_multi_index((compact_g % np.asarray(self.shape)).T, self.shape)
                 neighbors.append((j, seam, source_compact, source_full))
             self.neighbors.append(neighbors)
-        self.nearest_radius = np.min(np.linalg.norm(self.k @ self.reciprocal, axis=1)[np.arange(self.count) != self.gamma])
         self.star_data = []
         self.representation_reports = []
         self.prepare_representations()
@@ -167,7 +158,7 @@ class NeighborLongitudinalCompletion:
         self.metadata = {'source': str(self.cfg.name), 'T_dimension': self.nt, 'L_dimension': self.nl,
                          'T_input_normalization_error': normalization_error, 'L_cartesian_cutoff_in_reciprocal_units': self.cutoff,
                          'neighbor_directions': self.directions.tolist(), 'neighbor_weights': self.weights.tolist(),
-                         'Gamma_constant_pin': self.pin_gamma, 'source_T_subspace_unchanged': True,
+                         'Gamma_constant_pin': False, 'source_T_subspace_unchanged': True,
                          'representations': self.representation_reports}
         self.filtered_candidates = None
         if settings.filter_candidates:
@@ -345,21 +336,6 @@ class NeighborLongitudinalCompletion:
                 raise ValueError(f'NLC target/T representation dimensions disagree at k={self.k[i]}.')
             active = self.active[i]
             d = len(active)
-            pinned = np.zeros((d, 0), complex)
-            if self.pin_gamma and i != self.gamma and np.linalg.norm(self.k[i] @ self.reciprocal) <= self.nearest_radius + 1e-10:
-                pinned = np.zeros((d, 1), complex)
-                pinned[np.flatnonzero(active == self.zero_g)[0], 0] = 1.
-                pin_characters = {}
-                for name, (destination, phase) in zip(resolved.table.operation_names, actions):
-                    mapped = np.zeros_like(pinned)
-                    mapped[destination] = pinned * phase[:, None]
-                    pin_characters[name] = complex(np.vdot(pinned, mapped))
-                pin_decomposition = decompose_little_group_characters(resolved, pin_characters)
-                if pin_decomposition.max_residual >= 1e-8:
-                    raise ValueError(f'NLC Gamma pin does not form a little-group representation at k={self.k[i]}.')
-                needed = {name: count - pin_decomposition.multiplicities[name] for name, count in needed.items()}
-                if any(count < 0 for count in needed.values()):
-                    raise RuntimeError(f'Gamma longitudinal pin conflicts with target at {self.k[i]}: {needed}')
             blocks = []
             for irrep in resolved.require_irreps():
                 count = needed[irrep.name] * irrep.dimension
@@ -373,16 +349,14 @@ class NeighborLongitudinalCompletion:
                     raise ValueError(f'NLC irrep projector is inconsistent at k={self.k[i]} / {irrep.name}.')
                 ev, vectors = np.linalg.eigh(central)
                 isotypic = vectors[:, ev > .5]
-                if pinned.shape[1]:
-                    isotypic = basis(isotypic - pinned @ (pinned.conj().T @ isotypic))
                 if isotypic.shape[1] < count:
                     raise RuntimeError(f'L Fourier space lacks {irrep.name} at {self.k[i]}')
                 blocks.append((irrep.name, irrep.dimension, count, isotypic))
-            self.star_data.append((star, actions, pinned, blocks))
+            self.star_data.append((star, actions, blocks))
             self.representation_reports.append({'k': self.k[i].tolist(), 'T_or_Gamma_fixed_irreps': decomposition_t.multiplicities,
                  'target_irreps': decomposition_target.multiplicities, 'variable_L_irreps': needed,
                  'T_character_rounding_error': decomposition_t.max_residual,
-                 'Gamma_low_L_pinned': bool(pinned.shape[1]), 'L_basis_dimension': d})
+                 'Gamma_low_L_pinned': False, 'L_basis_dimension': d})
 
     def l_vectors(self, i, ell):
         values = self.qhat[i, :, :, None] * ell[i, :, None, :]
@@ -428,7 +402,7 @@ class NeighborLongitudinalCompletion:
         return z
 
     def select(self, data, z, old=None, mixing=1., initial=False):
-        star, actions, pinned, blocks = data
+        star, actions, blocks = data
         i = star.representative_flat_index
         active = self.active[i]
         averaged = np.zeros_like(z)
@@ -439,7 +413,7 @@ class NeighborLongitudinalCompletion:
             eigvals_only=True, check_finite=False)[0]), 1e-12)
         if old is not None:
             z = mixing * z + (1-mixing) * (old @ old.conj().T) * covariance_scale
-        columns = [pinned] if pinned.shape[1] else []
+        columns = []
         diagnostics = []
         for label, dimension, count, isotypic in blocks:
             reduced = hermitian(isotypic.conj().T @ z @ isotypic)
@@ -546,9 +520,12 @@ class NeighborLongitudinalCompletion:
             representatives = proposed
             value = new_value
             history.append({'iteration': iteration, 'cost': value, 'projector_change': change, 'mixing': mixing})
-            if iteration <= 5 or iteration % 10 == 0:
-                LOGGER.info('NLC iter %d cost=%.12g projector_change=%.6g mixing=%.6g', iteration, value, change, mixing)
-            if decrease <= self.settings.cost_tolerance and change <= self.settings.projector_tolerance:
+            finished = decrease <= self.settings.cost_tolerance and change <= self.settings.projector_tolerance
+            log = LOGGER.info if should_log_progress(
+                iteration, total=self.settings.max_iterations, finished=finished
+            ) else LOGGER.debug
+            log('NLC iter %d cost=%.12g projector_change=%.6g mixing=%.6g', iteration, value, change, mixing)
+            if finished:
                 converged = True
                 break
         if not all(history[i]['cost'] <= history[i-1]['cost'] + 1e-9 for i in range(1, len(history))):

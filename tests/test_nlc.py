@@ -187,6 +187,47 @@ def test_nlc_uses_projectors_not_input_eigenvector_gauge(bundle):
         assert np.allclose(overlap.conj().T @ overlap, np.eye(1), atol=1e-9)
 
 
+def test_nearest_gamma_longitudinal_field_is_optimized_with_nonzero_g(bundle):
+    """Inhomogeneous, curl-free completion may vary on the nearest Gamma shell.
+
+    The two synthetic T modes remain exactly divergence-free and orthonormal.
+    Neighboring T frames carry an additional Fourier harmonic, so forcing the
+    nearest-Gamma L to be constant would discard the candidate's spatial form.
+    """
+    config = copy(bundle.config)
+    config.nlc_max_iter = 0
+    phase = np.exp(2j*np.pi*bundle.mesh.fractional_vertices[:, 0])
+    fields = np.empty(bundle.fields.shape, dtype=object)
+    for index in np.ndindex(bundle.fields.shape):
+        k = np.asarray([config.k_points[axis][index[axis]] for axis in range(3)])
+        fields[index] = bundle.fields[index].copy()
+        if np.linalg.norm(k) > 1e-12:
+            _, _, vh = np.linalg.svd((k + [1, 0, 0])[None], full_matrices=True)
+            harmonic = phase[None, :, None] * vh[1:, None, :]
+            fields[index] = np.sqrt(1-.45**2)*fields[index] + .45*harmonic
+    state = _state(replace(bundle, config=config, fields=fields))
+    with threadpool_limits(limits=1):
+        completed = prepare_longitudinal_bundle(state)
+    gamma = (2, 2, 2)
+    nearest = (2, 3, 2)
+    longitudinal = completed.augmented_bundle.fields[nearest][2]
+    fourier = np.fft.fftn(longitudinal.reshape(bundle.mesh.shape+(3,)), axes=(0, 1, 2))
+    fourier /= bundle.mesh.point_count
+    nonconstant = fourier.copy()
+    nonconstant[0, 0, 0] = 0
+    assert np.sum(abs(nonconstant)**2) > 1e-6
+    assert np.allclose(completed.augmented_bundle.fields[gamma].std(axis=1), 0, atol=1e-12)
+    assert np.allclose(completed.augmented_bundle.base_hamiltonians[gamma], 0, atol=1e-12)
+    assert completed.result.diagnostics["L_curl_error_in_2pi_units"] < 1e-12
+    assert not completed.result.settings.pin_gamma
+    assert not completed.result.diagnostics["Gamma_constant_pin"]
+    assert not any(item["Gamma_low_L_pinned"] for item in completed.result.diagnostics["representations"])
+    for index in np.ndindex(bundle.fields.shape):
+        assert np.array_equal(completed.augmented_bundle.fields[index][:2], fields[index])
+        gram = state.inner_product.overlap(completed.augmented_bundle.fields[index], completed.augmented_bundle.fields[index])
+        assert np.allclose(gram, np.eye(3), atol=1e-10)
+
+
 def test_rank_zero_gamma_candidate_uses_gradient_fallback_and_eta_scales_only_energies(bundle):
     config = copy(bundle.config)
     config.band_calc_num = 4
@@ -273,6 +314,7 @@ def test_nlc_main_pipeline_and_json_output(bundle, tmp_path):
     ("nlc_max_iter = 1.5", "non-negative integer"),
     ("nlc_max_iter = -1", "non-negative integer"),
     ("nlc_filter_candidates = maybe", "Boolean incar"),
+    ("nlc_pin_gamma = true", "Gamma-shell pinning has been removed"),
     ("inner_window = 0:1", "freezes all selected"),
     ("gamma_zero_regularization = true", "must be false for NLC"),
     ("symmetry_constrained = false", "sewing constraints"),
@@ -310,3 +352,15 @@ def test_nlc_clears_file_channels_and_cache_overrides(tmp_path):
     assert cfg.invert_longitudinal_energies is False and cfg.use_cached_data == []
     overridden = _apply_run_options(cfg, RunOptions(None, True, False, None))
     assert overridden.use_cached_data == []
+
+
+def test_legacy_unpinned_configuration_matches_current_default(tmp_path):
+    path = tmp_path / "incar"
+    path.write_text(_incar_text(), encoding="utf-8")
+    current = NLCSettings.from_config(load_config(path))
+    path.write_text(_incar_text("nlc_pin_gamma = false"), encoding="utf-8")
+    legacy = NLCSettings.from_config(load_config(path))
+    assert legacy == current
+    assert not current.pin_gamma
+    with pytest.raises(ValueError, match="Gamma-shell pinning has been removed"):
+        NLCSettings(pin_gamma=True)

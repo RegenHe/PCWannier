@@ -1,3 +1,5 @@
+from itertools import product
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,7 +9,8 @@ from pcwannier.matrix_io import (
     load_cell_matrix,
     save_cell_matrix,
 )
-from pcwannier.outputs import write_outputs
+from pcwannier.compute.tba import TBAModel
+from pcwannier.outputs import save_hoppings, write_outputs
 
 
 def test_cell_matrix_roundtrip_preserves_ragged_cells(tmp_path):
@@ -94,3 +97,48 @@ def test_write_outputs_writes_raw_s_in_shared_cell_format(tmp_path):
     assert np.allclose(
         loaded_projector[0, 0, 0], projector[0, 0, 0]
     )
+
+
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_hopping_text_restores_old_cell_order_and_preserves_off_mesh_hamiltonian(tmp_path, sign):
+    # Includes both sides of the even-mesh boundary. They must remain distinct
+    # exact displacements even though their FFT residues can coincide.
+    rng = np.random.default_rng(104)
+    keys = [(0, 0, 0)] + [
+        key for key in product(range(-2, 3), repeat=3)
+        if key < tuple(-value for value in key)
+    ]
+    data = {
+        key: (rng.integers(-20, 21, (2, 2)) + 1j * rng.integers(-20, 21, (2, 2))) / 16
+        for key in keys
+    }
+    data[(0, 0, 0)] = np.diag([1.0, 2.0])
+    path = tmp_path / "hopping.txt"
+    save_hoppings(path, data, (4, 4, 4))
+
+    loaded = {}
+    current = None
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines() + [""]:
+        if line.startswith("CELL("):
+            current = tuple(int(value) for value in re.match(r"CELL\(([^)]+)\)", line)[1].split(","))
+            rows = []
+        elif current is not None and line.strip():
+            rows.append([complex(value.replace(" ", "")) for value in line.split(",")])
+        elif current is not None:
+            loaded[current] = np.asarray(rows)
+            current = None
+
+    old_order = [(0, 0, 0)] + [tuple(row) for row in TBAModel.R_half_rect((4, 4, 4))]
+    assert list(loaded)[:len(old_order)] == old_order
+    assert len(loaded) == len(data) == 63
+    assert list(data) == keys
+    model = TBAModel.__new__(TBAModel)
+    model.config = SimpleNamespace(
+        kdim=3, band_calc_num=2, neighbor=[], real_lattice_vectors=np.eye(3), lattice_const=1.0,
+    )
+    model.state = SimpleNamespace(k_shape=(4, 4, 4), bloch_sign=sign)
+    queries = rng.uniform(-np.pi, np.pi, (47, 3))
+    before = model._band_hamiltonian_factory(data)(queries)
+    after = model._band_hamiltonian_factory(loaded)(queries)
+    assert np.allclose(before, after, rtol=0, atol=1e-12)

@@ -517,8 +517,7 @@ def localize_symmetry_constrained(
         ) else LOGGER.debug
         log(
             "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
-            "max_gradient_norm=%s symmetry_max=%s symmetry_mean=%s unitarity=%s path=%s "
-            "accepted_step=%s backtracks=%s min_abs_diagonal=%s worst_diagonal=%s",
+            "max_gradient_norm=%s symmetry_max=%s symmetry_mean=%s unitarity=%s path=%s epsilon=%s",
             iteration,
             total,
             float(gradient.omega[0]),
@@ -530,6 +529,12 @@ def localize_symmetry_constrained(
             report.mean_residual,
             report.max_semiunitarity_error,
             report.max_path_consistency,
+            line_search.trial_step,
+        )
+        LOGGER.debug(
+            "gradient line search iter %s accepted_step=%s backtracks=%s "
+            "min_abs_diagonal=%s worst_diagonal=%s",
+            iteration,
             line_search.trial_step,
             line_search.backtracking_steps,
             line_search.diagnostics.min_abs_diagonal,

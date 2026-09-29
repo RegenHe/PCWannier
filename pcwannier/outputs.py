@@ -101,6 +101,48 @@ def save_dict(filename: str | Path, data: dict) -> None:
             handle.write("\n")
 
 
+def _ordered_hoppings(data: dict, k_shape: tuple[int, ...]) -> dict:
+    """Present independent R/-R pairs in the historical FFT-cell order.
+
+    Keep every Wigner-Seitz image, including images outside the old half grid.
+    Reversing a bond requires its Hermitian conjugate; folding R modulo the
+    mesh would change the Hamiltonian between sampled k points.
+    """
+    shape = tuple(int(value) for value in k_shape)
+
+    def legacy_cell(key):
+        residues = tuple(value % size for value, size in zip(key, shape))
+        negative = tuple((-value) % size for value, size in zip(residues, shape))
+        signed = tuple(
+            value if value <= size // 2 else value - size
+            for value, size in zip(residues, shape)
+        )
+        return key == (signed + (0, 0, 0))[:3] and residues <= negative
+
+    oriented = {}
+    for key, value in data.items():
+        key = tuple(int(component) for component in key)
+        negative = tuple(-component for component in key)
+        reverse = not legacy_cell(key) and (
+            legacy_cell(negative) or next((v for v in key if v), 0) < 0
+        )
+        if reverse:
+            key, value = negative, np.asarray(value).conj().T
+        if key in oriented:
+            raise ValueError("Hopping output expects one representative per R/-R pair.")
+        oriented[key] = value
+
+    def order(key):
+        residues = tuple(value % size for value, size in zip(key, shape))
+        return (not legacy_cell(key), residues, key)
+
+    return {key: oriented[key] for key in sorted(oriented, key=order)}
+
+
+def save_hoppings(filename: str | Path, data: dict, k_shape: tuple[int, ...]) -> None:
+    save_dict(filename, _ordered_hoppings(data, k_shape))
+
+
 def save_vector_wanniers(filename: str | Path, result: RunResult) -> None:
     """Write 3D vector Wannier fields as coordinates and complex components."""
 
@@ -757,7 +799,9 @@ def write_outputs(result: RunResult, config: IncarConfig | None = None, out_dir:
     hopping_path = _resolve_output(config.hopping_file, config, out_dir)
     if hopping_path is not None:
         with timed_step("write hopping", LOGGER, file=hopping_path, count=len(result.hoppings)):
-            save_dict(hopping_path, result.hoppings)
+            save_hoppings(
+                hopping_path, result.hoppings, tuple(len(axis) for axis in config.k_points)
+            )
 
     wannier_path = _resolve_output(config.wannier_file, config, out_dir)
     if wannier_path is not None:

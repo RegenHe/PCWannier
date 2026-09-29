@@ -119,8 +119,7 @@ class Gradient:
             ) else LOGGER.debug
             log(
                 "gradient iter %s omega=%s omega_I=%s omega_OD=%s omega_D=%s err=%s "
-                "max_gradient_norm=%s accepted_step=%s backtracks=%s min_abs_diagonal=%s "
-                "worst_diagonal=%s",
+                "max_gradient_norm=%s epsilon=%s",
                 iteration,
                 total,
                 float(self.omega[0]),
@@ -128,6 +127,12 @@ class Gradient:
                 float(self.omega[2]),
                 err,
                 gradient_norm,
+                line_search.trial_step,
+            )
+            LOGGER.debug(
+                "gradient line search iter %s accepted_step=%s backtracks=%s "
+                "min_abs_diagonal=%s worst_diagonal=%s",
+                iteration,
                 line_search.trial_step,
                 line_search.backtracking_steps,
                 line_search.diagnostics.min_abs_diagonal,
